@@ -327,6 +327,7 @@ struct air_tr {
    nir_shader *nir;
    nir_function_impl *impl;
    nir_builder b;     /* the instruction being translated */
+   bool math_fast;    /* the air.* math call being translated is a fast_ one (air_float_function) */
    nir_builder top;   /* the start of the shader: arguments, builtins, constants */
 
    struct hash_table *values;   /* LLVMValueRef -> struct air_val */
@@ -1292,6 +1293,7 @@ struct air_arg {
    const char *arg_name;   /* air.arg_name */
    bool flat, no_perspective, centroid, at_sample;   /* a fragment input's interpolation */
    bool raster_order_group;
+   bool sized;             /* air.buffer_size: a block of a fixed size, not an array the data indexes */
 };
 
 static struct air_arg
@@ -1353,6 +1355,8 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
          air_md_int(ops[k + 1], &a.align);
       else if (!strcmp(key, "air.arg_type_size"))
          air_md_int(ops[k + 1], &a.size);
+      else if (!strcmp(key, "air.buffer_size"))
+         a.sized = true;
    }
    /* OpenCL's by-value constant arguments are constant buffers at their index */
    if (!strcmp(a.kind, "air.constant")) {
@@ -1777,6 +1781,88 @@ air_store_outputs(struct air_tr *t, LLVMValueRef value)
    }
 }
 
+/* Whether v depends on data read from memory or a texture (a load, a texture read, an atomic, a call that is not math),
+ * as opposed to constants, arguments (built-ins, stage inputs, buffer pointers) and arithmetic on them: the
+ * translator's test (translator/wrapper/src/buffer_addresses.rs data_dependent). insts holds the function's
+ * instructions; out of budget is taken as data. */
+static bool air_starts(const char *s, const char *prefix);
+
+static bool
+air_data_dependent(struct air_tr *t, struct set *insts, struct set *seen, LLVMValueRef v, unsigned *budget)
+{
+   if (!v || !_mesa_set_search(insts, v) || _mesa_set_search(seen, v))
+      return false;
+   _mesa_set_add(seen, v);
+   if (!*budget)
+      return true;
+   (*budget)--;
+   switch (L.LLVMGetInstructionOpcode(v)) {
+   case OP_LOAD:
+      return true;
+   case OP_CALL: {
+      LLVMValueRef callee = L.LLVMGetCalledValue(v);
+      const char *name = callee && L.LLVMIsAFunction(callee) ? air_name(callee, NULL) : "";
+      if (strstr(name, "texture") || strstr(name, "atomic") || strstr(name, "sample") || strstr(name, "gather") ||
+          (!air_starts(name, "air.") && !air_starts(name, "llvm.")))
+         return true;
+      for (unsigned i = 0; i < L.LLVMGetNumArgOperands(v); i++)
+         if (air_data_dependent(t, insts, seen, L.LLVMGetOperand(v, i), budget))
+            return true;
+      return false;
+   }
+   default:
+      for (int i = 0; i < L.LLVMGetNumOperands(v); i++)
+         if (air_data_dependent(t, insts, seen, L.LLVMGetOperand(v, i), budget))
+            return true;
+      return false;
+   }
+}
+
+/* A vertex or fragment function that indexes a buffer argument holding an array (no air.buffer_size) with a value
+ * read from memory is refused: the translator keeps such a buffer a descriptor (buffer_addresses.rs kept_roots), which
+ * the device bounds-checks for graphics pipelines (robustBufferAccess), because the data may point past its end (a
+ * light list, a froxel grid) and a read there through the buffer's address is an MMU fault that takes the device away.
+ * The road reads every buffer through its address, so such a function takes the SPIR-V road. Compute pipelines are not
+ * bounds-checked on either road. */
+static void
+air_refuse_unchecked_indexing(struct air_tr *t, const struct air_arg *args, unsigned n)
+{
+   if (t->stage == NVMTL_AIR_NIR_STAGE_KERNEL)
+      return;
+   struct set *roots = _mesa_pointer_set_create(t->mem), *insts = _mesa_pointer_set_create(t->mem);
+   for (unsigned i = 0; i < n; i++)
+      if (args[i].kind && !strcmp(args[i].kind, "air.buffer") && !args[i].sized && args[i].param)
+         _mesa_set_add(roots, args[i].param);
+   if (!roots->entries)
+      return;
+   for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(t->function); bb; bb = L.LLVMGetNextBasicBlock(bb))
+      for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i))
+         _mesa_set_add(insts, i);
+   set_foreach(insts, e) {
+      LLVMValueRef gep = (LLVMValueRef)e->key;
+      if (L.LLVMGetInstructionOpcode(gep) != OP_GEP)
+         continue;
+      /* the buffer the address is in: through GEPs and casts of pointers back to the argument */
+      LLVMValueRef base = L.LLVMGetOperand(gep, 0);
+      for (unsigned d = 0; d < 32 && base && _mesa_set_search(insts, base); d++) {
+         const int op = L.LLVMGetInstructionOpcode(base);
+         if (op != OP_GEP && op != OP_BITCAST && op != OP_ADDRSPACECAST)
+            break;
+         base = L.LLVMGetOperand(base, 0);
+      }
+      if (!base || !_mesa_set_search(roots, base))
+         continue;
+      for (int k = 1; k < L.LLVMGetNumOperands(gep); k++) {
+         unsigned budget = 512;
+         struct set *seen = _mesa_pointer_set_create(t->mem);
+         if (air_data_dependent(t, insts, seen, L.LLVMGetOperand(gep, k), &budget))
+            unsupported(t, "a buffer of the %s function is indexed with a value read from memory or a texture: the "
+                        "SPIR-V road keeps that buffer bounds-checked (robustBufferAccess), and a read past its end "
+                        "through its address is a GPU fault", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment");
+      }
+   }
+}
+
 /* Buffers read their address from the table, builtins from the system values; threadgroup arguments take the
  * first bytes of threadgroup memory, in index order, at the lengths the request gives, and the kernel's static
  * threadgroup variables follow them as the instructions meet them. */
@@ -1874,6 +1960,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          unsupported(t, "parameter %u of the function has no description in its metadata", p);
    }
    air_assign_static_samplers(t);
+   air_refuse_unchecked_indexing(t, args, n);
    if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)
       air_bind_outputs(t);
 }
@@ -1959,6 +2046,93 @@ air_fcmp(struct air_tr *t, int pred, nir_def *x, nir_def *y)
    }
 }
 
+
+/* min and max as the translator makes them (passes/air_calls/bfloat_glsl.rs nan_aware_if_precise): air.fmin, air.min,
+ * air.clamp ... and llvm.minnum/maxnum are GLSL's NMin/NMax/NClamp, NaN-aware (the operand that is a number), and
+ * spirv_to_nir keeps NaN and infinities for them; the fast_ ones are FMin/FMax/FClamp, which keep infinities only. The
+ * builder's fast math would otherwise let NIR take either operand for a number. */
+static nir_def *
+air_fminmax(nir_builder *b, bool fast, bool max, nir_def *x, nir_def *y)
+{
+   const uint32_t save = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_preserve_inf | (fast ? 0 : nir_fp_preserve_nan);
+   nir_def *r = max ? nir_fmax(b, x, y) : nir_fmin(b, x, y);
+   b->fp_math_ctrl = save;
+   return r;
+}
+
+/* Metal's round, half away from zero, as the translator makes it (float_imageblock.rs lower_metal_round): the
+ * truncation plus one toward the sign when the remainder reaches a half; a half is rounded in float. sign(x) *
+ * floor(|x| + 0.5) rounded 0.49999997 to 1 and 2^23 + 1 to 2^23 + 2, as the sum rounds. */
+static nir_def *
+air_metal_round(nir_builder *b, nir_def *x)
+{
+   nir_def *w = x->bit_size == 32 ? x : nir_f2f32(b, x);
+   nir_def *tr = nir_ftrunc(b, w), *rem = nir_fsub(b, w, tr);
+   nir_def *adj = nir_bcsel(b, nir_fge_imm(b, rem, 0.5), nir_imm_float(b, 1.0),
+                            nir_bcsel(b, nir_fle_imm(b, rem, -0.5), nir_imm_float(b, -1.0), nir_imm_float(b, 0.0)));
+   nir_def *r = nir_fadd(b, tr, adj);
+   return x->bit_size == 32 ? r : nir_f2fN(b, r, x->bit_size);
+}
+
+/* Metal's pow (air.pow and air.fast_pow; not powr, which is for bases of at least 0) as the translator makes it
+ * (rawbyte_unary.rs lower_metal_pow), in float: |x|^y, negated for a negative base (or -0) and an odd integer exponent;
+ * 1 for a base of +-1 and an exponent that is not finite; NaN for a finite negative base and an exponent that is not an
+ * integer; 1 for an exponent of 0. NIR's fpow alone is exp2(y * log2(x)), NaN for every negative base. */
+static nir_def *
+air_metal_pow(nir_builder *b, nir_def *x0, nir_def *y0)
+{
+   nir_def *x = x0->bit_size == 32 ? x0 : nir_f2f32(b, x0), *y = y0->bit_size == 32 ? y0 : nir_f2f32(b, y0);
+   nir_def *ax = nir_fabs(b, x), *m = nir_fpow(b, ax, y);
+   nir_def *integral = nir_feq(b, y, nir_ftrunc(b, y));
+   nir_def *odd = nir_iand(b, integral, nir_fneu(b, nir_fmul_imm(b, nir_ftrunc(b, nir_fmul_imm(b, y, 0.5)), 2.0), y));
+   nir_def *neg = nir_flt_imm(b, x, 0.0);
+   nir_def *neg_zero = nir_iand(b, nir_feq_imm(b, ax, 0.0), nir_ilt_imm(b, x, 0));
+   nir_def *r = nir_bcsel(b, nir_iand(b, nir_ior(b, neg, neg_zero), odd), nir_fneg(b, m), m);
+   nir_def *inf = nir_imm_float(b, INFINITY);
+   r = nir_bcsel(b, nir_iand(b, nir_feq_imm(b, ax, 1.0), nir_inot(b, nir_flt(b, nir_fabs(b, y), inf))), nir_imm_float(b, 1.0), r);
+   r = nir_bcsel(b, nir_iand(b, nir_iand(b, neg, nir_fneu(b, ax, inf)), nir_inot(b, integral)), nir_imm_float(b, NAN), r);
+   r = nir_bcsel(b, nir_feq_imm(b, y, 0.0), nir_imm_float(b, 1.0), r);
+   return x0->bit_size == 32 ? r : nir_f2fN(b, r, x0->bit_size);
+}
+
+/* A float narrowed to a half, exact as the translator marks it (finalize.rs exact_narrowing_float_conversions,
+ * NoContraction): NIR does not fold it into the arithmetic around it */
+static nir_def *
+air_f2f16(nir_builder *b, nir_def *x)
+{
+   const uint32_t save = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_exact;
+   nir_def *r = nir_f2f16_rtne(b, x);
+   b->fp_math_ctrl = save;
+   return r;
+}
+
+/* x != x, kept as a NaN test: the builder makes fast-math instructions (nir_fp_fast_math), and with NaN not preserved
+ * NIR may take x for a number and the test for false (nir_search_helpers.h is_a_number), as spirv_to_nir keeps
+ * OpIsNan with nir_fp_preserve_nan */
+static nir_def *
+air_fisnan(nir_builder *b, nir_def *x)
+{
+   const uint32_t save = b->fp_math_ctrl;
+   b->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
+   nir_def *r = nir_fneu(b, x, x);
+   b->fp_math_ctrl = save;
+   return r;
+}
+
+/* A float converted to an integer as Metal converts it and as the translator does (passes/finalize.rs
+ * metal_nan_to_zero_conversions): a NaN gives 0. NAK's F2I gives the type's minimum (0x80000000) for a NaN, and as a
+ * buffer index that is an address 2 GiB below the buffer: CoreAnimation's buffer_image_blit_frag_lpf reads one byte at
+ * int(x + offset + y * bpr) and faulted the GPU (Xid 31) in Terminal on the first NaN. A value out of range clamps to
+ * the type's limit as F2I clamps it, as on the SPIR-V road. */
+static nir_def *
+air_f2int(nir_builder *b, nir_def *x, unsigned bits, bool is_signed)
+{
+   nir_def *r = is_signed ? nir_f2iN(b, x, bits) : nir_f2uN(b, x, bits);
+   return nir_bcsel(b, air_fisnan(b, x), nir_imm_zero(b, r->num_components, bits), r);
+}
+
 static nir_def *
 air_cast(struct air_tr *t, int op, nir_def *x, const struct air_type *to)
 {
@@ -1973,11 +2147,11 @@ air_cast(struct air_tr *t, int op, nir_def *x, const struct air_type *to)
       return x->bit_size == 1 ? nir_b2iN(b, x, bits) : nir_u2uN(b, x, bits);
    case OP_SEXT:
       return x->bit_size == 1 ? nir_ineg(b, nir_b2iN(b, x, bits)) : nir_i2iN(b, x, bits);
-   case OP_FPTOUI: return nir_f2uN(b, x, bits);
-   case OP_FPTOSI: return nir_f2iN(b, x, bits);
+   case OP_FPTOUI: return air_f2int(b, x, bits, false);
+   case OP_FPTOSI: return air_f2int(b, x, bits, true);
    case OP_UITOFP: return x->bit_size == 1 ? nir_b2fN(b, x, bits) : nir_u2fN(b, x, bits);
    case OP_SITOFP: return x->bit_size == 1 ? nir_fneg(b, nir_b2fN(b, x, bits)) : nir_i2fN(b, x, bits);
-   case OP_FPTRUNC: return bits == 16 ? nir_f2f16_rtne(b, x) : nir_f2fN(b, x, bits);
+   case OP_FPTRUNC: return bits == 16 ? air_f2f16(b, x) : nir_f2fN(b, x, bits);
    case OP_FPEXT: return nir_f2fN(b, x, bits);
    default: unsupported(t, "LLVM cast opcode %d", op);
    }
@@ -2048,7 +2222,7 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
    if (IS("ceil")) { NEED(1); return nir_fceil(b, x); }
    if (IS("trunc")) { NEED(1); return nir_ftrunc(b, x); }
    if (IS("rint")) { NEED(1); return nir_fround_even(b, x); }
-   if (IS("round")) { NEED(1); return nir_fmul(b, nir_fsign(b, x), nir_ffloor(b, nir_fadd_imm(b, nir_fabs(b, x), 0.5))); }
+   if (IS("round")) { NEED(1); return air_metal_round(b, x); }
    if (IS("fract")) { NEED(1); return nir_ffract(b, x); }
    if (IS("sign")) { NEED(1); return nir_fsign(b, x); }
    if (IS("sqrt")) { NEED(1); return air_f32_unary(b, nir_op_fsqrt, x); }
@@ -2087,10 +2261,11 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
       }
       return air_narrow(b, r, x->bit_size);
    }
-   if (IS("pow") || IS("powr")) { NEED(2); return air_narrow(b, nir_fpow(b, air_widen(b, s[0]), air_widen(b, s[1])), x->bit_size); }
+   if (IS("pow")) { NEED(2); return air_metal_pow(b, s[0], s[1]); }
+   if (IS("powr")) { NEED(2); return air_narrow(b, nir_fpow(b, air_widen(b, s[0]), air_widen(b, s[1])), x->bit_size); }
    if (IS("atan2")) { NEED(2); return air_narrow(b, nir_atan2(b, air_widen(b, s[0]), air_widen(b, s[1])), x->bit_size); }
-   if (IS("fmax") || IS("max")) { NEED(2); return nir_fmax(b, s[0], s[1]); }
-   if (IS("fmin") || IS("min")) { NEED(2); return nir_fmin(b, s[0], s[1]); }
+   if (IS("fmax") || IS("max")) { NEED(2); return air_fminmax(b, t->math_fast, true, s[0], s[1]); }
+   if (IS("fmin") || IS("min")) { NEED(2); return air_fminmax(b, t->math_fast, false, s[0], s[1]); }
    if (IS("fmod")) { NEED(2); return nir_frem(b, s[0], s[1]); }
    if (IS("fdim")) { NEED(2); return nir_fmax(b, nir_fsub(b, s[0], s[1]), nir_imm_floatN_t(b, 0.0, x->bit_size)); }
    if (IS("copysign")) {
@@ -2108,13 +2283,14 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
       return nir_ldexp(b, x, e->num_components == x->num_components ? e : nir_replicate(b, e, x->num_components));
    }
    if (IS("fma")) { NEED(3); return nir_ffma(b, s[0], s[1], s[2]); }
-   if (IS("clamp") || IS("fclamp")) { NEED(3); return nir_fmin(b, nir_fmax(b, s[0], s[1]), s[2]); }
+   if (IS("clamp") || IS("fclamp")) { NEED(3); return air_fminmax(b, t->math_fast, false, air_fminmax(b, t->math_fast, true, s[0], s[1]), s[2]); }
    if (IS("mix")) { NEED(3); return nir_flrp(b, s[0], s[1], s[2]); }
-   if (IS("fmax3")) { NEED(3); return nir_fmax(b, nir_fmax(b, s[0], s[1]), s[2]); }
-   if (IS("fmin3")) { NEED(3); return nir_fmin(b, nir_fmin(b, s[0], s[1]), s[2]); }
+   if (IS("fmax3")) { NEED(3); return air_fminmax(b, t->math_fast, true, air_fminmax(b, t->math_fast, true, s[0], s[1]), s[2]); }
+   if (IS("fmin3")) { NEED(3); return air_fminmax(b, t->math_fast, false, air_fminmax(b, t->math_fast, false, s[0], s[1]), s[2]); }
    if (IS("fmedian3")) {
       NEED(3);
-      return nir_fmax(b, nir_fmin(b, s[0], s[1]), nir_fmin(b, nir_fmax(b, s[0], s[1]), s[2]));
+      const bool f = t->math_fast;
+      return air_fminmax(b, f, true, air_fminmax(b, f, false, s[0], s[1]), air_fminmax(b, f, false, air_fminmax(b, f, true, s[0], s[1]), s[2]));
    }
    if (IS("dot")) {
       NEED(2);
@@ -2137,9 +2313,23 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
    }
    if (IS("normalize")) { NEED(1); return air_narrow(b, nir_normalize(b, air_widen(b, x)), x->bit_size); }
    if (IS("cross")) { NEED(2); return nir_cross3(b, s[0], s[1]); }
-   if (IS("isnan")) { NEED(1); return nir_fneu(b, x, x); }
-   if (IS("isinf")) { NEED(1); return nir_feq(b, nir_fabs(b, x), nir_imm_floatN_t(b, INFINITY, x->bit_size)); }
-   if (IS("isfinite")) { NEED(1); return nir_fisfinite(b, x); }
+   if (IS("isnan")) { NEED(1); return air_fisnan(b, x); }
+   if (IS("isinf")) {
+      NEED(1);
+      const uint32_t save = b->fp_math_ctrl;
+      b->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
+      nir_def *r = nir_feq(b, nir_fabs(b, x), nir_imm_floatN_t(b, INFINITY, x->bit_size));
+      b->fp_math_ctrl = save;
+      return r;
+   }
+   if (IS("isfinite")) {
+      NEED(1);
+      const uint32_t save = b->fp_math_ctrl;
+      b->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
+      nir_def *r = nir_fisfinite(b, x);
+      b->fp_math_ctrl = save;
+      return r;
+   }
    if (IS("isnormal")) {
       /* NAK does not ask NIR to lower fisnormal: the exponent is neither 0 nor all ones */
       NEED(1);
@@ -2290,11 +2480,11 @@ air_convert(struct air_tr *t, const char *rest, nir_def *x, const struct air_typ
       return kto == 'f' ? nir_b2fN(b, x, bits) : nir_b2iN(b, x, bits);
    if (kto == 'f') {
       if (kfrom == 'f')
-         return bits < x->bit_size && bits == 16 ? nir_f2f16_rtne(b, x) : nir_f2fN(b, x, bits);
+         return bits < x->bit_size && bits == 16 ? air_f2f16(b, x) : nir_f2fN(b, x, bits);
       return kfrom == 's' ? nir_i2fN(b, x, bits) : nir_u2fN(b, x, bits);
    }
    if (kfrom == 'f')
-      return kto == 's' ? nir_f2iN(b, x, bits) : nir_f2uN(b, x, bits);
+      return air_f2int(b, x, bits, kto == 's');
    return kfrom == 's' ? nir_i2iN(b, x, bits) : nir_u2uN(b, x, bits);
 }
 
@@ -2411,8 +2601,8 @@ air_llvm_intrinsic(struct air_tr *t, const char *name, LLVMValueRef call, nir_de
    if (NAMED("rint.") || NAMED("nearbyint.") || NAMED("roundeven.")) return nir_fround_even(b, s[0]);
    if (NAMED("round.")) return nir_fmul(b, nir_fsign(b, s[0]), nir_ffloor(b, nir_fadd_imm(b, nir_fabs(b, s[0]), 0.5)));
    if (NAMED("fma.") || NAMED("fmuladd.")) return nir_ffma(b, s[0], s[1], s[2]);
-   if (NAMED("minnum.") || NAMED("minimum.")) return nir_fmin(b, s[0], s[1]);
-   if (NAMED("maxnum.") || NAMED("maximum.")) return nir_fmax(b, s[0], s[1]);
+   if (NAMED("minnum.") || NAMED("minimum.")) return air_fminmax(b, false, false, s[0], s[1]);
+   if (NAMED("maxnum.") || NAMED("maximum.")) return air_fminmax(b, false, true, s[0], s[1]);
    if (NAMED("pow.")) return air_narrow(b, nir_fpow(b, air_widen(b, s[0]), air_widen(b, s[1])), s[0]->bit_size);
    if (NAMED("copysign.")) {
       uint64_t sign = 1ull << (s[0]->bit_size - 1);
@@ -3549,7 +3739,8 @@ air_call(struct air_tr *t, LLVMValueRef call)
       /* air.[fast_]<function>.<type> or air.<function>.<s|u>.<type> */
       char fn[48];
       const char *p = name + 4;
-      if (air_starts(p, "fast_"))
+      t->math_fast = air_starts(p, "fast_");
+      if (t->math_fast)
          p += 5;
       const char *dot = strchr(p, '.');
       if (!dot || (size_t)(dot - p) >= sizeof fn)

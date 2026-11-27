@@ -12,7 +12,9 @@
  * reflection binds them, takes the SPIR-V road exactly as before, and the reason is logged once per function. So do the
  * dispatches that bind a pixel-coordinate argument sampler (its state is known only then; the translator specializes for
  * it) and those of a threadgroup size the road does not run. NVMTL_AIR_NIR=0 sends every kernel to the SPIR-V road; the
- * road is off in WindowServer for now, and off with an NVK that has no frontend (an older one, or the loader's).
+ * road is off with an NVK that has no frontend (an older one, or the loader's). Since 3.0.24 WindowServer takes it too,
+ * behind its crash marker (nvmtl_air_nir_ws_arm), and a GPU fault in any process turns it off there for the rest of the
+ * process and for its next launches with the same driver build (nvmtl_air_nir_gpu_fault, the fallback list).
  *
  * The function still gets its SPIR-V when it is made (the fallback, the reflection and the hazard model read it), so in
  * this phase the road adds the frontend's work to the translator's rather than replacing it.
@@ -71,8 +73,110 @@ static int nvmtl_air_nir_image_uuid(const void *addr, char out[33])
     return -1;
 }
 
-// 1 when this process takes the road: NVMTL_AIR_NIR is not 0, it is not WindowServer, NVK exports the frontend (opened
-// directly), and the plugin's air-runtime is beside it. Decided once, and said once.
+// The per-process fallback (nvmtl_air_nir_gpu_fault): set when a GPU fault in this process turned the road off
+static _Atomic int g_air_nir_fallen;
+static int g_air_nir_started;                      // the road was on when the process decided it
+static char g_air_nir_off_path[PATH_MAX];           // this build's fallback list (nvmtl_air_nir.h), "" for none
+static char g_air_nir_build[17];                    // this build's identity, hex (the list's and the marker's names)
+static int g_air_nir_ws;                            // WindowServer (or the process a development plugin is told to treat so)
+static char g_air_nir_ws_marker[PATH_MAX];          // WindowServer's crash marker (nvmtl_air_nir_ws_arm)
+
+// The test hook (development plugins only): NVK_FAULT_INJECT=ws:<seconds>:<process> runs WindowServer's crash-marker
+// logic in the process named, its clean minute the seconds given, so a test exercises it in a normal process. NVK
+// takes no mode "ws" and ignores it.
+static const char *nvmtl_air_nir_ws_hook(double *secs)
+{
+#if !NVMTL_RELEASE
+    static char who[64]; static double s; static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const char *e = getenv("NVK_FAULT_INJECT");
+        if (!e || strncmp(e, "ws:", 3)) return;
+        char *end = NULL; const double v = strtod(e + 3, &end);
+        if (!end || *end != ':' || !(v > 0) || !end[1] || strlen(end + 1) >= sizeof who) return;
+        s = v; snprintf(who, sizeof who, "%s", end + 1);
+    });
+    if (secs) *secs = s;
+    return who[0] ? who : NULL;
+#else
+    (void)secs; return NULL;
+#endif
+}
+
+// The process the crash marker guards: WindowServer, or the one the test hook names
+static int nvmtl_air_nir_is_ws(const char *me)
+{
+    if (me && !strcmp(me, "WindowServer")) return 1;
+    const char *who = nvmtl_air_nir_ws_hook(NULL);
+    return who && me && !strcmp(who, me);
+}
+
+// The seconds on the road after which WindowServer's start counts as clean: 60, or the test hook's
+static double nvmtl_air_nir_ws_clean_s(void)
+{
+    double s = 0;
+    return nvmtl_air_nir_ws_hook(&s) && s > 0 ? s : 60;
+}
+
+// Before WindowServer's first pipeline on the road: the crash marker, and a minute later, when no GPU fault turned
+// the road off in between, its removal. A start that dies in that minute leaves it for the next one (nvmtl_air_nir_on).
+static void nvmtl_air_nir_ws_arm(void)
+{
+    if (!g_air_nir_ws || !g_air_nir_ws_marker[0]) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        const int fd = open(g_air_nir_ws_marker, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0) { nvlog("air-nir: WindowServer's crash marker %s was not written (%s)", g_air_nir_ws_marker, strerror(errno)); return; }
+        char line[64]; const int n = snprintf(line, sizeof line, "pid %d\n", getpid());
+        (void)!write(fd, line, (size_t)n); close(fd);
+        const double clean = nvmtl_air_nir_ws_clean_s();
+        nvlog_notice("AIR to NIR in %s: the crash marker is set until %.0f s on the road pass cleanly (%s)", getprogname() ?: "?", clean, g_air_nir_ws_marker);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(clean * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            if (atomic_load(&g_air_nir_fallen)) return;   // the fallback list keeps the road off now
+            if (unlink(g_air_nir_ws_marker) == 0)
+                nvlog_notice("AIR to NIR in %s: %.0f s on the road passed cleanly; the crash marker is cleared", getprogname() ?: "?", clean);
+        });
+    });
+}
+
+// This build's fallback list: in the plugin's shader-cache folder, named by a digest of this plugin's and this NVK's
+// identity; the lists of other builds there are removed. 1 when this process's name is on it.
+static int nvmtl_air_nir_off_listed_here(const char *ids)
+{
+    NSString *dir = nvmtl_spvcache_dir();
+    char plug[33] = "unknown";
+    nvmtl_air_nir_image_uuid((const void *)&nvmtl_air_nir_off_listed_here, plug);
+    NSString *who = [NSString stringWithFormat:@"plugin %s %s", plug, ids ?: ""];
+    const char *w = who.UTF8String ?: "";
+    unsigned char h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(w, (CC_LONG)strlen(w), h);
+    char build[17], name[96];
+    for (int i = 0; i < 8; i++) snprintf(build + 2 * i, 3, "%02x", h[i]);
+    memcpy(g_air_nir_build, build, sizeof build);
+    if (!dir || nvmtl_air_nir_off_name(name, sizeof name, build) ||
+        snprintf(g_air_nir_off_path, sizeof g_air_nir_off_path, "%s/%s", dir.fileSystemRepresentation, name) >= (int)sizeof g_air_nir_off_path) {
+        g_air_nir_off_path[0] = 0; return 0; }
+    char mk[96];
+    if (g_air_nir_ws && (nvmtl_air_nir_ws_marker_name(mk, sizeof mk, build) ||
+        snprintf(g_air_nir_ws_marker, sizeof g_air_nir_ws_marker, "%s/%s", dir.fileSystemRepresentation, mk) >= (int)sizeof g_air_nir_ws_marker))
+        g_air_nir_ws_marker[0] = 0;
+    NSString *d = [dir copy]; NSString *keep = @(build);
+    nvmtl_cache_io(^{
+        DIR *dh = opendir(d.fileSystemRepresentation); if (!dh) return;
+        struct dirent *de;
+        while ((de = readdir(dh)))
+            if (nvmtl_air_nir_off_stale(de->d_name, keep.UTF8String) ||
+                (!strncmp(de->d_name, "airnir-ws-", 10) && strncmp(de->d_name + 10, keep.UTF8String, keep.length)))
+                (void)unlink([d stringByAppendingPathComponent:@(de->d_name)].fileSystemRepresentation);
+        closedir(dh);
+    });
+    int fd = open(g_air_nir_off_path, O_RDONLY | O_CLOEXEC); if (fd < 0) return 0;
+    char text[16384]; const ssize_t n = read(fd, text, sizeof text); close(fd);
+    return n > 0 && nvmtl_air_nir_off_listed(text, (size_t)n, getprogname());
+}
+
+// 1 when this process takes the road: NVMTL_AIR_NIR is not 0, NVK exports the frontend (opened directly), the plugin's
+// air-runtime is beside it, the process is not on this build's fallback list, and for WindowServer, no start before
+// this one left its crash marker. Decided once, and said once; a GPU fault later in the process turns it off for good
+// (nvmtl_air_nir_gpu_fault).
 static int nvmtl_air_nir_on(void)
 {
     static dispatch_once_t once; static int on;
@@ -80,7 +184,8 @@ static int nvmtl_air_nir_on(void)
         const char *e = getenv("NVMTL_AIR_NIR"), *me = getprogname();
         const char *off = NULL;
         Dl_info info; struct stat st;
-        if (!nvmtl_air_nir_switch(e, me)) off = (e && e[0] == '0') ? "NVMTL_AIR_NIR=0" : "WindowServer stays on the SPIR-V road for now";
+        g_air_nir_ws = nvmtl_air_nir_is_ws(me);
+        if (!nvmtl_air_nir_switch(e, me)) off = "NVMTL_AIR_NIR=0";
         else if (nvmtl_vk_init() || !nvmtl_vk_air_nir_exports()) off = "this NVK has no AIR-to-NIR frontend, or was not opened directly";
         else if (!dladdr((const void *)&nvmtl_air_nir_on, &info) || !info.dli_fname ||
                  snprintf(g_air_nir_llvm, sizeof g_air_nir_llvm, "%s/air-runtime/libLLVM.dylib",
@@ -93,14 +198,26 @@ static int nvmtl_air_nir_on(void)
             g_air_nir_v5 = nvmtl_vk_air_nir_version() >= 5;
             g_air_nir_ids = [NSString stringWithFormat:@"nvk %s llvm %llu.%ld.%llu", uuid, (unsigned long long)st.st_size,
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
-            on = 1;
+            if (nvmtl_air_nir_off_listed_here(g_air_nir_ids.UTF8String))
+                off = "the process faulted the GPU on the road before, with this driver build: it is on the fallback list";
+            else if (g_air_nir_ws && g_air_nir_ws_marker[0] && access(g_air_nir_ws_marker, F_OK) == 0) {
+                // the start before this one did not pass a clean minute on the road: on the list for the rest of the build
+                char line[256];
+                const int fd = open(g_air_nir_off_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+                if (fd >= 0 && nvmtl_air_nir_off_line(line, sizeof line, me)) (void)!write(fd, line, strlen(line));
+                if (fd >= 0) close(fd);
+                (void)unlink(g_air_nir_ws_marker);
+                off = "its crash marker was left by a start that did not pass a clean minute on the road: on the fallback list for this driver build";
+            } else on = 1;
         }
-        nvlog_notice("compute and render pipelines: AIR to NIR %s in %s (%s%s)", on ? "ON - a kernel or pipeline it does not take stays on the SPIR-V road" : "off",
+        g_air_nir_started = on;
+        nvlog_notice("compute and render pipelines: AIR to NIR %s in %s (%s%s%s%s)", on ? "ON - a kernel or pipeline it does not take stays on the SPIR-V road" : "off",
                      me ? me : "?", off ? off : (e ? "NVMTL_AIR_NIR set, not 0" : "NVMTL_AIR_NIR unset"),
                      on && !g_air_nir_v5 ? "; this NVK's frontend is older than version 5: every function is made with the translator, and a "
-                                           "pixel-coordinate sampler's variant stays on the SPIR-V road" : "");
+                                           "pixel-coordinate sampler's variant stays on the SPIR-V road" : "",
+                     !on && g_air_nir_off_path[0] ? ", " : "", !on && g_air_nir_off_path[0] ? g_air_nir_off_path : "");
     });
-    return on;
+    return on && !atomic_load_explicit(&g_air_nir_fallen, memory_order_acquire);
 }
 
 // ---- the road's counts and its reasons --------------------------------------------------------------------------
@@ -374,6 +491,7 @@ static NVMTLComputePipelineState *nvmtl_air_nir_make(NVMTLFunction *f, NSDiction
             return nil;
         }
     }
+    nvmtl_air_nir_ws_arm();
     NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
     if (nvmtl_vk_compute_pipeline_create_nir(nir, &res, local, &ps->_p)) {
         pnvk_air_nir_free(nir);
@@ -418,6 +536,7 @@ NVMTLComputePipelineState *nvmtl_air_nir_pipeline(NVMTLFunction *f, NSDictionary
 NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, NSDictionary *samplers, NSDictionary *tgLen, NSString **why)
 {
     if (!ps || ps->_road != 1 || !ps->_function) return nil;
+    if (atomic_load_explicit(&g_air_nir_fallen, memory_order_acquire)) { *why = @"a GPU fault turned the road off in this process"; return nil; }
     NSDictionary *words = nil;
     if (samplers.count && !g_air_nir_v5) { *why = @"a pixel-coordinate sampler is bound and this NVK's frontend takes no sampler state (older than version 5)"; return nil; }
     if (samplers.count && !(words = nvmtl_air_nir_sampler_words_all(samplers, why))) return nil;
@@ -429,10 +548,13 @@ NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, 
 }
 
 // The pipeline a dispatch of threadgroup size l runs: ps, or for a size the road does not run (over the device's
-// per-dimension limit, which the SPIR-V road linearizes) the kernel's SPIR-V twin, made once
+// per-dimension limit, which the SPIR-V road linearizes) or once a GPU fault turned the road off in the process
+// (nvmtl_air_nir_gpu_fault), the kernel's SPIR-V twin, made once
 NVMTLComputePipelineState *nvmtl_air_nir_for_size(NVMTLComputePipelineState *ps, const uint32_t l[3])
 {
-    if (!ps || ps->_road != 1 || nvmtl_vk_air_nir_size_ok(&ps->_p, l)) return ps;
+    if (!ps || ps->_road != 1) return ps;
+    const BOOL fallen = atomic_load_explicit(&g_air_nir_fallen, memory_order_acquire);
+    if (!fallen && nvmtl_vk_air_nir_size_ok(&ps->_p, l)) return ps;
     id twin;
     @synchronized (ps) {
         twin = ps->_spvTwin;
@@ -451,8 +573,12 @@ NVMTLComputePipelineState *nvmtl_air_nir_for_size(NVMTLComputePipelineState *ps,
                 g_air_nir_force_spirv = 0;
                 if (![t isKindOfClass:[NVMTLComputePipelineState class]]) t = nil;
             }
-            nvmtl_air_nir_line("air-nir: kernel %s dispatched with threadgroup %ux%ux%u, which the road does not run: %s",
-                               f->_fname.UTF8String ?: "?", l[0], l[1], l[2], t ? "its SPIR-V twin runs it" : "no SPIR-V twin either");
+            if (fallen)
+                nvmtl_air_nir_line("air-nir: kernel %s dispatched after a GPU fault turned the road off: %s", f->_fname.UTF8String ?: "?",
+                                   t ? "its SPIR-V twin runs it" : "no SPIR-V twin, the road's pipeline runs it");
+            else
+                nvmtl_air_nir_line("air-nir: kernel %s dispatched with threadgroup %ux%ux%u, which the road does not run: %s",
+                                   f->_fname.UTF8String ?: "?", l[0], l[1], l[2], t ? "its SPIR-V twin runs it" : "no SPIR-V twin either");
             twin = ps->_spvTwin = t ?: (id)[NSNull null];
         } }
     }
@@ -513,6 +639,54 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
         nvlog_notice("render roads in %s: AIR to NIR %llu pipeline(s), SPIR-V %llu pipeline(s); %llu took the SPIR-V road "
                      "after AIR to NIR said no", getprogname() ?: "?", atomic_load(&g_air_nir_rroads[1]),
                      atomic_load(&g_air_nir_rroads[0]), atomic_load(&g_air_nir_rfallbacks));
+}
+
+// The pipeline a render encoder binds for ps: ps, or once a GPU fault turned the road off in the process, a road
+// pipeline's SPIR-V twin, made at its first bind from the descriptor it was made with (the road is off by then, so
+// that is the SPIR-V road). Pipelines already in command buffers keep theirs.
+int nvmtl_air_nir_fallen(void) { return atomic_load_explicit(&g_air_nir_fallen, memory_order_relaxed); }
+
+NVMTLRenderPipelineState *nvmtl_air_nir_render_bound(NVMTLRenderPipelineState *ps)
+{
+    if (!ps || ps->_road != 1 || !atomic_load_explicit(&g_air_nir_fallen, memory_order_acquire)) return ps;
+    id twin;
+    @synchronized (ps) {
+        twin = ps->_spvTwin;
+        if (!twin) { @autoreleasepool {
+            MTLRenderPipelineDescriptor *d = [ps->_descriptor isKindOfClass:[MTLRenderPipelineDescriptor class]] ? ps->_descriptor : nil;
+            NSError *e = nil;
+            id t = d ? [(id<MTLDevice>)gNVMTLMainDevice newRenderPipelineStateWithDescriptor:d error:&e] : nil;
+            if (![t isKindOfClass:[NVMTLRenderPipelineState class]] || ((NVMTLRenderPipelineState *)t)->_road) t = nil;
+            nvmtl_air_nir_line("air-nir: pipeline %s / %s bound after a GPU fault turned the road off: %s", ps->_vname.UTF8String ?: "?",
+                               ps->_fname.UTF8String ?: "?", t ? "its SPIR-V twin draws" : "no SPIR-V twin, the road's pipeline draws");
+            twin = ps->_spvTwin = t ?: (id)[NSNull null];
+        } }
+    }
+    return twin == (id)[NSNull null] ? ps : (NVMTLRenderPipelineState *)twin;
+}
+
+// A GPU fault in this process (nvmtl_vk.c: a channel rebuild dropped a submission, or the device was lost). When the
+// road was on and made any pipeline, it is turned off for the rest of the process: new pipelines and variants take the
+// SPIR-V road, the road's pipelines switch to their SPIR-V twins at their next bind or dispatch
+// (nvmtl_air_nir_render_bound, nvmtl_air_nir_for_size), and the process name goes on this build's fallback list so its
+// next launches start on the SPIR-V road. Said once in the system log. NVMTL_AIR_NIR=0 keeps the road off everywhere.
+void nvmtl_air_nir_gpu_fault(const char *what)
+{
+    if (!g_air_nir_started) return;
+    const unsigned long long made = atomic_load(&g_air_nir_roads[1]) + atomic_load(&g_air_nir_variants[1]) + atomic_load(&g_air_nir_rroads[1]);
+    if (!made || atomic_exchange(&g_air_nir_fallen, 1)) return;
+    const char *me = getprogname() ?: "?";
+    nvlog_notice("AIR to NIR off in %s from now on: a GPU fault (%s) after %llu pipeline(s) and variant(s) on the road; new "
+                 "pipelines take the SPIR-V road, the road's switch to their SPIR-V twins at their next use, and %s %s",
+                 me, what ? what : "?", made, g_air_nir_off_path[0] ? "its next launches start on the SPIR-V road with this driver build:" :
+                 "its next launches are not told (no shader-cache folder)", g_air_nir_off_path[0] ? g_air_nir_off_path : "");
+    char line[256];
+    if (!g_air_nir_off_path[0] || !nvmtl_air_nir_off_line(line, sizeof line, me)) return;
+    // written here, not on the cache queue: a process whose device is lost may be about to end
+    const int fd = open(g_air_nir_off_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    const size_t n = strlen(line);
+    if (fd < 0 || write(fd, line, n) != (ssize_t)n) nvlog("air-nir: the fallback list %s was not written (%s)", g_air_nir_off_path, strerror(errno));
+    if (fd >= 0) close(fd);
 }
 
 // Whether newRenderPipelineState asks the road for the pipeline of vf and ff; NO with *why left nil when the road is off
@@ -600,6 +774,7 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
                 rc = -1;
             }
         }
+        if (!rc) nvmtl_air_nir_ws_arm();
         if (!rc && nvmtl_vk_pipeline_create_nir(vn, &vres, fn, &fres, rt, vin, samples, out)) {
             *why = @"NVK would not make a pipeline of the two stages' NIR"; rc = -1; }
     }
@@ -615,8 +790,9 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
 // varyings, vertex attributes and default threadgroup size the plugin reads), is made with that reflection and no SPIR-V.
 // The translator runs the first time something needs SPIR-V of it (nvmtl_function_spirv: a pipeline or variant the road
 // does not make, a rewrite of the SPIR-V road's, a pipeline NVK refuses), and then exactly as newFunctionWithName: would
-// have run it. A function the frontend refuses or does not reflect is made as before. NVMTL_AIR_NIR=0, WindowServer, an
-// application profile and the check run (NVMTL_AIR_NIR_REFL_CHECK=1, development builds) make every function as before.
+// have run it. A function the frontend refuses or does not reflect is made as before. NVMTL_AIR_NIR=0, a process the
+// fallback list names, an application profile and the check run (NVMTL_AIR_NIR_REFL_CHECK=1, development builds) make
+// every function as before.
 
 static _Atomic unsigned long long g_lazy_made, g_lazy_spirv, g_lazy_ns, g_lazy_spirv_ns;
 

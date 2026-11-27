@@ -4,8 +4,8 @@
  *
  * nvmtl_air_nir.h - the parts of the plugin's AIR-to-NIR road for compute pipelines (NVMTLAirNir.m) that are pure C, so
  * tools/test_air_nir_plugin.c proves them without the plugin: the switch, the descriptor masks a result gives the
- * plugin's set-0 bands, the threadgroup sizes the road runs, the constexpr-sampler agreement with the translator, and
- * the shader-cache entry.
+ * plugin's set-0 bands, the threadgroup sizes the road runs, the constexpr-sampler agreement with the translator, the
+ * shader-cache entry, the per-process fallback list and WindowServer's crash marker.
  *
  * nvmtl_air_nir_abi.h beside it is a copy of nvk/air/nvmtl_air_nir_abi.h (the plugin is built from plugin/ alone);
  * tools/test_air_nir_plugin.py holds the two to the same bytes.
@@ -14,16 +14,29 @@
 #define NVMTL_AIR_NIR_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "nvmtl_air_nir_abi.h"
 
-/* NVMTL_AIR_NIR (environment or the settings file): the one exit. "0" keeps every compute pipeline on the SPIR-V road,
- * as before. Anything else, or unset, is on, except in WindowServer, which stays on the SPIR-V road for now. */
+/* NVMTL_AIR_NIR (environment or the settings file): the one exit. "0" keeps every pipeline on the SPIR-V road, as
+ * before. Anything else, or unset, is on, WindowServer included since 3.0.24, which is guarded by its crash marker
+ * (nvmtl_air_nir_ws_marker_name) besides the per-process fallback every process has. */
 static inline int nvmtl_air_nir_switch(const char *value, const char *program)
 {
+    (void)program;
     if (value && value[0] == '0') return 0;
-    if (program && !strcmp(program, "WindowServer")) return 0;
     return 1;
+}
+
+/* WindowServer's crash marker (NVMTLAirNir.m nvmtl_air_nir_ws_arm): written in its shader-cache folder before its
+ * first pipeline on the road, removed after a clean minute; a start that finds it puts WindowServer on the fallback
+ * list, so that start and the rest of the driver build stay on the SPIR-V road. Its name, for a build identity. */
+static inline int nvmtl_air_nir_ws_marker_name(char *out, size_t cap, const char *build)
+{
+    const size_t n = build ? strlen(build) : 0;
+    if (!n || n > 64) return -1;
+    const int k = snprintf(out, cap, "airnir-ws-%s.marker", build);
+    return k < 0 || (size_t)k >= cap ? -1 : 0;
 }
 
 /* The plugin's set-0 bands, by index into its binding table (plugin/nvmtl_vk.c NVMTL_NBUF, NVMTL_NTEX, NVMTL_NSAMP,
@@ -124,6 +137,55 @@ static inline int nvmtl_air_nir_entry_unpack(const uint8_t *in, size_t n, int32_
     *status = h.status;
     *blob = h.blob_size ? in + sizeof h + sizeof *r : NULL;
     *blob_size = h.blob_size;
+    return 0;
+}
+
+/* The per-process fallback list (NVMTLAirNir.m nvmtl_air_nir_gpu_fault): a process whose GPU channel faulted while it
+ * had pipelines on the road is written to "airnir-off-<build>.txt" in the plugin's shader-cache folder, one name per
+ * line, and starts on the SPIR-V road while that driver build (this plugin and this NVK) is installed. A list of
+ * another build is removed, so a new build tries the road again. */
+#define NVMTL_AN_OFF_PREFIX "airnir-off-"
+#define NVMTL_AN_OFF_SUFFIX ".txt"
+/* The list's file name for a build identity (hex digits); -1 for an identity that is empty, not hex, or too long */
+static inline int nvmtl_air_nir_off_name(char *out, size_t cap, const char *build)
+{
+    const size_t n = build ? strlen(build) : 0;
+    if (!n || n > 64) return -1;
+    for (size_t i = 0; i < n; i++)
+        if (!((build[i] >= '0' && build[i] <= '9') || (build[i] >= 'a' && build[i] <= 'f'))) return -1;
+    const int k = snprintf(out, cap, "%s%s%s", NVMTL_AN_OFF_PREFIX, build, NVMTL_AN_OFF_SUFFIX);
+    return k < 0 || (size_t)k >= cap ? -1 : 0;
+}
+/* 1 when file (a name in the folder) is the list of a build other than build's */
+static inline int nvmtl_air_nir_off_stale(const char *file, const char *build)
+{
+    const size_t lp = sizeof NVMTL_AN_OFF_PREFIX - 1, ls = sizeof NVMTL_AN_OFF_SUFFIX - 1, n = file ? strlen(file) : 0;
+    if (n <= lp + ls || strncmp(file, NVMTL_AN_OFF_PREFIX, lp) || strcmp(file + n - ls, NVMTL_AN_OFF_SUFFIX)) return 0;
+    const size_t bn = build ? strlen(build) : 0;
+    return !(n - lp - ls == bn && !strncmp(file + lp, build, bn));
+}
+/* The line a process name is written as: the name with any byte below 0x20 as '?', and a newline; 0 when it does not
+ * fit or the name is empty */
+static inline size_t nvmtl_air_nir_off_line(char *out, size_t cap, const char *name)
+{
+    const size_t n = name ? strlen(name) : 0;
+    if (!n || n + 2 > cap) return 0;
+    for (size_t i = 0; i < n; i++) out[i] = (unsigned char)name[i] < 0x20 ? '?' : name[i];
+    out[n] = '\n'; out[n + 1] = 0;
+    return n + 1;
+}
+/* 1 when the list's text (n bytes, not terminated) holds name as a whole line */
+static inline int nvmtl_air_nir_off_listed(const char *text, size_t n, const char *name)
+{
+    char want[256];
+    const size_t k = nvmtl_air_nir_off_line(want, sizeof want, name);
+    if (!text || !k) return 0;
+    for (size_t at = 0; at < n;) {
+        const char *nl = memchr(text + at, '\n', n - at);
+        const size_t len = (nl ? (size_t)(nl - text) : n) - at;
+        if (len == k - 1 && !memcmp(text + at, want, k - 1)) return 1;
+        at += len + 1;
+    }
     return 0;
 }
 #endif

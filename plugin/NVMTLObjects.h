@@ -324,7 +324,8 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLComputePipelineState () { @public id _sassKernel; BOOL _sassOnly; } @end
 // The road the pipeline's kernel took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V. On the AIR-to-NIR
 // road, _nirTg is the threadgroup-memory lengths it was translated with (nil for none) and _spvTwin the same kernel on
-// the SPIR-V road, made the first time a dispatch asks for a threadgroup size the road does not run.
+// the SPIR-V road, made the first time a dispatch asks for a threadgroup size the road does not run, or the first
+// dispatch after a GPU fault turned the road off in the process (nvmtl_air_nir_gpu_fault).
 @interface NVMTLComputePipelineState () { @public uint8_t _road; NSDictionary *_nirTg; id _spvTwin; } @end
 // A function whose AIR is the translator's own rewrite (a mesh or object stage's kernel, a tile function's, a kernel with
 // a stage-in layout): its compute pipeline takes the SPIR-V road only.
@@ -341,8 +342,9 @@ BOOL nvmtl_air_nir_lazy(NVMTLFunction *f);
 void nvmtl_air_nir_refl_check(NVMTLFunction *f);
 NSArray *nvmtl_air_nir_sampler_stages(NVMTLFunction *vf, NVMTLFunction *ff, NSDictionary *vS, NSDictionary *fS, NSString **why);
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
-// The road the pipeline's stages took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V
-@interface NVMTLRenderPipelineState () { @public uint8_t _road; } @end
+// The road the pipeline's stages took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V. _spvTwin: a road
+// pipeline's SPIR-V twin, made at its first bind after a GPU fault turned the road off in the process.
+@interface NVMTLRenderPipelineState () { @public uint8_t _road; id _spvTwin; } @end
 // _descriptor's vertex and fragment functions, read once when the pipeline is made: the descriptor is a copy nothing
 // changes afterwards, and a draw read them through two getters
 @interface NVMTLRenderPipelineState () { @public id<MTLFunction> _vfn, _ffn; } @end

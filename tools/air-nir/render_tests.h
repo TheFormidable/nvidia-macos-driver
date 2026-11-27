@@ -12,7 +12,7 @@
 #define RW 64u
 #define RH 64u
 #define RMAXCOL 4u
-#define RMAXBUF 8u
+#define RMAXBUF 16u
 static const float clear_col[4] = { 0.1f, 0.2f, 0.3f, 0.4f };
 
 struct rrun {
@@ -630,6 +630,186 @@ rfi_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_rleblit ---------------------------------------------------------------------------------------------------- */
+
+/* CoreAnimation's buffer-to-image blit (Terminal's window): three rects, each a strip of 4 vertices of its own instance,
+ * whose pixels are bytes of a 1.2 MB buffer at offset + x + y * bpr (the last rect's offset far into it) */
+struct rbl_rect { float min[2], size[2], offset, bpr; };
+static const struct rbl_rect rbl_rects[3] = {
+   { { 4, 60 }, { 20, 24 }, 1234, 37 },
+   { { 30, 60 }, { 30, 10 }, 40000, 64 },
+   { { 8, 30 }, { 50, 26 }, 1100003, 61 },
+};
+#define RBL_BYTES (1200u * 1024u)
+
+static uint8_t rbl_byte(unsigned i) { return (uint8_t)((i * 2654435761u) >> 13); }
+
+static void
+rbl_setup(struct rrun *r)
+{
+   const float mvp[16] = { 1.0f / 32, 0, 0, 0, 0, 1.0f / 32, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1 };   /* columns */
+   const float color[4] = { 1.0f / 255, 0.5f / 255, 0.25f / 255, 1.0f / 255 };
+   r->vbuf[1] = rbuf(rbl_rects, sizeof rbl_rects);
+   r->vbuf[2] = rbuf(mvp, sizeof mvp);
+   r->fbuf[1] = rbuf(color, sizeof color);
+   r->fbuf[9] = rbuf(NULL, RBL_BYTES);
+   uint8_t *b = r->fbuf[9].contents;
+   for (unsigned i = 0; i < RBL_BYTES; i++)
+      b[i] = rbl_byte(i);
+}
+
+/* the same data in managed buffers, as CoreAnimation keeps them on a Mac with a discrete GPU */
+static id<MTLBuffer>
+rbuf_managed(const void *data, size_t n)
+{
+   id<MTLBuffer> b = [dev newBufferWithLength:n options:MTLResourceStorageModeManaged];
+   if (!b) {
+      fprintf(stderr, "plugin_run: newBufferWithLength:%zu (managed) failed\n", n);
+      exit(2);
+   }
+   memcpy(b.contents, data, n);
+   [b didModifyRange:NSMakeRange(0, n)];
+   return b;
+}
+
+static void
+rbl_setup_managed(struct rrun *r)
+{
+   rbl_setup(r);
+   id<MTLBuffer> *slots[4] = { &r->vbuf[1], &r->vbuf[2], &r->fbuf[1], &r->fbuf[9] };
+   for (unsigned i = 0; i < 4; i++) {
+      id<MTLBuffer> m = rbuf_managed((*slots[i]).contents, (*slots[i]).length);
+      [*slots[i] release];
+      *slots[i] = m;
+   }
+}
+
+/* both targets: a rect's pixel is its byte times the colour (BGRA8, 1 LSB), any other the clear colour */
+static bool
+rbl_check(struct rrun *r)
+{
+   for (unsigned att = 0; att < 2; att++)
+      for (unsigned py = 0; py < RH; py++)
+         for (unsigned px = 0; px < RW; px++) {
+            float want[4] = { clear_col[0], clear_col[1], clear_col[2], clear_col[3] };
+            for (unsigned k = 0; k < 3; k++) {
+               const struct rbl_rect *q = &rbl_rects[k];
+               const int x = (int)px - (int)q->min[0], y = (int)py - (64 - (int)q->min[1]);
+               if (x < 0 || y < 0 || x >= (int)q->size[0] || y >= (int)q->size[1])
+                  continue;
+               const float v = rbl_byte((unsigned)(q->offset + x + y * q->bpr)) / 255.0f;
+               want[0] = v; want[1] = v * 0.5f; want[2] = v * 0.25f; want[3] = v;
+            }
+            const uint8_t *g = (const uint8_t *)r->back[att].contents + ((size_t)py * RW + px) * 4;
+            const float bgra[4] = { want[2], want[1], want[0], want[3] };
+            for (unsigned c = 0; c < 4; c++) {
+               const int q = (int)lrintf(bgra[c] * 255);
+               if (abs((int)g[c] - q) > 1) {
+                  snprintf(r->why, sizeof r->why, "attachment %u bgra8 pixel (%u,%u) byte %u: %u, want %d (1 LSB)", att, px, py,
+                           c, g[c], q);
+                  return false;
+               }
+            }
+         }
+   return true;
+}
+
+/* the same blit into one R8 target (CoreAnimation's 576x576 glyph and mask atlas in Terminal): the fragment's color(1)
+ * has no attachment */
+static bool
+rbl8_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         float want = clear_col[0];
+         for (unsigned k = 0; k < 3; k++) {
+            const struct rbl_rect *q = &rbl_rects[k];
+            const int x = (int)px - (int)q->min[0], y = (int)py - (64 - (int)q->min[1]);
+            if (x >= 0 && y >= 0 && x < (int)q->size[0] && y < (int)q->size[1])
+               want = rbl_byte((unsigned)(q->offset + x + y * q->bpr)) / 255.0f;
+         }
+         const uint8_t g = ((const uint8_t *)r->back[0].contents)[(size_t)py * RW + px];
+         const int q = (int)lrintf(want * 255);
+         if (abs((int)g - q) > 1) {
+            snprintf(r->why, sizeof r->why, "r8 pixel (%u,%u): %u, want %d (1 LSB)", px, py, g, q);
+            return false;
+         }
+      }
+   return true;
+}
+
+/* the blit with a NaN offset in its third rect: Metal converts the NaN index to 0, so that rect shows byte 0. The road
+ * before 3.0.24 converted it to 0x80000000, a read 2 GiB below the buffer: the MMU fault (Xid 31) Terminal hit */
+static const struct rbl_rect rbl_nan_rects[3] = {
+   { { 4, 60 }, { 20, 24 }, 1234, 37 },
+   { { 30, 60 }, { 30, 10 }, 40000, 64 },
+   { { 8, 30 }, { 50, 26 }, NAN, 61 },
+};
+
+static void
+rbl_nan_setup(struct rrun *r)
+{
+   rbl_setup(r);
+   [r->vbuf[1] release];
+   r->vbuf[1] = rbuf(rbl_nan_rects, sizeof rbl_nan_rects);
+}
+
+static bool
+rbl_nan_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         float want = clear_col[0];
+         for (unsigned k = 0; k < 3; k++) {
+            const struct rbl_rect *q = &rbl_nan_rects[k];
+            const int x = (int)px - (int)q->min[0], y = (int)py - (64 - (int)q->min[1]);
+            if (x >= 0 && y >= 0 && x < (int)q->size[0] && y < (int)q->size[1])
+               want = rbl_byte(q->offset != q->offset ? 0u : (unsigned)(q->offset + x + y * q->bpr)) / 255.0f;
+         }
+         const uint8_t g = ((const uint8_t *)r->back[0].contents)[(size_t)py * RW + px];
+         const int q = (int)lrintf(want * 255);
+         if (abs((int)g - q) > 1) {
+            snprintf(r->why, sizeof r->why, "r8 pixel (%u,%u): %u, want %d (1 LSB; a NaN index reads byte 0)", px, py, g, q);
+            return false;
+         }
+      }
+   return true;
+}
+
+/* ---- r_oob: a buffer read at an index the data gives, some past its end -------------------------------------------- */
+
+#define ROB_PAL 16u
+static void
+rob_setup(struct rrun *r)
+{
+   setup_quad(r);
+   float pal[ROB_PAL][4];
+   for (unsigned i = 0; i < ROB_PAL; i++)
+      for (unsigned c = 0; c < 4; c++)
+         pal[i][c] = (i + 1) * 0.0625f - c * 0.01f;
+   r->fbuf[0] = rbuf(pal, sizeof pal);
+   uint32_t idx[RW * RH];
+   for (unsigned i = 0; i < RW * RH; i++)
+      idx[i] = (i % 7) == 3 ? ROB_PAL + 256 + i % 100 : i % ROB_PAL;   /* every 7th pixel 4 KB and more past the end */
+   r->fbuf[3] = rbuf(idx, sizeof idx);
+}
+
+/* in range: the palette entry; past the end: 0, as the SPIR-V road's bounds-checked descriptor reads it */
+static bool
+rob_check(struct rrun *r)
+{
+   const uint32_t *idx = r->fbuf[3].contents;
+   const float *pal = r->fbuf[0].contents;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const uint32_t k = idx[py * RW + px];
+         const float zero[4] = { 0, 0, 0, 0 };
+         if (!rwant(r, 0, px, py, k < ROB_PAL ? pal + k * 4 : zero, 4, 0))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -671,6 +851,25 @@ static const struct rtest rtests[] = {
      NULL, setup_quad, rfo_check, "1e-4; attachment 0 keeps its clear colour", false, true },
    { "r_fcin", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin,
      rfi_vdesc, rfi_setup, rfi_check, "1e-4", false, true },
+   { "r_rleblit", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatBGRA8Unorm, MTLPixelFormatBGRA8Unorm }, NOC,
+     MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup, rbl_check,
+     "bgra8 1 LSB; CoreAnimation's buffer-to-image blit, a fragment byte read at buffer(9)" },
+   { "r_qcblit", "qc_blit", "buffer_image_blit_vert_lpf", "buffer_image_blit_frag_lpf", { MTLPixelFormatBGRA8Unorm,
+     MTLPixelFormatBGRA8Unorm }, NOC, MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup, rbl_check,
+     "bgra8 1 LSB; r_rleblit with QuartzCore's own two functions (PLUGIN_RUN_EXTRA_AIR names a folder with qc_blit.metallib)" },
+   { "r_rleblit8", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatR8Unorm }, NOC, MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0,
+     NULL, NULL, rbl_setup, rbl8_check, "r8 1 LSB; r_rleblit into one R8 target, its color(1) without an attachment" },
+   { "r_qcblit8", "qc_blit", "buffer_image_blit_vert_lpf", "buffer_image_blit_frag_lpf", { MTLPixelFormatR8Unorm }, NOC,
+     MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup, rbl8_check,
+     "r8 1 LSB; r_qcblit into one R8 target, its color(1) without an attachment" },
+   { "r_qcblit8m", "qc_blit", "buffer_image_blit_vert_lpf", "buffer_image_blit_frag_lpf", { MTLPixelFormatR8Unorm }, NOC,
+     MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup_managed, rbl8_check,
+     "r8 1 LSB; r_qcblit8 with its buffers managed (didModifyRange), as CoreAnimation keeps them" },
+   { "r_rleblit_nan", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatR8Unorm }, NOC, MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0,
+     NULL, NULL, rbl_nan_setup, rbl_nan_check,
+     "r8 1 LSB; a NaN index reads byte 0 (before 3.0.24 the road read 2 GiB below the buffer: Terminal's Xid 31)" },
+   { "r_oob", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup, rob_check,
+     "exact; a read past the end gives 0; must take the SPIR-V road (a data-dependent index into a buffer)", true },
 };
 #undef F32
 #undef NOC

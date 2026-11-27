@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
    test_air_nir_plugin.c - the pure parts of the plugin's AIR-to-NIR road (plugin/nvmtl_air_nir.h):
    the switch, the descriptor masks a frontend result gives the plugin's set-0 bands, the threadgroup sizes the road
-   runs, the constexpr-sampler agreement with the translator's reflection, and the shader-cache entry, which must read
-   back exactly what was written and turn away anything else (another build's layout, a cut or changed file).
+   runs, the constexpr-sampler agreement with the translator's reflection, the shader-cache entry, which must read
+   back exactly what was written and turn away anything else (another build's layout, a cut or changed file), and
+   since 3.0.24 the per-process fallback list and WindowServer's crash marker.
    Build and run anywhere (no GPU, no Metal):  cc -std=c11 -Wall -Wextra -I plugin tools/test_air_nir_plugin.c -o /tmp/test_air_nir_plugin && /tmp/test_air_nir_plugin
    Each arm is a sentence the rule must hold to. */
 #include <stdio.h>
@@ -21,8 +22,8 @@ int main(void)
     arm("unset is on", nvmtl_air_nir_switch(NULL, "Safari") == 1);
     arm("NVMTL_AIR_NIR=0 is off", nvmtl_air_nir_switch("0", "Safari") == 0);
     arm("NVMTL_AIR_NIR=1 is on (only 0 turns it off)", nvmtl_air_nir_switch("1", "Safari") == 1);
-    arm("WindowServer stays on the SPIR-V road, unset", nvmtl_air_nir_switch(NULL, "WindowServer") == 0);
-    arm("WindowServer stays on the SPIR-V road even with NVMTL_AIR_NIR=1 (the switch is only a way out)", nvmtl_air_nir_switch("1", "WindowServer") == 0);
+    arm("WindowServer takes the road too since 3.0.24, unset (its crash marker guards it)", nvmtl_air_nir_switch(NULL, "WindowServer") == 1);
+    arm("NVMTL_AIR_NIR=0 keeps WindowServer on the SPIR-V road", nvmtl_air_nir_switch("0", "WindowServer") == 0);
     arm("a process whose name is unknown is on", nvmtl_air_nir_switch(NULL, NULL) == 1);
 
     /* the masks */
@@ -104,6 +105,34 @@ int main(void)
     SET(r.texture_mask, 0); r.sampler_mask = 1u << 1;
     arm("a fragment result's texture and sampler land in the bands a kernel's do",
         nvmtl_air_nir_masks(&r, b, &hi, tb) == 0 && HAS(b, 32) && HAS(b, 161) && HAS(b, NVMTL_AN_TABLE) && hi == 0);
+
+    /* the per-process fallback list and WindowServer's crash marker */
+    char nm[128], line[256];
+    arm("the list of a build is airnir-off-<build>.txt", nvmtl_air_nir_off_name(nm, sizeof nm, "9844a3a9b7ad0172") == 0 &&
+        !strcmp(nm, "airnir-off-9844a3a9b7ad0172.txt"));
+    arm("a build identity that is not lower-case hex names no list", nvmtl_air_nir_off_name(nm, sizeof nm, "../x") == -1 &&
+        nvmtl_air_nir_off_name(nm, sizeof nm, "") == -1 && nvmtl_air_nir_off_name(nm, sizeof nm, "ABCD") == -1);
+    arm("a name that does not fit is refused", nvmtl_air_nir_off_name(nm, 16, "9844a3a9b7ad0172") == -1);
+    arm("another build's list is stale", nvmtl_air_nir_off_stale("airnir-off-0000000000000000.txt", "9844a3a9b7ad0172") == 1);
+    arm("this build's list is not", nvmtl_air_nir_off_stale("airnir-off-9844a3a9b7ad0172.txt", "9844a3a9b7ad0172") == 0);
+    arm("a list whose identity only starts with this build's is stale",
+        nvmtl_air_nir_off_stale("airnir-off-9844a3a9b7ad01720.txt", "9844a3a9b7ad0172") == 1);
+    arm("a shader-cache entry is never taken for a list", nvmtl_air_nir_off_stale("abc.nir1.sha256-x-u2-td1.c3.spv", "9844") == 0 &&
+        nvmtl_air_nir_off_stale("airnir-off-.txt", "9844") == 0);
+    arm("a process name is one line", nvmtl_air_nir_off_line(line, sizeof line, "Terminal") == 9 && !strcmp(line, "Terminal\n"));
+    arm("a control byte in a name cannot start a second line", nvmtl_air_nir_off_line(line, sizeof line, "a\nb") == 4 && !strcmp(line, "a?b\n"));
+    arm("an empty name or one that does not fit writes nothing", nvmtl_air_nir_off_line(line, sizeof line, "") == 0 &&
+        nvmtl_air_nir_off_line(line, 4, "Terminal") == 0);
+    const char *list = "Terminal\nplugin_run\nWindowServer";
+    arm("a listed name is found on any line, the last without its newline too",
+        nvmtl_air_nir_off_listed(list, strlen(list), "Terminal") && nvmtl_air_nir_off_listed(list, strlen(list), "plugin_run") &&
+        nvmtl_air_nir_off_listed(list, strlen(list), "WindowServer"));
+    arm("a name is matched whole, not as a prefix or a part", !nvmtl_air_nir_off_listed(list, strlen(list), "Term") &&
+        !nvmtl_air_nir_off_listed(list, strlen(list), "plugin") && !nvmtl_air_nir_off_listed(list, strlen(list), "Server"));
+    arm("an empty list names nobody", !nvmtl_air_nir_off_listed("", 0, "Terminal") && !nvmtl_air_nir_off_listed(NULL, 0, "Terminal"));
+    arm("WindowServer's marker of a build is airnir-ws-<build>.marker",
+        nvmtl_air_nir_ws_marker_name(nm, sizeof nm, "105d58c16c075cd4") == 0 && !strcmp(nm, "airnir-ws-105d58c16c075cd4.marker"));
+    arm("a marker is never taken for a list", nvmtl_air_nir_off_stale("airnir-ws-105d58c16c075cd4.marker", "105d58c16c075cd4") == 0);
 
     printf(fails ? "FAILED %d\n" : "ok\n", fails);
     return fails ? 1 : 0;

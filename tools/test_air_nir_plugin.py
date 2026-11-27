@@ -228,7 +228,40 @@ def sampler_states(s):
     return ('nvmtl_air_nir_sampler_words_all(samplers, why)' in vr and 'req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;' in tr and
             'o.count != 3' in sb and 'sw = [o[2] count] ? o[2] : nil' in sb)
 
+def gpu_fault_hooks(s):
+    vk = strip_comments(s["plugin/nvmtl_vk.c"])
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    ob = strip_comments(s["plugin/NVMTLObjects.m"])
+    dr = body(vk, 'static void nvmtl_vk_note_dropped(')
+    ls = body(vk, 'static void nvmtl_vk_note_loss(')
+    on = body(an, 'static int nvmtl_air_nir_on(void)')
+    fs = body(an, 'NVMTLComputePipelineState *nvmtl_air_nir_for_size(')
+    return ('nvmtl_air_nir_gpu_fault(' in dr and 'nvmtl_air_nir_gpu_fault(' in ls and
+            '!atomic_load_explicit(&g_air_nir_fallen' in on and 'fallen' in fs and
+            'nvmtl_air_nir_render_bound(' in ob)
+
+def nan_to_zero(s):
+    nk = strip_comments(s["nvk/air/nvk_air_to_nir.c"])
+    cv = body(nk, 'air_convert(struct air_tr *t,')
+    f2 = body(nk, 'air_f2int(nir_builder *b,')
+    return ('air_f2int(b, x, bits' in cv and 'case OP_FPTOSI: return air_f2int(' in nk and 'air_fisnan(b, x)' in f2 and
+            'nir_f2iN(' not in cv)
+
+def ws_marker(s):
+    an = strip_comments(s["plugin/NVMTLAirNir.m"])
+    mk = body(an, 'static NVMTLComputePipelineState *nvmtl_air_nir_make(')
+    rp = body(an, 'int nvmtl_air_nir_render_pipeline(')
+    on = body(an, 'static int nvmtl_air_nir_on(void)')
+    return ('nvmtl_air_nir_ws_arm();' in mk and 'nvmtl_air_nir_ws_arm();' in rp and
+            'access(g_air_nir_ws_marker, F_OK) == 0' in on)
+
 CHECKS = [
+    ("a GPU fault turns the road off in the process: the channel-rebuild and device-loss paths tell it, binds and dispatches switch to the SPIR-V twins", gpu_fault_hooks,
+     ("plugin/nvmtl_vk.c", '    nvmtl_air_nir_gpu_fault("a channel rebuild dropped a command buffer");\n', '')),
+    ("every float-to-integer conversion of the frontend turns a NaN into 0, as Metal and the translator do", nan_to_zero,
+     ("nvk/air/nvk_air_to_nir.c", '      return air_f2int(b, x, bits, kto == \'s\');', "      return kto == 's' ? nir_f2iN(b, x, bits) : nir_f2uN(b, x, bits);")),
+    ("WindowServer's crash marker is set before its first pipeline on the road and turns a later start off", ws_marker,
+     ("plugin/NVMTLAirNir.m", '    nvmtl_air_nir_ws_arm();\n    NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];', '    NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];')),
     ("NVMTL_AIR_NIR is read once, in one place, through nvmtl_air_nir_switch", switch_once,
      ("plugin/NVMTLAirNir.m", 'BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why)\n{',
       'BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why)\n{\n    if (getenv("NVMTL_AIR_NIR")) return NO;')),

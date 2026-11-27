@@ -2656,6 +2656,8 @@ extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictio
 // per-process count of the roads
 NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, NSDictionary *samplers, NSDictionary *tgLen, NSString **why);
 NVMTLComputePipelineState *nvmtl_air_nir_for_size(NVMTLComputePipelineState *ps, const uint32_t l[3]);
+NVMTLRenderPipelineState *nvmtl_air_nir_render_bound(NVMTLRenderPipelineState *ps);
+int nvmtl_air_nir_fallen(void);
 void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why, uint64_t ns);
 // facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
 enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
@@ -4892,6 +4894,9 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
     ps = (id<MTLRenderPipelineState>)[self nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)ps];
+    // after a GPU fault turned the AIR-to-NIR road off in the process, a road pipeline draws as its SPIR-V twin
+    if (nvmtl_air_nir_fallen() && [(id)ps isKindOfClass:[NVMTLRenderPipelineState class]])
+        ps = (id<MTLRenderPipelineState>)nvmtl_air_nir_render_bound((NVMTLRenderPipelineState *)ps);
     // The same pipeline again inside a begun pass changes nothing: Apple's OpenGL renderer sets it before every draw, so
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
     static int psoSkip = -1;   // NVMTL_NO_PSO_SKIP=1 (nvrm610.conf) sets the pipeline every time again, to A/B a glitch against the saving

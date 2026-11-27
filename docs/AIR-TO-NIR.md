@@ -677,6 +677,84 @@ post-tessellation vertex functions and imageblocks.
   functions were translated and reflected one by one; their pipelines need the pairs and descriptors WindowServer
   makes, which are not on disk.
 
+## Terminal's GPU fault, the per-process fallback and WindowServer (round 7)
+
+**The fault.** On 3.0.21 to 3.0.23 every Terminal launch faulted the GPU (Xid 31) 40 to 70 ms after its fourth render
+pipeline was made, rebuilt its channel three times and lost the device, and its window stopped drawing. Of its eight
+pipelines one took the road: QuartzCore's `buffer_image_blit_vert_lpf` / `buffer_image_blit_frag_lpf` (its two `nir1`
+shader-cache entries were born in Terminal's first launch of the build and touched by every later one; no other process
+of the boot made that pipeline on the road). The fragment reads one byte of a device buffer at
+`int(min(floor(uv.x), x_max) + offset + min(floor(uv.y), y_max) * bpr)`. NVK's frontend lowered `air.convert.s.i32.f.f32`
+to a bare `f2i32`, and NAK's F2I gives `0x80000000` for a NaN, so a NaN index read 2 GiB below the buffer; Metal, and
+the translator's every `OpConvertFToS`/`OpConvertFToU` (`translator/src/passes/finalize.rs`
+`metal_nan_to_zero_conversions`), give 0. The same pipeline with no NaN in its inputs drew right on the road
+(`r_rleblit`, `r_qcblit` with QuartzCore's own AIR, an R8 target, managed buffers, a warm cache): its NIR in the harness
+is byte for byte the NIR Terminal cached. `conv_edge` (a NaN converted: `0x80000000` on the old road, 0 on the SPIR-V
+road) and `r_rleblit_nan` (the blit with a NaN offset: on the 3.0.23 NVK one Xid 31 and one channel rebuild in the
+harness, as in Terminal) reproduce it; both pass on both roads now.
+
+**The translator's Metal rewrites, and the frontend's match of each** (the coordinator's audit; translator file, then
+the frontend's place in `nvk/air/nvk_air_to_nir.c`):
+
+| rewrite in the translator | the frontend before | now | test |
+|---|---|---|---|
+| a NaN converted to an integer is 0 (`finalize.rs:288` `metal_nan_to_zero_conversions`) | `f2i`/`f2u`: F2I's `0x80000000` | fixed: `air_f2int` (every `air.convert` from a float, `fptosi`, `fptoui`) | conv_edge, r_rleblit_nan |
+| `OpIsNan`, `OpIsInf` keep NaN and infinities (spirv_to_nir's `nir_fp_preserve_nan`) | `x != x` under fast math, which NIR may fold to false | fixed: `air_fisnan`, `isinf` and `isfinite` with NaN and infinities kept | conv_edge |
+| precise `fmin`/`fmax`/`min`/`max`/`clamp`/`fmin3`/`fmax3`/`fmedian3`, `llvm.minnum`/`maxnum` are NMin/NMax/NClamp (`passes/air_calls/bfloat_glsl.rs:217` `nan_aware_if_precise`); `fast_` ones FMin/FMax/FClamp | fast-math `fmin`/`fmax` for both | fixed: `air_fminmax` keeps NaN for the precise ones and infinities for both, as spirv_to_nir does | minmax_nan (passed before too: NIR did not fold these cases) |
+| `round` is Metal's: truncation, plus one toward the sign when the remainder reaches a half (`float_imageblock.rs:942` `lower_metal_round`) | `sign(x) * floor(abs(x) + 0.5)`: 0.49999997 rounded to 1, 2^23 + 1 to 2^23 + 2 | fixed: `air_metal_round` | round_edge |
+| `pow` has C's special values (`rawbyte_unary.rs:465` `lower_metal_pow`) | `fpow`: NaN for every negative base | fixed: `air_metal_pow` (`powr` stays `fpow`) | pow_edge |
+| a float narrowed to a half is NoContraction (`finalize.rs:351` `exact_narrowing_float_conversions`) | `f2f16_rtne` under fast math | fixed: `air_f2f16` is exact | narrow_exact (passed before too) |
+| a buffer of a runtime array indexed with data stays a descriptor, bounds-checked for graphics with robustBufferAccess (`wrapper/src/buffer_addresses.rs:203` `kept_roots`) | read through its address: past its end an MMU fault | fixed: such a vertex or fragment function is refused, `air_refuse_unchecked_indexing` (compute is not bounds-checked on either road) | r_oob |
+| `fmod` is `x - y * trunc(x / y)` (`float_imageblock.rs:384`) | `frem`, the same definition | matched | fmath (round 3) |
+| `sdiv`/`srem`/`udiv`/`urem`, shifts: one SPIR-V instruction each (`native/emitter/body/mod.rs:45`), spirv_to_nir's `idiv`/`irem`/`udiv`/`umod`/`ishl` | the same NIR operations | matched | imath (round 3) |
+| `air.compile.denorms_disable` sets `denorm_flush_to_zero_f32` (`lib.rs:169`), which nothing emits | no float-control mode | matched (neither road flushes) | - |
+| `saturate` is NClamp/FClamp(x, 0, 1) (`float_imageblock.rs` `saturate`) | `fsat` | matched in value (NaN gives 0 on both) | fmath |
+| `sinpi`/`cospi`/`tanpi`, `exp10`/`log10`, `fast_tanh`, `ldexp`, half functions in float (`lower_metal_pi_scaled_sin_cos`, `lower_fast_tanh`, `lower_fast_ldexp`, `half_glsl_op`) | the frontend's own formulas | differ in precision only (no defined edge value at stake); left | fmath, math_lib |
+
+**The per-process fallback** (`plugin/NVMTLAirNir.m` `nvmtl_air_nir_gpu_fault`, called from `plugin/nvmtl_vk.c`
+`nvmtl_vk_note_dropped` and `nvmtl_vk_note_loss`): a channel rebuild that drops a command buffer, or a device lost, in a
+process that made any pipeline or variant on the road turns the road off there for good (`nvmtl_air_nir_on` answers 0
+from then on). New pipelines and variants take the SPIR-V road; a render pipeline of the road draws as its SPIR-V twin
+from its next bind (`nvmtl_air_nir_render_bound`, the twin made once from its descriptor), a compute pipeline of the road
+dispatches as its twin (`nvmtl_air_nir_for_size`); pipelines already in command buffers keep theirs. The process name
+goes on `airnir-off-<build>.txt` in the plugin's shader-cache folder (the build: a digest of this plugin's and this NVK's
+identity; another build's list is removed when a process opens the folder), and a process on it starts on the SPIR-V
+road (`compute and render pipelines: AIR to NIR off in <process> (the process faulted the GPU on the road before ...)`).
+Said once in the system log: `AIR to NIR off in <process> from now on: a GPU fault (...) after N pipeline(s) ...`. To
+see the list: `ls ~/Library/Caches/nvmtl/spvcache/airnir-off-*` (a sandboxed app's is in its container's Caches).
+
+**WindowServer** takes the road since 3.0.24, with the per-process fallback and a crash marker
+(`nvmtl_air_nir_ws_arm`): `airnir-ws-<build>.marker` in its own cache folder (`<user cache>/WindowServer/nvmtl/spvcache`)
+is written before its first pipeline on the road and removed after 60 s on the road without a GPU fault; a WindowServer
+start that finds it (the one before died in its first minute) puts WindowServer on the fallback list, so that start and
+the rest of the driver build stay on the SPIR-V road. `NVK_FAULT_INJECT=ws:<seconds>:<process>` (a development plugin
+only; NVK takes no mode `ws`) runs that logic in a normal process.
+
+### Tested (round 7)
+
+- Through the plugin (`r7/final-runs.sh`: two runs on each road, one with the caches of the first, one with
+  `PLUGIN_RUN_CORRUPT=1`, then the marker and fallback tests; QuartzCore's two blit functions given with
+  `PLUGIN_RUN_EXTRA_AIR`): on the road 81 pass, `grid2d_base` skipped as before (round 6's 69, the five edge tests and
+  seven render pairs); eight take the SPIR-V road as they must: the four function-constant refusals, `r_primid`,
+  `r_oob`, and `r_buffers` and `r_nospace`, whose fragments index their palette with data (`pal[idx[i] & 15]`), so the
+  bounds rule sends them where the palette stays a checked descriptor. 97 functions are made without the translator.
+  With `NVMTL_AIR_NIR=0` the same five tests as in rounds 4 to 6 fail (`fmath`, `fmath_precise`, `math_lib`,
+  `tex_offset`, `align_misaligned`) and the new ones pass. With `PLUGIN_RUN_CORRUPT=1` every test that dispatches or
+  draws fails. The fault counters moved only for the one fault injected on purpose (`fallback`: one channel rebuild,
+  `chan_recovered` and `chan_dropped` +1, `xid_count` and `chan_gave_up` unchanged); WindowServer logged no GPU error.
+- Before the fix, with the installed 3.0.23 NVK under the development plugin: `conv_edge` (NaN converted to
+  `0x80000000`), `round_edge` (0.49999997 rounded to 1) and `pow_edge` (`pow(-2, 3)` NaN) fail, and `r_rleblit_nan`
+  faults the GPU once (Xid 31, one channel rebuild, as in Terminal); after it all pass on both roads.
+- `fallback` (`NVK_FAULT_INJECT=mmu:6:plugin_run`, set by `plugin_run`): the blit and `conv_edge` made on the road; the
+  sixth flush faults and is dropped; the plugin says the road is off, the blit then draws right as its SPIR-V twin,
+  `conv_edge` dispatches right as its twin, a new pipeline takes the SPIR-V road, and the list names `plugin_run`.
+  `fallback_next` (a second process with those caches): the road is off from the start because the list names it.
+- `ws_marker`, `ws_marker_crash`, `ws_marker_next` (`NVK_FAULT_INJECT=ws:2:plugin_run`): the marker is set before the
+  first pipeline on the road and cleared after a clean 2 s; a process that ends with it set leaves it; the next start
+  finds it, stays on the SPIR-V road, puts itself on the list and removes the marker.
+- Host: `tools/test_air_nir_plugin.py` (53: the list's and the marker's helpers, the fault hooks, the NaN rule and the
+  marker, each with its negative control), `tools/test_switch_registry.py`.
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).

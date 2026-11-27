@@ -1745,10 +1745,13 @@ static void nvmtl_vk_stub_recording(void)
     if (pvkCmdBuildAccelerationStructuresKHR) pvkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)nvmtl_noop_cmd;
     if (pvkCmdCopyAccelerationStructureKHR) pvkCmdCopyAccelerationStructureKHR = (PFN_vkCmdCopyAccelerationStructureKHR)nvmtl_noop_cmd;
 }
-/* Called once, by whichever thread first sees the device go: names the cause in the log and turns recording into no-ops. */
+void nvmtl_air_nir_gpu_fault(const char *what);   /* NVMTLAirNir.m: the road's per-process fallback */
+/* Called once, by whichever thread first sees the device go: names the cause in the log and turns recording into no-ops.
+   A device lost (VK_ERROR_DEVICE_LOST) is a GPU fault to the AIR-to-NIR road's per-process fallback. */
 static void nvmtl_vk_note_loss(const char *where, int vkresult, long waited_ms)
 {
     if (atomic_exchange(&g_lost_after_up, 1)) return;
+    if (vkresult == VK_ERROR_DEVICE_LOST) nvmtl_air_nir_gpu_fault("the device was lost");
     const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW), up = atomic_load(&g_up_ns);
     char cause[512];
     nvmtl_loss_cause(cause, sizeof cause, where, vkresult, waited_ms, g_last_submit_who, up ? (long)((now - up) / 1000000000ull) : -1, getprogname());
@@ -9389,11 +9392,13 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     f->fence = fence;
     return 0;
 }
+void nvmtl_air_nir_gpu_fault(const char *what);   /* NVMTLAirNir.m: the road's per-process fallback */
 /* A submission NVK dropped in a channel rebuild: counted, logged (the first and every 256th), and on the first one the
    fault-context rings are written out so that the work that faulted is on record. Not the device-loss file and not
-   nvmtl_vk_note_loss: the device is up. */
+   nvmtl_vk_note_loss: the device is up. The AIR-to-NIR road is told (its per-process fallback). */
 static void nvmtl_vk_note_dropped(long waited_ms)
 {
+    nvmtl_air_nir_gpu_fault("a channel rebuild dropped a command buffer");
     static _Atomic unsigned long long dropped;
     const unsigned long long n = atomic_fetch_add(&dropped, 1) + 1;
     if (!nvmtl_drop_log_due(n)) return;

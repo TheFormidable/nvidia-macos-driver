@@ -327,6 +327,171 @@ conv_check(struct run *r)
    return ok;
 }
 
+/* --- conv_edge ------------------------------------------------------------------------------------------------ */
+
+static const float conv_edge_in[] = { NAN, INFINITY, -INFINITY, 3e9f, -3e9f, 2147483648.0f, -2147483904.0f, 5e9f,
+                                      -1.5f, 1.5f, 65537.5f, -0.0f, 4294967040.0f, 1e38f, -1e38f, 7.75f };
+
+static void
+conv_edge_setup(struct run *r)
+{
+   unsigned n = r->threads;
+   float *f = slot(r, 0, n * 4);
+   slot(r, 1, n * 6 * 4);
+   for (unsigned i = 0; i < n; i++)
+      f[i] = i < sizeof conv_edge_in / sizeof *conv_edge_in ? conv_edge_in[i] : rndf(-70000, 70000);
+}
+
+/* Metal's conversions: NaN is 0, a value out of range is the type's limit, toward zero otherwise */
+static int32_t conv_edge_i(float x) { return x != x ? 0 : x >= 2147483648.0f ? INT32_MAX : x <= -2147483648.0f ? INT32_MIN : (int32_t)x; }
+static uint32_t conv_edge_u(float x) { return x != x ? 0 : x >= 4294967296.0f ? UINT32_MAX : x <= 0 ? 0 : (uint32_t)x; }
+
+static bool
+conv_edge_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *f = S(r, 0);
+   uint32_t *want = calloc(n * 6, 4);
+   for (unsigned i = 0; i < n; i++) {
+      const float x = f[i];
+      uint32_t *o = want + i * 6;
+      o[0] = (uint32_t)conv_edge_i(x);
+      o[1] = conv_edge_u(x);
+      o[2] = (uint32_t)(int32_t)(int16_t)conv_edge_i(x);
+      o[3] = (uint32_t)conv_edge_i(x * 2.0f);
+      o[4] = isnan(x) ? 1u : 0u;
+      o[5] = (isinf(x) ? 2u : 0u) | (isfinite(x) ? 4u : 0u);
+   }
+   bool ok = check_u32(r, "out", S(r, 1), want, n * 6, 6);
+   free(want);
+   return ok;
+}
+
+/* --- metal_edge: minmax_nan, round_edge, pow_edge, narrow_exact -------------------------------------------------- */
+
+static bool
+edge_same(float got, float want, float rel)
+{
+   if (want != want) return got != got;
+   if (want == 0) return got == 0 && signbit(got) == signbit(want);
+   if (isinf(want)) return got == want;
+   return fabsf(got - want) <= rel * fabsf(want);
+}
+
+static const float minmax_in[16] = { NAN, 3.0f, -2.0f, NAN, NAN, NAN, 0.5f, -0.5f, INFINITY, NAN, -INFINITY, 1.0f, 7.0f, -7.0f, NAN, 0.0f };
+
+static void
+minmax_nan_setup(struct run *r)
+{
+   float *f = slot(r, 0, r->threads * 4);
+   slot(r, 1, r->threads * 8 * 4);
+   for (unsigned i = 0; i < r->threads; i++)
+      f[i] = i < 16 ? minmax_in[i] : rndf(-10, 10);
+}
+
+/* GLSL's NMin/NMax/NClamp, which the translator makes of precise::fmin, fmax, clamp, fmin3, fmax3 and fmedian3: a NaN
+ * operand gives way to the other */
+static float nmin(float a, float b) { return a != a ? b : b != b ? a : a < b ? a : b; }
+static float nmax(float a, float b) { return a != a ? b : b != b ? a : a > b ? a : b; }
+
+static bool
+minmax_nan_check(struct run *r)
+{
+   const float *f = S(r, 0), *g = S(r, 1);
+   for (unsigned i = 0; i < r->threads; i++) {
+      const float x = f[i], y = f[i ^ 1];
+      const float want[8] = { nmin(x, y), nmax(x, y), nmin(nmax(x, -1.0f), 1.0f), nmin(nmin(x, y), 0.25f), nmax(nmax(x, y), 0.25f),
+                              nmax(nmin(x, y), nmin(nmax(x, y), 0.25f)), 0, nmin(x, INFINITY) };
+      for (unsigned k = 0; k < 8; k++) {
+         if (k == 6)
+            continue;
+         if (!edge_same(g[i * 8 + k], want[k], 0))
+            return FAILF(r, "out[%u] (thread %u, x %g, y %g, output %u) = %g, expected %g", i * 8 + k, i, x, y, k, g[i * 8 + k], want[k]);
+      }
+   }
+   return true;
+}
+
+static const float round_in[16] = { 0.49999997f, 2.5f, -2.5f, 8388609.0f, -0.5f, 0.5f, 1.5f, -1.49999988f,
+                                    16777215.0f, -8388609.0f, 0.0f, -0.0f, 3.49999976f, 100.5f, -100.5f, 2.4999998f };
+
+static void
+round_edge_setup(struct run *r)
+{
+   float *f = slot(r, 0, r->threads * 4);
+   slot(r, 1, r->threads * 4);
+   slot(r, 2, r->threads * 2);
+   for (unsigned i = 0; i < r->threads; i++)
+      f[i] = i < 16 ? round_in[i] : rndf(-1000, 1000);
+}
+
+/* Metal's round: half away from zero (C's roundf); the half one on the half value */
+static bool
+round_edge_check(struct run *r)
+{
+   const float *f = S(r, 0), *g = S(r, 1);
+   const uint16_t *h = S(r, 2);
+   for (unsigned i = 0; i < r->threads; i++) {
+      const float want = roundf(f[i]);
+      if (!(g[i] == want && signbit(g[i]) == signbit(want)))
+         return FAILF(r, "round(%.9g) (thread %u) = %.9g, expected %.9g", f[i], i, g[i], want);
+      const float hx = h2f(f2h(f[i] * 0.25f)), hw = h2f(f2h(roundf(hx)));
+      if (h2f(h[i]) != hw)
+         return FAILF(r, "round(half %.9g) (thread %u) = %.9g, expected %.9g", hx, i, h2f(h[i]), hw);
+   }
+   return true;
+}
+
+static const float pow_in[32] = { -2, 3, -2, 2, -2, 0.5f, -0.0f, 3, 1, INFINITY, -1, INFINITY, 5, 0, NAN, 0,
+                                   -8, 1.0f / 3.0f, -INFINITY, 3, -INFINITY, 2, 2, 10, 0.5f, -3, -3, -3, 9, 0.5f, -1, NAN };
+
+static void
+pow_edge_setup(struct run *r)
+{
+   float *f = slot(r, 0, r->threads * 2 * 4);
+   slot(r, 1, r->threads * 4);
+   for (unsigned i = 0; i < r->threads * 2; i++)
+      f[i] = i < 32 ? pow_in[i] : (i & 1) ? rndf(-4, 4) : rndf(0.1f, 10);
+}
+
+/* Metal's pow is C's powf at its special values (a negative base with an integer exponent keeps the sign of an odd
+ * one, 1 to any power and -1 to an infinite one is 1, x^0 is 1, a finite negative base to a non-integer power is NaN) */
+static bool
+pow_edge_check(struct run *r)
+{
+   const float *f = S(r, 0), *g = S(r, 1);
+   for (unsigned i = 0; i < r->threads; i++) {
+      const float x = f[i * 2], y = f[i * 2 + 1];
+      const float want = powf(x, y);
+      if (!edge_same(g[i], want, 2e-6f))
+         return FAILF(r, "pow(%g, %g) (thread %u) = %.9g, expected %.9g", x, y, i, g[i], want);
+   }
+   return true;
+}
+
+static void
+narrow_exact_setup(struct run *r)
+{
+   float *f = slot(r, 0, r->threads * 4);
+   slot(r, 1, r->threads * 2 * 4);
+   for (unsigned i = 0; i < r->threads; i++)
+      f[i] = 1.0f + i * 0.0001234f;
+}
+
+static bool
+narrow_exact_check(struct run *r)
+{
+   const float *f = S(r, 0), *g = S(r, 1);
+   for (unsigned i = 0; i < r->threads; i++) {
+      const float x = f[i], x3 = x * 3.0f;
+      const float want0 = h2f(f2h(x3)) - x3, want1 = h2f(f2h(x)) * 2.0f;
+      if (g[i * 2] != want0 || g[i * 2 + 1] != want1)
+         return FAILF(r, "thread %u (x %.9g): %.9g and %.9g, expected %.9g and %.9g (the half rounding kept)", i, x, g[i * 2],
+                      g[i * 2 + 1], want0, want1);
+   }
+   return true;
+}
+
 /* --- loop_phi ------------------------------------------------------------------------------------------------- */
 
 static void
@@ -2214,6 +2379,11 @@ static const struct test tests[] = {
    { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
    { "imath", NULL, "imath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, imath_setup, imath_check },
    { "conv", NULL, "conv", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, conv_setup, conv_check },
+   { "conv_edge", NULL, "conv_edge", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, conv_edge_setup, conv_edge_check },
+   { "minmax_nan", "metal_edge", "minmax_nan", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, minmax_nan_setup, minmax_nan_check },
+   { "round_edge", "metal_edge", "round_edge", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, round_edge_setup, round_edge_check },
+   { "pow_edge", "metal_edge", "pow_edge", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, pow_edge_setup, pow_edge_check },
+   { "narrow_exact", "metal_edge", "narrow_exact", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, narrow_exact_setup, narrow_exact_check },
    { "loop_phi", NULL, "loop_phi", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, loop_phi_setup, loop_phi_check },
    { "switch", NULL, "switch_case", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, switch_setup, switch_check },
    { "tg_reduce", NULL, "tg_reduce", { 256, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, tg_reduce_setup, tg_reduce_check },

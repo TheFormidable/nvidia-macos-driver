@@ -744,7 +744,8 @@ rbpp(MTLPixelFormat f)
 {
    switch (f) {
    case MTLPixelFormatRGBA32Float: return 16;
-   case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatR32Float: case MTLPixelFormatDepth32Float: return 4;
+   case MTLPixelFormatR8Unorm: return 1;
+   case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatR32Float: case MTLPixelFormatDepth32Float: return 4;
    default: fprintf(stderr, "plugin_run: format %lu has no size here\n", (unsigned long)f); exit(2);
    }
 }
@@ -801,6 +802,11 @@ run_render_test(const struct rtest *t)
    char path[2048], why[256] = "";
    const char *name = t->name;
    snprintf(path, sizeof path, "%s/%s.metallib", air_dir, t->air);
+   if (!strcmp(t->air, "qc_blit") && access(path, R_OK) != 0) {   /* QuartzCore's functions: PLUGIN_RUN_EXTRA_AIR */
+      printf("%-16s SKIPPED  no %s.metallib (PLUGIN_RUN_EXTRA_AIR)\n", name, t->air);
+      fprintf(rtsv, "%s\tnone\tSKIPPED\t\t\t\t\t0\tno library\t%s\n", name, t->tolerance);
+      return SKIPPED;
+   }
    NSError *e = nil;
    id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
    if (!lib) {
@@ -843,6 +849,13 @@ run_render_test(const struct rtest *t)
    [d release];
    const int road = ps && rroad_ivar ? *((const uint8_t *)(__bridge void *)ps + ivar_getOffset(rroad_ivar)) : ps ? 0 : -1;
    const char *road_name = road == 1 ? "nir" : road == 0 ? "spirv" : "none";
+   if (ps && t->spirv_road && road == 1) {
+      /* not drawn: what the road must refuse may fault the GPU on it */
+      printf("%-16s FAIL     took the AIR-to-NIR road, which must refuse it (not drawn)\n", name);
+      fprintf(rtsv, "%s\tnir\tFAIL\t%.3f\t%.3f\t\t\t0\ttook the road\t%s\n", name, fn_ms, ps_ms, t->tolerance);
+      [ps release]; [vf release]; [ff release]; [lib release];
+      return FAIL;
+   }
    if (!ps) {
       printf("%-16s FAIL     no pipeline: %s\n", name, e.localizedDescription.UTF8String ?: (vf && ff ? "?" : "no function"));
       fprintf(rtsv, "%s\tnone\tFAIL\t%.3f\t%.3f\t\t\t0\tno pipeline\t%s\n", name, fn_ms, ps_ms, t->tolerance);
@@ -965,6 +978,8 @@ run_render_test(const struct rtest *t)
    return ok ? PASS : FAIL;
 } }
 
+#include "fallback_test.h"
+
 @protocol PluginDevice <MTLDevice>
 - (instancetype)initWithAcceleratorPort:(mach_port_t)port;
 @end
@@ -981,6 +996,24 @@ main(int argc, char **argv)
    out_dir = argv[4];
    corrupt = getenv("PLUGIN_RUN_CORRUPT") && getenv("PLUGIN_RUN_CORRUPT")[0] == '1';
    char p[1024];
+   /* "fallback": NVK's test hook faults this process's channel once (fallback_test.h); PLUGIN_RUN_FAULT_AT picks the
+    * flush (default the 6th) */
+   bool fallback = false, fallback_next = false;
+   int ws_phase = -1;
+   for (int a = 5; a < argc; a++) {
+      fallback |= !strcmp(argv[a], "fallback");
+      fallback_next |= !strcmp(argv[a], "fallback_next");
+      if (!strcmp(argv[a], "ws_marker")) ws_phase = 0;
+      if (!strcmp(argv[a], "ws_marker_crash")) ws_phase = 1;
+      if (!strcmp(argv[a], "ws_marker_next")) ws_phase = 2;
+   }
+   if (ws_phase >= 0) {   /* WindowServer's logic in this process (a development plugin only) */
+      setenv("NVK_FAULT_INJECT", "ws:2:plugin_run", 1);   /* treated as WindowServer, a clean "minute" of 2 s */
+   }
+   if (fallback) {
+      snprintf(p, sizeof p, "mmu:%s:plugin_run", getenv("PLUGIN_RUN_FAULT_AT") ?: "6");
+      setenv("NVK_FAULT_INJECT", p, 1);
+   }
    setenv("NVMTL_PROCESS_ENV", "1", 1);
    setenv("NVMTL_ENABLE", "1", 1);
    setenv("NVMTL_ICD_LIB", argv[2], 1);
@@ -1074,6 +1107,18 @@ main(int argc, char **argv)
       case SKIPPED: skipped++; break;
       }
    }
+   if (ws_phase >= 0)
+      switch (run_ws_test(ws_phase)) {
+      case PASS: pass++; break;
+      case FAIL: fail++; break;
+      case SKIPPED: skipped++; break;
+      }
+   if (fallback || fallback_next)
+      switch (run_fallback_test(fallback_next && !fallback)) {
+      case PASS: pass++; break;
+      case FAIL: fail++; break;
+      case SKIPPED: skipped++; break;
+      }
    fclose(rtsv);
    read_counters(c1);
    print_counters("at end", c1);

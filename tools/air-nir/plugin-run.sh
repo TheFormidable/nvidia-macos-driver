@@ -45,6 +45,9 @@ xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/r_nospace.ll" "$HERE/metal-re
   xcrun -sdk macosx metal -c -o "$OUT/air/r_nospace.air" "$OUT/air/r_nospace.ll" &&
   xcrun -sdk macosx metallib -o "$OUT/air/r_nospace.metallib" "$OUT/air/r_nospace.air" ||
   { echo "plugin-run.sh: r_nospace not made" >&2; exit 2; }
+# PLUGIN_RUN_EXTRA_AIR: a folder of more .metallib files for the tests that name them (r_qcblit: qc_blit.metallib, made
+# from QuartzCore's own functions, which are not in this tree)
+if [ -n "${PLUGIN_RUN_EXTRA_AIR:-}" ]; then cp "$PLUGIN_RUN_EXTRA_AIR"/*.metallib "$OUT/air/" || exit 2; fi
 clang -O1 -fno-objc-arc -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers \
   -I"$ROOT/nvk/air" -I"$VKINC" -framework Foundation -framework Metal -framework IOKit \
   -o "$OUT/plugin_run" "$HERE/plugin_run.m" || { echo "plugin-run.sh: plugin_run does not build" >&2; exit 2; }

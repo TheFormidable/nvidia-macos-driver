@@ -2,6 +2,39 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 7: Terminal's GPU fault, a per-process fallback, WindowServer on the road
+
+- **Fixed: Terminal's window stopped drawing on 3.0.21 to 3.0.23** (Xid 31, three channel rebuilds, then the device
+  lost). Its one pipeline on the road is QuartzCore's `buffer_image_blit_vert_lpf` / `buffer_image_blit_frag_lpf`,
+  whose fragment reads one byte at `int(x + offset + y * bpr)`. NVK's AIR-to-NIR frontend lowered float-to-integer
+  conversions to NIR's bare `f2i`/`f2u`, and NAK's F2I gives `0x80000000` for a NaN: the read went 2 GiB below the
+  buffer. Metal, and the translator (`finalize.rs` `metal_nan_to_zero_conversions`), give 0. Every `air.convert` from
+  a float and LLVM's `fptosi`/`fptoui` now select 0 for a NaN (`nvk/air/nvk_air_to_nir.c` `air_f2int`).
+- **The frontend matches the translator's other Metal rewrites**: `isnan`, `isinf` and `isfinite` keep NaN and
+  infinities (the builder's fast math let NIR fold `x != x` to false); precise `fmin`, `fmax`, `min`, `max`,
+  `clamp`, `fmin3`, `fmax3`, `fmedian3` and `llvm.minnum`/`maxnum` are NaN-aware (GLSL's NMin/NMax/NClamp); `round`
+  is Metal's (half away from zero by the truncation and its remainder: `sign(x) * floor(|x| + 0.5)` rounded
+  0.49999997 to 1); `pow` has C's special values (a negative base with an integer exponent, +-1 to an infinite power,
+  `x^0`); a float narrowed to a half is exact. A vertex or fragment function that indexes a buffer holding an array
+  with a value read from memory or a texture takes the SPIR-V road, where that buffer stays a bounds-checked
+  descriptor (a read past its end gives 0 there; through its address it would fault the GPU).
+- **A GPU fault turns the road off in the process that had it** (`plugin/NVMTLAirNir.m` `nvmtl_air_nir_gpu_fault`):
+  when a channel rebuild drops a command buffer, or the device is lost, in a process that made a pipeline on the road,
+  new pipelines and variants take the SPIR-V road, the road's render pipelines draw as their SPIR-V twins from their
+  next bind and its compute pipelines dispatch as theirs, and the process name goes on a list in the plugin's
+  shader-cache folder (`airnir-off-<build>.txt`), so its next launches start on the SPIR-V road while this driver
+  build is installed; a new build forgets the list. Said once in the system log (`AIR to NIR off in <process> from
+  now on`). `NVMTL_AIR_NIR=0` stays the one way out.
+- **WindowServer takes the road** (Isaac's choice of 2026-11-27, with automatic fallback): besides the per-process
+  fallback, its plugin sets a crash marker in its own cache folder before its first pipeline on the road and clears it
+  after a clean minute; a start that finds the marker puts WindowServer on the fallback list, so that start and the
+  rest of the driver build stay on the SPIR-V road.
+- Tests (`tools/air-nir`): `conv_edge`, `minmax_nan`, `round_edge`, `pow_edge`, `narrow_exact` (compute, both roads),
+  `r_rleblit`, `r_rleblit8`, `r_rleblit_nan`, `r_qcblit`, `r_qcblit8`, `r_qcblit8m` (the blit, QuartzCore's own AIR
+  with `PLUGIN_RUN_EXTRA_AIR`), `r_oob` (must take the SPIR-V road); `fallback` and `fallback_next` (a fault NVK's test
+  hook injects: `NVK_FAULT_INJECT=mmu:6:plugin_run`), `ws_marker`, `ws_marker_crash`, `ws_marker_next`
+  (`NVK_FAULT_INJECT=ws:2:plugin_run`, a development plugin only, runs WindowServer's marker logic in the harness).
+
 ### AIR to NIR, round 6: the refusals real functions hit next
 
 - **NVK's AIR-to-NIR frontend takes more of what real processes make**: a buffer whose metadata names no address
