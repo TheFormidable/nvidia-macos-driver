@@ -118,6 +118,9 @@ sums = dict((f, s) for s, f in re.findall(r"(?m)^([0-9a-f]{64})  (\S+)$", m.grou
 # copies or runs from there after the chain (WARNINGS is a ceiling and MESA_BASE is replaced by the commit in the table)
 after = bld[bld.index("for p in $CHAIN; do\n  f=$NVK/"):] if "for p in $CHAIN; do\n  f=$NVK/" in bld else ""
 reads = {c + ".patch" for c in CHAIN29 if c != "@FIXES"} | {"nvk-fixes-after-def16.patch", "ogkm-nvos-620.patch", "ogkm-warnings.patch"}
+# a copy guarded by a patch's name (case " $CHAIN " in *" name "*) ... ;; esac) is read only by the chains that hold it
+after = re.sub(r'(?m)^case " \$CHAIN " in \*" ([\w./-]+) "\*\).*;; esac$',
+               lambda g: g.group(0) if g.group(1) in CHAIN29 else "", after)
 reads |= {f for f in re.findall(r'\$NVK/([\w./-]+)', after) if f not in ("WARNINGS",)}
 arm("the script holds a SHA-256 for every file of nvk/ that the 2.9 build reads, and for nothing else",
     m is not None and set(sums) == reads and len(reads) > 25, sorted(set(sums) ^ reads))
