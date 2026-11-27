@@ -128,7 +128,8 @@ compiled into it could not be published.
 
 ## What it translates
 
-Compute kernels with: buffer arguments in address spaces 1 and 2 (and OpenCL's `air.constant`), threadgroup
+Compute kernels with: buffer arguments in address spaces 1 and 2 (and OpenCL's `air.constant`; since round 6 also one
+whose metadata names no address space, the GL-to-Metal compiler's, by its pointer type as the translator reads it), threadgroup
 arguments, the thread and grid builtins (positions, indices, sizes, SIMD-group index and width; OpenCL's
 `get_global_id` family); integer and float arithmetic, comparisons, `select`, casts, `air.convert.*`, vectors of 1
 to 4, 8 and 16 components, odd integer widths SROA leaves (`i24`, `i48`: kept zero-extended in the next width);
@@ -140,7 +141,13 @@ reductions, prefix sums, shuffles, broadcast, ballot, all, any) on the warp of 3
 values; function constants with their values; textures (`texture1d`/`2d`/`2d_array`/`3d`/`cube`/`cube_array`,
 `texture_buffer`, `depth2d`/`depth2d_array`/`depthcube`) read at a level, sampled at a level or with gradients,
 gathered, compared (`depth2d`), written and read-written (storage), fenced, and their sizes and level counts;
-argument and constexpr samplers.
+argument and constexpr samplers. Since round 6: `texture2d_ms`/`texture2d_ms_array` read by sample (a texel fetch of
+that sample) with their sizes and `get_num_samples`; a sample of an integer texture (through a sampler whose state is
+known, constexpr or given by the request, the translator's nearest fetch: `floor(coord * size) + offset` at the level
+truncated, by each axis's address mode, zero outside with `clamp_to_zero`, the layer clamped; through an argument
+sampler, the hardware's sample, as the translator's); `pack`/`unpack` of `unorm4x8`, `snorm4x8`, `unorm2x16`,
+`snorm2x16` and `half2x16` (to float or half) and `[fast_]ldexp` of floats, NIR's ops for the GLSL.std.450 ones the
+translator lowers them to.
 
 Vertex and fragment functions (round 4): `[[stage_in]]` attributes of one Location (float, half, and 8-, 16- and
 32-bit integer scalars and vectors), `[[vertex_id]]`, `[[instance_id]]`, `[[base_vertex]]`, `[[base_instance]]`;
@@ -151,7 +158,9 @@ outputs `[[position]]`, `[[point_size]]`, `[[clip_distance]]`, `[[render_target_
 `[[color(n)]]` (n < 8, a literal or since round 5 an expression of function constants, and the old form without the
 index operand) of float, half, signed and unsigned types, `[[depth(any|greater|less)]]` (with that depth
 layout) and `[[sample_mask]]`; since round 5 an output that exists only under a function constant (the request's values
-say whether it does; one whose constant is false is written nowhere, as the translator drops it); `discard_fragment` (a demote, as the translator's), `[[early_fragment_tests]]`, sampling
+say whether it does; one whose constant is false is written nowhere, as the translator drops it), and since round 6 a
+stage input that does (a vertex attribute or a fragment input; one whose constant is false declares nothing and reads
+as zeros where the same constant folds its uses away); `discard_fragment` (a demote, as the translator's), `[[early_fragment_tests]]`, sampling
 at the level the derivatives give (with a bias), `dfdx`, `dfdy`, `fwidth`; buffers, textures, samplers and function
 constants as in a kernel, the SIMD-group builtins.
 
@@ -164,17 +173,20 @@ argument buffers, imageblocks, ray tracing, function constants read without thei
 recursive calls, doubles, run-time-sized `alloca`s, a `select` or phi between two kinds of memory, mesh and object
 functions; of vertex and fragment functions: post-tessellation vertex functions (and any metadata after a function's
 arguments other than `early_fragment_tests`), a stage input or output of more than one Location (a matrix, an array, a
-nested structure), a stage input that exists only under a function constant, `[[color(n)]]` inputs (framebuffer
+nested structure), a stage input or output under a function constant the request gives no value for, `[[color(n)]]` inputs (framebuffer
 fetch), `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0), index(1)]]`), raster order groups,
 `[[primitive_id]]`, `[[barycentric_coord]]`, the amplification builtins and any other builtin not listed above,
-threadgroup arguments, a varying the request gives no Location; and of textures: multisampled ones, a written cube or depth texture and a texel read of a cube
-(the translator goes through a 2D-array view of them), sampling an integer texture (the translator emulates it with
-fetches), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
+threadgroup arguments, a varying the request gives no Location; and of textures: arrays of textures (`array<texture2d<T>,
+N>` and `array_ref<...>`: the translator binds one descriptor array, binding 32 + n with count N, which the road's set-0
+layout does not declare yet), multisampled depth textures and written multisampled ones, a written cube or depth texture and a texel read of a cube
+(the translator goes through a 2D-array view of them), a gradient sample or a cube sample of an integer texture through a
+sampler known here (the translator's nearest fetch has neither), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
 level other than 0, `air.is_null_texture`/`get_null_texture` (and, since round 5, a texture or sampler handle used as a plain value:
 a `ptrtoint` and a compare, a select or a phi of two handles, which Apple's compiler writes for a null-texture test; the
 frontend read such a handle's missing value and crashed, below), and samplers with pixel coordinates (constexpr, or an
 argument one whose state the request gives) other than nearest with a clamp and linear 2D `clamp_to_edge`, and with
-bicubic filtering or min/max reduction (the translator emulates the first two).
+bicubic filtering or min/max reduction (the translator emulates the first two); `pack`/`unpack` of `srgb`, `rgb10a2`,
+`rg11b10f`, `rgb9e5` and `rgb565`.
 
 An argument sampler's state is not known when the function is translated: the frontend treats it as one with
 normalized coordinates, as a sampler the plugin creates from a normalized `MTLSamplerState` is. A dispatch or draw
@@ -566,6 +578,104 @@ road does not make it, the translator's variant is made as before. A sampler who
   of 170, this one 36, whose reflections equal the translator's; the rest are refused for other reasons (argument
   buffers, stage inputs under a function constant, framebuffer fetch, `unpack`). Framebuffer fetch (`the fragment
   argument kind air.render_target`, 15) stays refused.
+
+## The refusals real functions hit next (round 6)
+
+Round 6 took the refusals the round-5 sweep of the AIR cache counted most and the 3.0.22 boot's processes met, each
+with the translator's ABI (its handling read first, the bindings unchanged):
+
+- **A buffer whose metadata names no `air.address_space`** (475 functions of the cache, nearly all `__main` of the
+  GL-to-Metal compiler, Minecraft's among them): the parameter's pointer type gives the address space, as the
+  translator reads `addrspace(N)` off the define line (`meta::function_param_pointer_address_spaces`); an address
+  space 0 pointer stays refused. The reflection already read it so.
+- **A stage input that exists only under a function constant** (a vertex attribute or a fragment input, 71 of the
+  cache): the request's values say whether it exists, as for outputs (round 5); one whose constant is false declares
+  no variable and reads as zeros, which the same constant folds away. Without the constant's value it stays refused.
+- **A sample of an integer texture** (48): through a sampler whose state is known here (constexpr, or given by the
+  request) the translator's nearest fetch (`images/sample.rs`, `fetch_coord.rs`): `floor(coord * size) + offset`
+  per axis at the level truncated (0 for a bias or the derivatives' level), each axis by its address mode (repeat as
+  `SMod`, mirrored repeat over twice the size, the clamps to the edge), zero outside where the mode clamps to zero
+  (`clamp_to_zero`, or `clamp_to_border` with a transparent black border), the layer clamped to the last one; through
+  an argument sampler the hardware's sample, as the translator's `OpImageSampleExplicitLod`. A gradient sample of one
+  stays refused, as the translator refuses it, and so does a cube through a known sampler.
+- **Multisampled textures** (`texture2d_ms`, `texture2d_ms_array`, 1 at boot, 33 in the cache): a read by sample is a
+  texel fetch of that sample (`txf_ms`), `get_width`/`get_height` a size query without a level, `get_num_samples` the
+  sample count. A multisampled depth texture stays refused.
+- **`pack`/`unpack`** of `unorm4x8`, `snorm4x8`, `unorm2x16`, `snorm2x16` and `half2x16` (8 at boot), to float or half,
+  are NIR's `pack_*`/`unpack_*` ops, what `spirv_to_nir` makes of the GLSL.std.450 instructions the translator lowers
+  them to (`dispatch_texture.rs packed_format`); **`[fast_]ldexp`** of a float scalar or vector (2 at boot) NIR's
+  `ldexp`, a scalar exponent of a vector splatted (`lower_fast_ldexp`).
+- **A global defined twice** (`redefinition of global '@__air_sampler_state'`, 4 at boot): the text came with the
+  global twice, its second definition without `, align 8` (the line the refusal quotes), so round 5's fix in the
+  translator's linker (the very same line) did not catch it; the state is the one the visible functions `glow_v1` and
+  `glassHighlight_v1` of the AIR cache each define, so it is a fragment linked with them; the text as the plugin hands it over is not on disk (the AIR cache keeps
+  each module alone). The frontend now drops a later definition with the same type and initializer (the lines equal
+  once a trailing `, align N` is set aside) before LLVM parses the text, and refuses one that differs, naming it.
+  `airsweep` hands the text of a file this LLVM will not parse to the frontend when its list line names the kernel
+  (`TEXTOK` / `TEXTREFUSED`).
+
+Two things the sweep found on the way, both in the reflection: a constexpr sampler state of one `i64` (an older
+module's) gave its first word's low half as the frontend's LOD bias (LLVM's aggregate element of a scalar is the scalar),
+where the translator reads a second word of 0 (4 functions); and where a function-constant gate is a predicate the
+static initializer computes, the frontend (which runs the initializer with LLVM, `is_function_constant_defined` true for
+a given constant) and the translator's text evaluation of it (`meta::globals`, which takes `is_function_constant_defined`
+as false and every block in text order) can disagree on which outputs exist. The frontend gives no reflection there
+(`not reflected`: the plugin asks the translator) when the initializer calls `is_function_constant_defined` of a given
+constant or branches; its translation keeps its own reading.
+
+Still refused, next: arrays of textures (`array<texture2d<T>, N>` and `array_ref<...>`, 61 in the cache: the translator
+binds one descriptor array at 32 + n with count N, `TextureArray`, which the plugin's set-0 layout for the road does
+not declare, and the 56 `array_ref` ones, MPS histograms, pass the array through C++ objects in thread memory); argument
+buffers (102); a texture call through a phi of two texture handles (42 of the GL-to-Metal `__main`s); framebuffer fetch,
+post-tessellation vertex functions and imageblocks.
+
+### Tested (round 6)
+
+- Through the plugin (`r6/final-runs.sh`: two runs on each road, one with the caches of the first, one with
+  `PLUGIN_RUN_CORRUPT=1`; the fault counters stayed at 0): on the road all 50 compute tests (round 5's 47, `tex_intsample`,
+  `pack`, `tex_ms`), `align_misaligned` and the 18 render pairs (round 5's 16, `r_nospace`, `r_fcin`) pass, 69 in all,
+  the five the frontend must refuse taking the SPIR-V road; 81 functions are made without the translator. With
+  `NVMTL_AIR_NIR=0` the same five tests as in rounds 4 and 5 fail and the new five pass. With `PLUGIN_RUN_CORRUPT=1`
+  every test that dispatches or draws fails.
+
+| test | what | tolerance |
+|---|---|---|
+| tex_intsample | a `texture2d<uint>` sampled through constexpr samplers (repeat, mirrored repeat, clamp_to_zero, clamp_to_edge at level 1) and an argument sampler | exact |
+| pack | `unpack_*` of the five formats to float and half, `pack_float_to_*` of four, `ldexp` of a vector and a scalar | unorm/snorm 1e-6, half 1e-3, ldexp exact, packs 1 LSB |
+| tex_ms | a 4-sample `texture2d_ms<float>` (cleared by a render pass, `plugin_run` only) read by sample, its size and sample count | 1/255 |
+| r_nospace | `r_buffers` with `air.address_space` taken out of every buffer's metadata (`plugin-run.sh` makes it) | exact |
+| r_fcin | a vertex attribute and a fragment input under a true function constant, another pair under a false one | 1e-4 |
+
+- `airsweep` on a constexpr-sampler kernel whose text defines `@__air_sampler_state` twice: the same definition (once
+  without `, align 8`) translates as the original does; a differing one is refused (`the text defines the global
+  @__air_sampler_state twice, differently`).
+- `sweep.py --reflect` over the AIR cache (round 5's list, 21,196 files): 10,814 kernel, vertex and fragment functions without function-constant
+  values (7 minutes): the frontend translates 5,517 (round 5: 5,001; 3,539 kernels, 684 vertex and 1,294 fragment
+  functions) and its reflection equals the translator's for every one of them by every key it gives (different 0, not
+  reflected 0); it refuses 5,295 (5,811); two are the MPS modules whose translator reflection does not finish (the 60 s
+  alarm, as in round 5). Refused, the first ten: a function constant read without its value 4,025, an argument index
+  from one 570, post-tessellation vertex functions 223, `array_ref` texture arrays 56, framebuffer fetch 56, fragment
+  argument buffers 44, a texture call through a phi of two handles 42, vertex argument buffers 37, a stage input under
+  a function constant without its value 37, imageblocks 33. Of the 475 buffers without an address space 431 translate.
+  With function-constant values (each function's constants all 0, and all 1): the 71 functions with a stage input
+  under a constant give 14 equal and 8 not reflected (initializer-computed gates), the other 120 variants refused for
+  other reasons (`viewport_array_index` read in a fragment 74, framebuffer fetch 28, argument buffers 14, amplification
+  4); round 5's 170 output and colour-index variants give 46 equal (round 5: 36) and 16 not reflected.
+- WindowServer (data for its decision; the road stays off there): its own caches (`<user cache>/WindowServer/nvmtl`)
+  are readable only by `_windowserver`, but its functions are on disk: SkyLight's `SkyLightShaders.air64.metallib` (31
+  functions: `SimpleVertex`, `SimpleTextureFragment`, `UberResampleLanczosFragmentBGRA` and the other names its log
+  shows) and QuartzCore's `default.metallib` (180 AIR modules). Their modules taken out of the metallibs and run through
+  the frontend in a normal process (translation, reflection against the translator's, compute pipelines; no dispatch,
+  WindowServer not touched): of 211 functions without function-constant values, 166
+  translate and their reflection equals the translator's (120 fragment, 39 vertex, 7 kernels); 45 are refused:
+  imageblocks 16, framebuffer fetch 11, a function constant read without its value 6, a stage input (5) or an output (2)
+  under a constant without its value, linear pixel-coordinate samples other than 2D `clamp_to_edge` 5. SkyLight's
+  alone: 18 of 31 (`SimpleVertex` and `SimpleTextureFragment` among them; `UberResampleLanczosFragmentBGRA` reads a
+  function constant). The 7 kernels make their compute pipelines; the 17 other kernels are refused (16 imageblock). With
+  each module's constants all 0 and all 1 (the 13 modules that read constants, 26 variants): 10 equal, 8 not reflected
+  (initializer-computed gates), 8 refused (framebuffer fetch 6, pixel-coordinate linear 2). The vertex and fragment
+  functions were translated and reflected one by one; their pipelines need the pairs and descriptors WindowServer
+  makes, which are not on disk.
 
 ## Phases
 

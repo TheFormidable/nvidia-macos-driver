@@ -2,6 +2,28 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 6: the refusals real functions hit next
+
+- **NVK's AIR-to-NIR frontend takes more of what real processes make**: a buffer whose metadata names no address
+  space (the GL-to-Metal compiler's: the pointer type says it, as the translator reads it; 431 of the 475 such
+  functions of the AIR cache now translate, most of the rest sample through a phi of two texture handles), a stage input that
+  exists only under a function constant (the request's values say whether it does), a sample of an integer texture
+  (through a constexpr sampler, the translator's nearest fetch by address mode; through an argument sampler, the
+  hardware's), a multisampled texture read by sample with its size and sample count, `pack`/`unpack` of `unorm4x8`,
+  `snorm4x8`, `unorm2x16`, `snorm2x16` and `half2x16`, and `ldexp`.
+- A text module that defines a global twice with the same type and initializer (two linked modules'
+  `@__air_sampler_state`, 4 of the 3.0.22 boot's cached refusals) has the repeat dropped before LLVM parses it; one
+  defined twice differently is refused by name.
+- **Fixed**: a constexpr sampler whose state is one `i64` (an older module's) got the first word's low half as its
+  LOD bias in the frontend's reflection; its second word is 0, as the translator reads it.
+- The frontend gives no reflection for a function whose function-constant gate the static initializer computes where
+  the translator's text evaluation of it may differ (`is_function_constant_defined` of a given constant, a branch): the
+  plugin asks the translator for it.
+- Tests: `tex_intsample`, `pack`, `tex_ms`, `r_nospace` and `r_fcin` (`tools/air-nir`), on both roads. Over the AIR
+  cache the frontend translates 5,517 functions (5,001 in round 5), every reflection equal to the translator's.
+- WindowServer (its road stays off): of its 211 functions on disk (SkyLight's and QuartzCore's metallibs) run offline
+  in a normal process, 166 translate with reflections equal to the translator's; docs/AIR-TO-NIR.md has the refusals.
+
 ### AIR to NIR, phase 4: functions made without the translator
 
 - **`newFunctionWithName:` (and its function-constant, completion-handler and descriptor variants) asks NVK's AIR-to-NIR
