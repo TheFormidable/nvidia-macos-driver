@@ -34,6 +34,8 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builtin_builder.h"
+#include "nir_serialize.h"
+#include "util/blob.h"
 #include "util/half_float.h"
 #include "util/hash_table.h"
 #include "util/set.h"
@@ -109,6 +111,7 @@ enum {
    X(LLVMMemoryBufferRef, LLVMCreateMemoryBufferWithMemoryRangeCopy, (const char *, size_t, const char *))       \
    X(void, LLVMDisposeMemoryBuffer, (LLVMMemoryBufferRef))                                                       \
    X(int, LLVMParseBitcodeInContext2, (LLVMContextRef, LLVMMemoryBufferRef, LLVMModuleRef *))                    \
+   X(int, LLVMParseIRInContext, (LLVMContextRef, LLVMMemoryBufferRef, LLVMModuleRef *, char **))                 \
    X(void, LLVMDisposeModule, (LLVMModuleRef))                                                                   \
    X(LLVMErrorRef, LLVMRunPasses, (LLVMModuleRef, const char *, void *, LLVMPassBuilderOptionsRef))              \
    X(LLVMPassBuilderOptionsRef, LLVMCreatePassBuilderOptions, (void))                                            \
@@ -336,6 +339,7 @@ struct air_tr {
    const struct glsl_type *table_type;
 
    uint32_t shared_size, scratch_size, buffer_mask, instructions;
+   uint32_t global_align;       /* the largest alignment a device or constant buffer access promises */
    uint32_t texture_mask[4], storage_mask[4], texbuf_mask[4], stexbuf_mask[4], sampler_mask;
    uint32_t sampler_args;       /* sampler slots [[sampler(n)]] arguments declare, used or not */
    struct util_dynarray statics; /* struct air_sampler *: the constexpr samplers, in their slot order */
@@ -373,6 +377,8 @@ _Static_assert(offsetof(struct nvmtl_air_nir_request, fc_count) == NVMTL_AIR_NIR
                "version 1 of the request ends at fc_count");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
+               "version 2 of the result ends at its constexpr samplers");
 
 static const char *
 air_name(LLVMValueRef v, size_t *len)
@@ -868,6 +874,19 @@ air_constant_expr(struct air_tr *t, LLVMValueRef c)
 /* ---------------------------------------------------------------------------------------------------------------- */
 /* Memory access                                                                                                      */
 
+/* The alignment a device or constant buffer access is emitted with: as LLVM gives it, or at most 4 bytes for the
+ * plugin's align guard (NVMTL_AIR_NIR_ALIGN4), whose build runs when a buffer is bound at an address the kernel's
+ * accesses are not aligned to; NAK turns a 16-byte promise into one 128-bit access, which faults on such an address.
+ * The largest is reported, for the plugin to know whether to guard the kernel at all. */
+static uint32_t
+air_global_align(struct air_tr *t, uint32_t align)
+{
+   if ((t->req->flags & NVMTL_AIR_NIR_ALIGN4) && align > 4)
+      align = 4;
+   t->global_align = MAX2(t->global_align, align);
+   return align;
+}
+
 static nir_def *
 air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
 {
@@ -877,6 +896,7 @@ air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigne
       align = 1u << (ffs(align) - 1);
    switch (ptr->kind) {
    case AIR_GLOBAL:
+      align = air_global_align(t, align);
       return nir_load_global(b, components, bits, ptr->def, .align_mul = align);
    case AIR_CONSTANT:
       return nir_load_constant(b, components, bits, ptr->def, .base = 0, .range = ~0u, .align_mul = align);
@@ -898,6 +918,7 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
       align = 1u << (ffs(align) - 1);
    switch (ptr->kind) {
    case AIR_GLOBAL:
+      align = air_global_align(t, align);
       nir_store_global(b, value, ptr->def, .align_mul = align);
       return;
    case AIR_SHARED:
@@ -1180,7 +1201,7 @@ air_find_kernel(struct air_tr *t, LLVMValueRef *args_node)
 struct air_arg {
    LLVMValueRef param;
    const char *kind;
-   uint64_t location, space, align;
+   uint64_t location, space, align, size;
    LLVMValueRef fc_node;   /* an argument that exists only under a function constant: its {global, type, name} */
    const char *type_name;  /* air.arg_type_name */
    const char *access;     /* air.read, air.write, air.read_write, air.sample */
@@ -1233,6 +1254,8 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
          air_md_int(ops[k + 1], &a.space);
       else if (!strcmp(key, "air.arg_type_align_size"))
          air_md_int(ops[k + 1], &a.align);
+      else if (!strcmp(key, "air.arg_type_size"))
+         air_md_int(ops[k + 1], &a.size);
    }
    /* OpenCL's by-value constant arguments are constant buffers at their index */
    if (!strcmp(a.kind, "air.constant")) {
@@ -1284,6 +1307,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
    unsigned params = L.LLVMCountParams(t->function);
    struct air_arg *args = rzalloc_array(t->mem, struct air_arg, n + 1);
    uint32_t tg_offsets[NVMTL_AIR_NIR_MAX_BUFFERS] = { 0 };
+   uint32_t tg_len[NVMTL_AIR_NIR_MAX_BUFFERS] = { 0 };
    bool tg_used[NVMTL_AIR_NIR_MAX_BUFFERS] = { false };
 
    for (unsigned i = 0; i < n; i++) {
@@ -1315,9 +1339,15 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       } else if (!strcmp(a->kind, "air.threadgroup")) {
          if (a->location >= NVMTL_AIR_NIR_MAX_BUFFERS)
             unsupported(t, "threadgroup argument %u has no index below %u", i, NVMTL_AIR_NIR_MAX_BUFFERS);
-         if (!t->req->threadgroup_lengths[a->location])
+         uint32_t len = t->req->threadgroup_lengths[a->location];
+         /* without a length, the translator's default (stage_input workgroup_array_elements): 512 elements of the
+          * argument's type, as many as fit in 32 KB, at least one */
+         if (!len && (t->req->flags & NVMTL_AIR_NIR_TG_DEFAULT) && a->size && a->size <= 32768)
+            len = (uint32_t)(MAX2(MIN2(512ull, 32768ull / a->size), 1ull) * a->size);
+         if (!len)
             unsupported(t, "threadgroup argument %llu has no length in the request",
                         (unsigned long long)a->location);
+         tg_len[a->location] = len;
          tg_used[a->location] = true;
       } else {
          nir_def *v = air_builtin(t, a->kind);
@@ -1340,7 +1370,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          continue;
       at = ALIGN_POT(at, 16);
       tg_offsets[i] = at;
-      at += t->req->threadgroup_lengths[i];
+      at += tg_len[i];
    }
    t->shared_size = at;
    for (unsigned i = 0; i < n; i++) {
@@ -4259,6 +4289,59 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
 
 void nvmtl_air_nir_free_v1(void *nir);
 int nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struct nvmtl_air_nir_result *res);
+void *nvmtl_air_nir_clone_v1(void *nir, const uint32_t local_size[3]);
+int nvmtl_air_nir_serialize_v1(void *nir, void **data, size_t *size);
+void *nvmtl_air_nir_deserialize_v1(void *device, const void *data, size_t size);
+
+/* The kernel for another threadgroup size: the translation reads the size only through nir_load_workgroup_size, which
+ * NVK lowers from the shader's workgroup size, so a copy with that size changed is the kernel translated for it. */
+__attribute__((visibility("default"))) void *
+nvmtl_air_nir_clone_v1(void *nir, const uint32_t local_size[3])
+{
+   if (!nir || !local_size || !local_size[0] || !local_size[1] || !local_size[2] ||
+       (uint64_t)local_size[0] * local_size[1] * local_size[2] > 1024)
+      return NULL;
+   nir_shader *copy = nir_shader_clone(NULL, (nir_shader *)nir);
+   if (!copy)
+      return NULL;
+   for (unsigned i = 0; i < 3; i++)
+      copy->info.workgroup_size[i] = local_size[i];
+   return copy;
+}
+
+/* A result's shader as bytes, for the plugin's shader cache; only this build of NVK reads them back. */
+__attribute__((visibility("default"))) int
+nvmtl_air_nir_serialize_v1(void *nir, void **data, size_t *size)
+{
+   if (!nir || !data || !size)
+      return -1;
+   struct blob b;
+   blob_init(&b);
+   nir_serialize(&b, (const nir_shader *)nir, false);
+   if (b.out_of_memory) {
+      blob_finish(&b);
+      return -1;
+   }
+   blob_finish_get_buffer(&b, data, size);
+   return 0;
+}
+
+__attribute__((visibility("default"))) void *
+nvmtl_air_nir_deserialize_v1(void *device, const void *data, size_t size)
+{
+   if (!device || !data || !size)
+      return NULL;
+   VK_FROM_HANDLE(nvk_device, dev, (VkDevice)device);
+   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+   struct blob_reader r;
+   blob_reader_init(&r, data, size);
+   nir_shader *nir = nir_deserialize(NULL, nak_nir_options(pdev->nak), &r);
+   if (!nir || r.overrun || r.current != r.end) {
+      ralloc_free(nir);
+      return NULL;
+   }
+   return nir;
+}
 
 __attribute__((visibility("default"))) void
 nvmtl_air_nir_free_v1(void *nir)
@@ -4292,8 +4375,14 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    if (!air_llvm_open(req->llvm_library, message, message_len))
       return res->status = NVMTL_AIR_NIR_NO_LLVM;
 
+   /* the robustness the pipeline is created with: the table's address format depends on it */
    struct vk_pipeline_robustness_state rs;
-   vk_pipeline_robustness_state_fill(&dev->vk.robustness_state, &rs, NULL, NULL);
+   const VkPipelineRobustnessCreateInfoEXT unchecked = {
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO_EXT, NULL, VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT, VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT,
+      VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT_EXT };
+   vk_pipeline_robustness_state_fill(&dev->vk.robustness_state, &rs,
+                                     (req->flags & NVMTL_AIR_NIR_UNCHECKED) ? &unchecked : NULL, NULL);
 
    /* on the heap: what changes between setjmp and longjmp must not live in this frame */
    struct air_tr *t = rzalloc(NULL, struct air_tr);
@@ -4313,9 +4402,22 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    LLVMContextRef ctx = L.LLVMContextCreate();
    /* without a handler of its own, LLVM ends the process on a bitcode error */
    L.LLVMContextSetDiagnosticHandler(ctx, air_llvm_diagnostic, t);
+   /* LLVM's copy ends in the 0 its text parser wants. The text parser takes the buffer (on a failure too), so it is
+    * disposed of here only after the bitcode reader; neither variable changes between setjmp and longjmp. */
+   const bool text = (req->flags & NVMTL_AIR_NIR_TEXT_IR) != 0;
    LLVMMemoryBufferRef buf = L.LLVMCreateMemoryBufferWithMemoryRangeCopy(req->bitcode, req->bitcode_size, "air");
    if (setjmp(t->fail) == 0) {
-      if (!buf || L.LLVMParseBitcodeInContext2(ctx, buf, &t->module))
+      if (buf && text) {
+         char *msg = NULL;
+         if (L.LLVMParseIRInContext(ctx, buf, &t->module, &msg)) {
+            snprintf(t->llvm_error, sizeof t->llvm_error, "%s", msg ? msg : "?");
+            if (msg)
+               L.LLVMDisposeMessage(msg);
+            air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the text IR does not parse: %s", t->llvm_error);
+         }
+         if (msg)
+            L.LLVMDisposeMessage(msg);
+      } else if (!buf || L.LLVMParseBitcodeInContext2(ctx, buf, &t->module))
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the bitcode does not parse%s%s", t->llvm_error[0] ? ": " : "",
                     t->llvm_error);
       bool fold = air_fc_specialize(t, ctx);
@@ -4341,7 +4443,7 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    }
    if (t->module)
       L.LLVMDisposeModule(t->module);
-   if (buf)
+   if (buf && !text)
       L.LLVMDisposeMemoryBuffer(buf);
    L.LLVMContextDispose(ctx);
 
@@ -4368,6 +4470,8 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       }
       res->static_sampler_count = n;
    }
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, global_align) + sizeof res->global_align && t->out)
+      res->global_align = t->global_align;
    if (t->out)
       snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread",
                t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size);

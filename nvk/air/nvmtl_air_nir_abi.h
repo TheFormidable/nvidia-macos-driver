@@ -49,6 +49,16 @@
 #define NVMTL_AIR_NIR_TABLE_SSBO    (1u << 0)   /* binding 640 is a storage buffer, not a dynamic uniform buffer */
 #define NVMTL_AIR_NIR_NO_PASSES     (1u << 1)   /* do not run LLVM's inliner and SROA on the module first */
 #define NVMTL_AIR_NIR_FC_VALUES     (1u << 2)   /* fc_* hold the function's complete set of function-constant values */
+/* Since version 3 (an older NVK ignores them, and then refuses or translates as without them): */
+#define NVMTL_AIR_NIR_TEXT_IR       (1u << 3)   /* bitcode is LLVM text IR (as the plugin keeps AIR), bitcode_size bytes */
+#define NVMTL_AIR_NIR_TG_DEFAULT    (1u << 4)   /* a [[threadgroup(n)]] argument whose length is 0 gets the translator's
+                                                 * default: 512 elements of its type, at most 32768 bytes, at least one */
+#define NVMTL_AIR_NIR_UNCHECKED     (1u << 5)   /* the pipeline is created with buffer robustness off
+                                                 * (VkPipelineRobustnessCreateInfoEXT, storage and uniform buffers
+                                                 * DISABLED), so the table is addressed as such a pipeline lowers it */
+#define NVMTL_AIR_NIR_ALIGN4        (1u << 6)   /* no device or constant buffer access promises more than 4-byte
+                                                 * alignment: the build for a buffer bound at an address its kernel's
+                                                 * accesses are not aligned to (the plugin's align guard) */
 
 enum nvmtl_air_nir_status {
    NVMTL_AIR_NIR_OK          = 0,
@@ -106,8 +116,13 @@ struct nvmtl_air_nir_result {
       uint32_t pad;
       uint64_t words[2];             /* the AIR state words of its __air_sampler_state global (filter, address, ...) */
    } static_samplers[32];            /* every constexpr sampler of the module, in slot order */
+
+   /* Since version 3, written when the caller's size reaches it: */
+   uint32_t global_align;            /* the largest alignment a device or constant buffer access promises (bytes) */
+   uint32_t reserved;
 };
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
+#define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
 
 #ifdef __cplusplus
 extern "C" {
@@ -116,6 +131,15 @@ extern "C" {
 typedef int (*nvmtl_air_to_nir_v1_fn)(void *device, const struct nvmtl_air_nir_request *request,
                                       struct nvmtl_air_nir_result *result);
 typedef void (*nvmtl_air_nir_free_v1_fn)(void *nir);
+/* Since version 3. A copy of nir (a result's) for another threadgroup size: the frontend reads the size only through
+ * the shader's workgroup size, so the copy is the kernel translated for local_size. NULL when out of memory or the
+ * size is not 1 to 1024 invocations. Freed with nvmtl_air_nir_free_v1. */
+typedef void *(*nvmtl_air_nir_clone_v1_fn)(void *nir, const uint32_t local_size[3]);
+/* Since version 3. nir written as a blob (nir_serialize, names kept) into *data, malloc'd (the caller frees it with
+ * free()), and read back into a shader of the device's compiler. Only a blob this same NVK wrote may be read: the
+ * format is NVK's build's own. 0 / non-NULL on success. */
+typedef int (*nvmtl_air_nir_serialize_v1_fn)(void *nir, void **data, size_t *size);
+typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data, size_t size);
 #ifdef __cplusplus
 }
 #endif
