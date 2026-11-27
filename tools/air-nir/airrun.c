@@ -402,6 +402,15 @@ slot(struct run *r, unsigned i, size_t bytes)
    return r->slot[i].map;
 }
 
+/* tex_ms is PLUGIN_ONLY: its texture is cleared by a Metal render pass (plugin_run.m) */
+static void
+tex_ms_clear(struct run *r, unsigned i, uint32_t w, uint32_t h, unsigned samples, const float rgba[4])
+{
+   (void)r; (void)i; (void)w; (void)h; (void)samples; (void)rgba;
+   fprintf(stderr, "airrun: tex_ms_clear is plugin_run's\n");
+   exit(2);
+}
+
 #include "airrun_tests.h"
 
 /* ---------------------------------------------------------------------------------------------------------------- */

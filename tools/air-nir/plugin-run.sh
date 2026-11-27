@@ -37,6 +37,14 @@ for f in "$HERE"/metal/*.metal "$HERE"/metal-render/*.metal; do
   xcrun -sdk macosx metal $flags -c -o "$OUT/air/$n.air" "$f" || { echo "plugin-run.sh: $n.metal does not compile" >&2; exit 2; }
   xcrun -sdk macosx metallib -o "$OUT/air/$n.metallib" "$OUT/air/$n.air" || { echo "plugin-run.sh: $n.metallib not made" >&2; exit 2; }
 done
+# r_nospace: r_buffers with air.address_space taken out of every buffer's metadata, as the GL-to-Metal compiler emits
+# its buffers (the pointer type says the address space)
+xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/r_nospace.ll" "$HERE/metal-render/r_buffers.metal" &&
+  sed -E -i '' '/air\.buffer/s/!"air\.address_space", i32 [0-9]+, //' "$OUT/air/r_nospace.ll" &&
+  ! grep -q 'air\.address_space' "$OUT/air/r_nospace.ll" &&
+  xcrun -sdk macosx metal -c -o "$OUT/air/r_nospace.air" "$OUT/air/r_nospace.ll" &&
+  xcrun -sdk macosx metallib -o "$OUT/air/r_nospace.metallib" "$OUT/air/r_nospace.air" ||
+  { echo "plugin-run.sh: r_nospace not made" >&2; exit 2; }
 clang -O1 -fno-objc-arc -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-missing-field-initializers \
   -I"$ROOT/nvk/air" -I"$VKINC" -framework Foundation -framework Metal -framework IOKit \
   -o "$OUT/plugin_run" "$HERE/plugin_run.m" || { echo "plugin-run.sh: plugin_run does not build" >&2; exit 2; }

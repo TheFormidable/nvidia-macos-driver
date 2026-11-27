@@ -68,6 +68,7 @@ struct timg {
    VkImageViewType vtype;
    uint32_t w, h, d, layers, mips, texel;
    bool storage, depth, is_buffer;
+   bool rendered;      /* its texels come from a render pass here (tex_ms_clear): nothing uploaded */
 };
 
 struct test;
@@ -245,6 +246,41 @@ samp_create_pixel(struct run *r, unsigned slot_, VkFilter filter, VkSamplerAddre
    sd.normalizedCoordinates = NO;
    r->samp[slot_] = [dev newSamplerStateWithDescriptor:sd];
    [sd release];
+}
+
+/* a multisampled RGBA8 texture of w x h with every sample cleared to rgba by a render pass (tex_ms) */
+static void
+tex_ms_clear(struct run *r, unsigned i, uint32_t w, uint32_t h, unsigned samples, const float rgba[4])
+{
+   struct timg *t = &r->tex[i];
+   memset(t, 0, sizeof *t);
+   t->fmt = VK_FORMAT_R8G8B8A8_UNORM;
+   t->vtype = VK_IMAGE_VIEW_TYPE_2D;
+   t->w = w; t->h = h; t->d = t->layers = t->mips = 1; t->texel = 4;
+   t->rendered = true;
+   MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+   td.textureType = MTLTextureType2DMultisample;
+   td.pixelFormat = MTLPixelFormatRGBA8Unorm;
+   td.width = w;
+   td.height = h;
+   td.sampleCount = samples;
+   td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+   td.storageMode = MTLStorageModePrivate;
+   t->tex = [dev newTextureWithDescriptor:td];
+   [td release];
+   if (!t->tex) {
+      fprintf(stderr, "plugin_run: no %u-sample texture here\n", samples);
+      exit(2);
+   }
+   MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+   rp.colorAttachments[0].texture = t->tex;
+   rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+   rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+   rp.colorAttachments[0].clearColor = MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]);
+   id<MTLCommandBuffer> cb = [queue commandBuffer];
+   [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+   [cb commit];
+   [cb waitUntilCompleted];
 }
 
 #include "airrun_tests.h"
@@ -472,12 +508,12 @@ run_test(const struct test *t)
    id<MTLCommandBuffer> cb = [queue commandBuffer];
    bool any = false;
    for (unsigned i = 0; i < 16; i++)
-      any |= r.tex[i].tex && !r.tex[i].is_buffer;
+      any |= r.tex[i].tex && !r.tex[i].is_buffer && !r.tex[i].rendered;
    if (any) {   /* uploads: each level and slice from its part of the staging copy */
       id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
       for (unsigned i = 0; i < 16; i++) {
          struct timg *x = &r.tex[i];
-         if (!x->tex || x->is_buffer)
+         if (!x->tex || x->is_buffer || x->rendered)
             continue;
          const bool is3d = x->vtype == VK_IMAGE_VIEW_TYPE_3D;
          for (uint32_t m = 0; m < x->mips; m++) {

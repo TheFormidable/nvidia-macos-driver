@@ -295,6 +295,18 @@ main(int argc, char **argv)
          snprintf(why, sizeof why, "%s", err ? err : "does not parse");
          clean(why);
          printf("NOTEXT\t%s\t-\t%s\n", path, why);
+         if (text && only) {
+            /* a text this LLVM refuses whose list line names its kernel: the frontend's own verdict on the text, as
+             * the plugin hands it over (NVMTL_AIR_NIR_TEXT_IR), no pipeline (round 6: a global defined twice) */
+            struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXT_IR, llvm_path, data, size, only,
+                                                 { 64, 1, 1 } };
+            struct nvmtl_air_nir_result res = { sizeof res };
+            int st = to_nir(dev, &req, &res);
+            clean(res.message);
+            printf("%s%d\t%s\t%s\t%s\n", st ? "TEXTREFUSED" : "TEXTOK", st, path, only, res.message);
+            if (res.nir)
+               free_nir(res.nir);
+         }
          if (err)
             DisposeMessage(err);
          if (!text)

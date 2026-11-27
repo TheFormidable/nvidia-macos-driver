@@ -2036,6 +2036,179 @@ tex_pixel_array_check(struct run *r)
    return true;
 }
 
+/* ---- round 6: integer-texture samples, pack and unpack, multisampled reads ------------------------------------- */
+
+static uint32_t
+r32_at(struct run *r, unsigned t, uint32_t m, int x, int y)
+{
+   uint32_t v;
+   memcpy(&v, tex_at(r, t, m, (uint32_t)x, (uint32_t)y, 0), 4);
+   return v;
+}
+
+static void
+tex_intsample_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_UINT, 4, 8, 8, 1, 1, 2, false);
+   fill_bytes(r, 0);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16);
+   slot(r, 0, 256 * 5 * 16);
+   float *uv = slot(r, 1, 256 * 8);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, -12, 20);
+      uv[i * 2 + 1] = centre_coord(8, -12, 20);
+   }
+}
+
+/* the translator's nearest fetch of an integer texture (fetch_coord.rs): floor(c * n), then the address mode */
+static int
+int_addr(int i, int n, int mode, bool *outside)
+{
+   if (mode == 0) {   /* clamp_to_zero */
+      *outside |= i < 0 || i >= n;
+      return i < 0 ? 0 : i >= n ? n - 1 : i;
+   }
+   if (mode == 2)
+      return ((i % n) + n) % n;
+   if (mode == 3) {
+      int p = ((i % (2 * n)) + 2 * n) % (2 * n);
+      return p >= n ? 2 * n - 1 - p : p;
+   }
+   return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
+static bool
+tex_intsample_check(struct run *r)
+{
+   const float *uv = S(r, 1);
+   const uint32_t *got = S(r, 0);
+   static const int mode[5] = { 2, 3, 0, 1, 1 };
+   static const unsigned level[5] = { 0, 0, 0, 1, 0 };
+   static const char *what[5] = { "repeat", "mirrored repeat", "clamp_to_zero", "clamp_to_edge level 1",
+                                  "argument sampler (the hardware's nearest)" };
+   for (unsigned i = 0; i < 256; i++) {
+      for (unsigned k = 0; k < 5; k++) {
+         float u = uv[i * 2], v = uv[i * 2 + 1];
+         if (k == 4) {
+            u = fminf(fmaxf(u, 0), 1);
+            v = fminf(fmaxf(v, 0), 1);
+         }
+         const int n = 8 >> level[k];
+         bool outside = false;
+         const int x = int_addr((int)floorf(u * n), n, mode[k], &outside), y = int_addr((int)floorf(v * n), n, mode[k], &outside);
+         const uint32_t want[4] = { outside ? 0 : r32_at(r, 0, level[k], x, y), 0, 0, outside ? 0 : 1 };
+         for (unsigned c = 0; c < 4; c++) {
+            if (got[(i * 5 + k) * 4 + c] != want[c])
+               return FAILF(r, "%s, thread %u (uv %.5f %.5f) lane %u = %u, expected %u", what[k], i, u, v, c,
+                            got[(i * 5 + k) * 4 + c], want[c]);
+         }
+      }
+   }
+   return true;
+}
+
+static void
+pack_setup(struct run *r)
+{
+   uint32_t *w = slot(r, 0, 256 * 4);
+   float *f = slot(r, 1, 256 * 16);
+   int32_t *e = slot(r, 2, 256 * 16);
+   slot(r, 3, 256 * 6 * 16);
+   slot(r, 4, 256 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      w[i] = rnd() & ~0x40004000u;   /* neither half a NaN or an infinity */
+      for (unsigned c = 0; c < 4; c++) {
+         f[i * 4 + c] = rndf(-2.0f, 2.0f);
+         e[i * 4 + c] = (int32_t)(rnd() % 9) - 4;
+      }
+   }
+}
+
+static float
+half_to_f(uint16_t h)
+{
+   _Float16 x;
+   memcpy(&x, &h, 2);
+   return (float)x;
+}
+
+static bool
+pack_check(struct run *r)
+{
+   const uint32_t *w = S(r, 0), *packed = S(r, 4);
+   const float *f = S(r, 1), *got = S(r, 3);
+   const int32_t *e = S(r, 2);
+   for (unsigned i = 0; i < 256; i++) {
+      const uint32_t x = w[i];
+      const float *v = f + i * 4;
+      float want[6][4];
+      for (unsigned c = 0; c < 4; c++) {
+         want[0][c] = (float)((x >> (8 * c)) & 0xff) / 255.0f;
+         want[1][c] = fmaxf((float)(int8_t)(x >> (8 * c)) / 127.0f, -1.0f);
+         want[4][c] = ldexpf(v[c], e[i * 4 + c]);
+      }
+      for (unsigned c = 0; c < 2; c++) {
+         want[2][c] = (float)((x >> (16 * c)) & 0xffff) / 65535.0f;
+         want[2][2 + c] = fmaxf((float)(int16_t)(x >> (16 * c)) / 32767.0f, -1.0f);
+         want[3][c] = want[2][c];
+         want[3][2 + c] = half_to_f((uint16_t)(x >> (16 * c)));
+      }
+      want[5][0] = ldexpf(v[0], e[i * 4 + 1]);
+      for (unsigned c = 0; c < 3; c++)
+         want[5][1 + c] = want[0][c];
+      /* a value unpacked to half carries half's precision */
+      static const float tol[6][4] = { { 1e-6f, 1e-6f, 1e-6f, 1e-6f }, { 1e-6f, 1e-6f, 1e-6f, 1e-6f },
+                                       { 1e-6f, 1e-6f, 1e-6f, 1e-6f }, { 1e-3f, 1e-3f, 0, 0 },
+                                       { 0, 0, 0, 0 }, { 0, 1e-3f, 1e-3f, 1e-3f } };
+      for (unsigned k = 0; k < 6; k++)
+         for (unsigned c = 0; c < 4; c++) {
+            const float g = got[(i * 6 + k) * 4 + c];
+            if (!(fabsf(g - want[k][c]) <= tol[k][c]))
+               return FAILF(r, "thread %u result %u lane %u = %.7g, expected %.7g (word 0x%08x)", i, k, c, g, want[k][c], x);
+         }
+      /* the packs: round to nearest of the clamped value times the range, each field within 1 of it */
+      for (unsigned k = 0; k < 4; k++) {
+         const unsigned fields = k < 2 ? 4 : 2, bits = 32 / fields;
+         for (unsigned c = 0; c < fields; c++) {
+            const float src = k == 0 ? v[c] * 0.25f + 0.5f : k == 1 ? v[c] * 0.25f : k == 2 ? v[c] * 0.25f + 0.5f : v[2 + c] * 0.25f;
+            const bool snorm = k == 1 || k == 3;
+            const float range = bits == 8 ? (snorm ? 127.0f : 255.0f) : (snorm ? 32767.0f : 65535.0f);
+            const long want_v = lrintf(fminf(fmaxf(src, snorm ? -1.0f : 0.0f), 1.0f) * range);
+            const uint32_t raw = (packed[i * 4 + k] >> (bits * c)) & ((1u << bits) - 1);
+            const long got_v = snorm ? (bits == 8 ? (long)(int8_t)raw : (long)(int16_t)raw) : (long)raw;
+            if (labs(got_v - want_v) > 1)
+               return FAILF(r, "thread %u pack %u field %u = %ld, expected %ld", i, k, c, got_v, want_v);
+         }
+      }
+   }
+   return true;
+}
+
+static void
+tex_ms_setup(struct run *r)
+{
+   static const float clear[4] = { 0.25f, 0.5f, 0.75f, 1.0f };
+   tex_ms_clear(r, 0, 8, 8, 4, clear);
+   slot(r, 0, 64 * 2 * 16);
+}
+
+static bool
+tex_ms_check(struct run *r)
+{
+   const float *got = S(r, 0);
+   const float want[2][4] = { { 64 / 255.0f, 128 / 255.0f, 191 / 255.0f, 1 }, { 8, 8, 4, 128 / 255.0f } };
+   for (unsigned i = 0; i < 64; i++)
+      for (unsigned k = 0; k < 2; k++)
+         for (unsigned c = 0; c < 4; c++) {
+            const float g = got[(i * 2 + k) * 4 + c];
+            /* the clear colour's conversion to 8 bits rounds either way at 0.5 */
+            const bool size = k == 1 && c < 3;
+            if (!(fabsf(g - want[k][c]) <= (size ? 0.0f : 1.0f / 255 + 1e-6f)))
+               return FAILF(r, "texel %u result %u lane %u = %.6f, expected %.6f", i, k, c, g, want[k][c]);
+         }
+   return true;
+}
+
 static const struct test tests[] = {
    { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
    { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
@@ -2089,4 +2262,8 @@ static const struct test tests[] = {
    { "fc_texture_none", "fc_texture", "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
    { "tex_pixel_array", NULL, "tex_pixel_array", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_array_setup,
      tex_pixel_array_check },
+   { "tex_intsample", NULL, "tex_intsample", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_intsample_setup,
+     tex_intsample_check },
+   { "pack", NULL, "pack", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, pack_setup, pack_check },
+   { "tex_ms", NULL, "tex_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_ms_setup, tex_ms_check },
 };

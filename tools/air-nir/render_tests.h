@@ -588,6 +588,48 @@ rq_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_fcin ------------------------------------------------------------------------------------------------------- */
+
+/* the constants: fci_col true, fci_junk false (its attribute and its varying do not exist) */
+static const struct fcset fc_fcin = { 2, { { 0, 1, { 1 } }, { 1, 1, { 0 } } } };
+
+static void
+rfi_vdesc(MTLVertexDescriptor *vd)
+{
+   vd.attributes[0].format = MTLVertexFormatFloat2;
+   vd.attributes[0].offset = 0;
+   vd.attributes[0].bufferIndex = 2;
+   vd.attributes[1].format = MTLVertexFormatFloat4;
+   vd.attributes[1].offset = 8;
+   vd.attributes[1].bufferIndex = 2;
+   vd.layouts[2].stride = 24;
+   vd.layouts[2].stepFunction = MTLVertexStepFunctionPerVertex;
+}
+
+static void
+rfi_setup(struct rrun *r)
+{
+   float v[6][6];
+   for (unsigned i = 0; i < 6; i++) {
+      const float u = quad[2 * i] * 0.5f + 0.5f, w = quad[2 * i + 1] * 0.5f + 0.5f;
+      const float row[6] = { quad[2 * i], quad[2 * i + 1], u, w, 0.25f, 1 };
+      memcpy(v[i], row, sizeof row);
+   }
+   r->vbuf[2] = rbuf(v, sizeof v);
+}
+
+static bool
+rfi_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float want[4] = { px_u(px), px_v(py), 0.5f, 1 };
+         if (!rwant(r, 0, px, py, want, 4, 1e-4f))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -617,6 +659,8 @@ static const struct rtest rtests[] = {
      NULL, setup_quad, rfc_check, "1e-6" },
    { "r_buffers", "r_buffers", "rb_vs", "rb_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
      NULL, rb_setup, rb_check, "exact" },
+   { "r_nospace", "r_nospace", "rb_vs", "rb_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
+     NULL, rb_setup, rb_check, "exact; r_buffers without air.address_space in its metadata" },
    { "r_clip", "r_clip", "rc_vs", "rc_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
      NULL, setup_quad, rc_check, "1e-4" },
    { "r_primid", "r_primid", "rq_vs", "rq_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
@@ -625,6 +669,8 @@ static const struct rtest rtests[] = {
      NULL, rap_setup, rt_check, "nearest 1e-6, linear 1/128" },
    { "r_fcout", "r_fcout", "rfo_vs", "rfo_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcout,
      NULL, setup_quad, rfo_check, "1e-4; attachment 0 keeps its clear colour", false, true },
+   { "r_fcin", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin,
+     rfi_vdesc, rfi_setup, rfi_check, "1e-4", false, true },
 };
 #undef F32
 #undef NOC
