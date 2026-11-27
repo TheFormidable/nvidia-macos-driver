@@ -1404,10 +1404,201 @@ pub(crate) fn disambiguate_named_types(output: &str, module: &str) -> String {
     text
 }
 
+/// `@name = ...`: the name (without the `@`, unquoted names only) and whether its linkage is local (internal, private).
+fn global_definition(line: &str) -> Option<(&str, bool)> {
+    let rest = line.trim_start().strip_prefix('@')?;
+    let (name, tail) = rest.split_once(" = ")?;
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'$' | b'-')) {
+        return None;
+    }
+    Some((name, tail.starts_with("internal ") || tail.starts_with("private ")))
+}
+
+/// A global's line with a trailing `, align N` set aside: one definition spelled with and without its alignment (seen
+/// in the text the plugin links) is the same definition.
+fn global_line_key(line: &str) -> &str {
+    let t = line.trim();
+    match t.rfind(", align ") {
+        Some(at) if t.len() > at + 8 && t[at + 8..].bytes().all(|b| b.is_ascii_digit()) => &t[..at],
+        _ => t,
+    }
+}
+
+/// `@name` in text, as a whole name: not the prefix of a longer one (`@g` in `@g.1`)
+fn replace_global_name(text: &str, from: &str, to: &str) -> String {
+    let (from, to) = (format!("@{from}"), format!("@{to}"));
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&from) {
+        let after = rest.as_bytes().get(at + from.len());
+        out.push_str(&rest[..at]);
+        if after.is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'$' | b'-')) {
+            out.push_str(&from);
+        } else {
+            out.push_str(&to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Renames a dependency module's local globals that the module being built already defines with ANOTHER line. Every
+/// module names its first constexpr sampler `@__air_sampler_state`: RenderBox's `custom_effect_fragment` (repeat,
+/// linear) and the effect function linked into it (clamp to zero, pixel coordinates, ...) each define one, and LLVM
+/// text has one namespace for them, so the emitter resolved both functions' samplers to the last definition and the
+/// fragment sampled with the effect's state (r_linksamp); the AIR-to-NIR frontend's LLVM refused the text for the
+/// global defined twice. A local global is the module's own, so a fresh name for it and for every use of it in that
+/// module keeps both. The same definition arriving twice is left to the append below, which keeps one.
+fn disambiguate_local_globals(output: &str, module: &str) -> String {
+    let mut have = HashMap::<&str, &str>::default();
+    for line in output.lines() {
+        if let Some((name, _)) = global_definition(line) {
+            have.entry(name).or_insert_with(|| global_line_key(line));
+        }
+    }
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for line in module.lines() {
+        let Some((name, local)) = global_definition(line) else {
+            continue;
+        };
+        let Some(other) = have.get(name) else {
+            continue;
+        };
+        if !local || *other == global_line_key(line) || renames.iter().any(|(from, _)| from == name) {
+            continue;
+        }
+        let taken = |candidate: &str| {
+            let at = format!("@{candidate}");
+            output.contains(&at) || module.contains(&at) || renames.iter().any(|(_, to)| to == candidate)
+        };
+        let mut k = 0usize;
+        let fresh = loop {
+            let candidate = format!("{name}.linked{k}");
+            if !taken(&candidate) {
+                break candidate;
+            }
+            k += 1;
+        };
+        renames.push((name.to_string(), fresh));
+    }
+    // Longest name first, so a shorter name that is a prefix of a longer one cannot claim it.
+    renames.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then_with(|| a.0.cmp(&b.0)));
+    let mut text = module.to_string();
+    for (from, to) in &renames {
+        text = replace_global_name(&text, from, to);
+    }
+    text
+}
+
+/// The `!air.sampler_state` nodes a module's `!air.sampler_states` lists: (global name without `@`, node body)
+fn sampler_state_nodes(module: &str) -> Vec<(String, String)> {
+    let mut nodes = HashMap::<u64, String>::default();
+    let mut root = Vec::new();
+    for line in module.lines() {
+        let t = line.trim();
+        if let Some(body) = t.strip_prefix("!air.sampler_states = !{") {
+            root = body
+                .trim_end_matches('}')
+                .split(',')
+                .filter_map(|r| r.trim().strip_prefix('!')?.parse::<u64>().ok())
+                .collect();
+        } else if let Some(rest) = t.strip_prefix('!') {
+            if let Some((id, body)) = rest.split_once(" = ") {
+                if let Ok(id) = id.parse::<u64>() {
+                    nodes.insert(id, body.to_string());
+                }
+            }
+        }
+    }
+    root.iter()
+        .filter_map(|id| {
+            let body = nodes.get(id)?;
+            if !body.contains("!\"air.sampler_state\"") {
+                return None;
+            }
+            let at = body.find('@')?;
+            let name: String = body[at + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '$' | '-'))
+                .collect();
+            (!name.is_empty()).then(|| (name, body.clone()))
+        })
+        .collect()
+}
+
+/// The dependency's constexpr samplers that the append defined in the output, added to the output's
+/// `!air.sampler_states`: the append drops a dependency's metadata, and reflection and the AIR-to-NIR frontend bind
+/// the constexpr samplers that list names (the emitter binds every `@__air_sampler_state*` global), so a linked
+/// function's own sampler had a binding in the module and none the plugin filled.
+fn register_dependency_samplers(output: &mut String, dependency_nodes: &[(String, String)]) {
+    if dependency_nodes.is_empty() {
+        return;
+    }
+    let listed: HashSet<String> = sampler_state_nodes(output).into_iter().map(|(name, _)| name).collect();
+    let defined: HashSet<String> = output
+        .lines()
+        .filter_map(|l| global_definition(l).map(|(n, _)| n.to_string()))
+        .collect();
+    let mut next = output
+        .lines()
+        .filter_map(|line| {
+            let node = line.trim_start().strip_prefix('!')?;
+            let digits: String = node.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() || !node[digits.len()..].starts_with(" = ") {
+                return None;
+            }
+            digits.parse::<u64>().ok()
+        })
+        .max()
+        .map_or(0, |max| max + 1);
+    let mut refs = Vec::new();
+    let mut lines = String::new();
+    let mut added = HashSet::<&str>::default();
+    for (name, body) in dependency_nodes {
+        if listed.contains(name) || !defined.contains(name) || !added.insert(name.as_str()) {
+            continue;
+        }
+        lines.push_str(&format!("!{next} = {body}\n"));
+        refs.push(format!("!{next}"));
+        next += 1;
+    }
+    if refs.is_empty() {
+        return;
+    }
+    let mut out = String::with_capacity(output.len() + lines.len() + 64);
+    let mut rooted = false;
+    for line in output.lines() {
+        let t = line.trim_end();
+        if !rooted && t.starts_with("!air.sampler_states = !{") && t.ends_with('}') {
+            let inner = t["!air.sampler_states = !{".len()..t.len() - 1].trim();
+            out.push_str("!air.sampler_states = !{");
+            if !inner.is_empty() {
+                out.push_str(inner);
+                out.push_str(", ");
+            }
+            out.push_str(&refs.join(", "));
+            out.push_str("}\n");
+            rooted = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    if !rooted {
+        out.push_str(&format!("!air.sampler_states = !{{{}}}\n", refs.join(", ")));
+    }
+    out.push_str(&lines);
+    *output = out;
+}
+
 fn append_dependency_module(output: &mut String, module: &str) {
     let module = &disambiguate_named_types(output, module);
+    let module = &disambiguate_local_globals(output, module);
+    let samplers = sampler_state_nodes(module);
     if DEDUPE_DEPENDENCIES.with(|d| d.get()) {
-        return append_dependency_module_dedupe(output, module);
+        append_dependency_module_dedupe(output, module);
+        return register_dependency_samplers(output, &samplers);
     }
     // A global the output already defines with the very same line (both modules' `@__air_sampler_state` of one
     // constexpr sampler, say) is not defined a second time: the translator reads either line the same, and LLVM, which
@@ -1417,7 +1608,7 @@ fn append_dependency_module(output: &mut String, module: &str) {
         .lines()
         .map(str::trim)
         .filter(|l| l.starts_with('@') && l.contains(" = "))
-        .map(str::to_string)
+        .map(|l| global_line_key(l).to_string())
         .collect();
     for line in module.lines() {
         let trimmed = line.trim_start();
@@ -1427,13 +1618,14 @@ fn append_dependency_module(output: &mut String, module: &str) {
             || trimmed.starts_with("target triple =")
             || trimmed.starts_with("attributes #")
             || trimmed.starts_with('!')
-            || (trimmed.starts_with('@') && globals.contains(line.trim()))
+            || (trimmed.starts_with('@') && globals.contains(global_line_key(line)))
         {
             continue;
         }
         output.push_str(line);
         output.push('\n');
     }
+    register_dependency_samplers(output, &samplers);
 }
 
 fn append_dependency_module_dedupe(output: &mut String, module: &str) {
@@ -2532,10 +2724,69 @@ mod tests {
         assert_eq!(output.matches("@__air_sampler_state = ").count(), 1, "{output}");
         assert_eq!(output.matches("@__air_sampler_state.1 = ").count(), 1, "{output}");
         assert!(output.contains("define float @leaf()"));
-        // another definition under the same name is kept as it was: the translator's reading of the text is unchanged
+        // the same definition spelled without its alignment is the same definition
+        let mut aligned = String::from("@g = internal addrspace(2) constant i32 1, align 4\n");
+        append_dependency_module(&mut aligned, "@g = internal addrspace(2) constant i32 1\n");
+        assert_eq!(aligned.matches("@g = ").count(), 1, "{aligned}");
+        // another local definition under the same name is the dependency's own: renamed there, with its uses
         let mut other = String::from("@g = internal addrspace(2) constant i32 1, align 4\n");
-        append_dependency_module(&mut other, "@g = internal addrspace(2) constant i32 2, align 4\n");
-        assert_eq!(other.matches("@g = ").count(), 2, "{other}");
+        append_dependency_module(
+            &mut other,
+            "@g = internal addrspace(2) constant i32 2, align 4\n@g.1 = internal addrspace(2) constant i32 3\n\
+             define i32 @f() {\nentry:\n  %v = load i32, ptr addrspace(2) @g, align 4\n  %w = load i32, ptr addrspace(2) @g.1\n  ret i32 %v\n}\n",
+        );
+        assert_eq!(other.matches("@g = ").count(), 1, "{other}");
+        assert!(other.contains("@g.linked0 = internal addrspace(2) constant i32 2, align 4"), "{other}");
+        assert!(other.contains("load i32, ptr addrspace(2) @g.linked0, align 4"), "{other}");
+        assert!(other.contains("load i32, ptr addrspace(2) @g.1\n"), "{other}");
+        // an external one is left as it was
+        let mut external = String::from("@e = addrspace(1) global i32 1, align 4\n");
+        append_dependency_module(&mut external, "@e = addrspace(1) global i32 2, align 4\n");
+        assert_eq!(external.matches("@e = ").count(), 2, "{external}");
+    }
+
+    #[test]
+    fn a_linked_function_keeps_its_own_constexpr_sampler_and_lists_it() {
+        // RenderBox's custom_effect_fragment and the effect linked into it each name their constexpr sampler
+        // @__air_sampler_state, with different states (r_linksamp)
+        let mut output = String::from(
+            "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 34901797601020562, i64 0], align 8\n\
+             define void @main() {\nentry:\n  %s = load i64, ptr addrspace(2) @__air_sampler_state\n  ret void\n}\n\
+             !air.sampler_states = !{!3}\n\
+             !3 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state}\n",
+        );
+        let dependency = "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 34901797601053184, i64 0], align 8\n\
+                          @__air_sampler_state.1 = internal addrspace(2) constant [2 x i64] [i64 34901797601020489, i64 0], align 8\n\
+                          define float @fx() {\nentry:\n  %a = load i64, ptr addrspace(2) @__air_sampler_state\n  \
+                          %b = load i64, ptr addrspace(2) @__air_sampler_state.1\n  ret float 0.0\n}\n\
+                          !air.sampler_states = !{!7, !8}\n\
+                          !7 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state}\n\
+                          !8 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state.1}\n";
+        append_dependency_module(&mut output, dependency);
+        assert_eq!(output.matches("@__air_sampler_state = ").count(), 1, "{output}");
+        assert!(output.contains("@__air_sampler_state.linked0 = internal addrspace(2) constant [2 x i64] [i64 34901797601053184"), "{output}");
+        assert!(output.contains("%a = load i64, ptr addrspace(2) @__air_sampler_state.linked0\n"), "{output}");
+        assert!(output.contains("%s = load i64, ptr addrspace(2) @__air_sampler_state\n"), "{output}");
+        // both of the dependency's samplers are listed after the output's own, with nodes of their own
+        assert!(output.contains("!air.sampler_states = !{!3, !4, !5}\n"), "{output}");
+        assert!(output.contains("!4 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state.linked0}\n"), "{output}");
+        assert!(output.contains("!5 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state.1}\n"), "{output}");
+        assert_eq!(output.matches("!air.sampler_states").count(), 1, "{output}");
+        // the reflection's constexpr samplers then hold all three states, in the emitter's order
+        let constants = crate::reflect::static_sampler_constants_for_test(&output).expect("sampler states");
+        assert_eq!(constants.len(), 3, "{output}");
+        // a dependency with the very same sampler adds nothing: its uses are the output's
+        let mut same = String::from(
+            "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 7, i64 0], align 8\n\
+             !air.sampler_states = !{!1}\n!1 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state}\n",
+        );
+        append_dependency_module(
+            &mut same,
+            "@__air_sampler_state = internal addrspace(2) constant [2 x i64] [i64 7, i64 0]\n\
+             !air.sampler_states = !{!2}\n!2 = !{!\"air.sampler_state\", ptr addrspace(2) @__air_sampler_state}\n",
+        );
+        assert!(same.contains("!air.sampler_states = !{!1}\n"), "{same}");
+        assert_eq!(same.matches("@__air_sampler_state").count(), 2, "{same}");
     }
 
     #[test]

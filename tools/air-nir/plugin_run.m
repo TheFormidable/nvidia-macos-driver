@@ -834,6 +834,22 @@ run_render_test(const struct rtest *t)
    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
    d.vertexFunction = vf;
    d.fragmentFunction = ff;
+   id<MTLLibrary> llib = nil;
+   id<MTLFunction> lfn = nil;
+   if (t->linked_air) {
+      snprintf(path, sizeof path, "%s/%s.metallib", air_dir, t->linked_air);
+      llib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
+      lfn = [llib newFunctionWithName:@(t->linked_fn)];
+      if (!lfn) {
+         printf("%-16s FAIL     no linked function %s in %s\n", name, t->linked_fn, path);
+         fprintf(rtsv, "%s\tnone\tFAIL\t\t\t\t\t0\tno linked function\t%s\n", name, t->tolerance);
+         [llib release]; [d release]; [vf release]; [ff release]; [lib release];
+         return FAIL;
+      }
+      MTLLinkedFunctions *lf = [MTLLinkedFunctions linkedFunctions];
+      lf.functions = @[ lfn ];
+      d.fragmentLinkedFunctions = lf;
+   }
    for (unsigned i = 0; i < RMAXCOL; i++)
       d.colorAttachments[i].pixelFormat = t->col[i];
    d.depthAttachmentPixelFormat = t->depth ? t->depth : MTLPixelFormatInvalid;
@@ -975,6 +991,8 @@ run_render_test(const struct rtest *t)
    [ps release];
    [vf release];
    [ff release];
+   [lfn release];
+   [llib release];
    [lib release];
    return ok ? PASS : FAIL;
 } }

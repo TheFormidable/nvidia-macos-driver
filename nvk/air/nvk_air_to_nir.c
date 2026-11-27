@@ -6233,8 +6233,14 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
 /* A text module that defines one global twice (two linked modules' @__air_sampler_state of one constexpr sampler):
  * LLVM's parser refuses it. A later definition with the same type and initializer as the first (the lines equal
  * once a trailing ", align N" is set aside) is dropped; one that differs is not this frontend's to choose between.
- * 0: nothing defined twice; 1: *out (malloc'd, *out_n bytes) is the text without the repeats; -1: a global defined
- * twice differently, named in why. Globals are the lines that begin with '@' (a function body's lines do not). */
+ * The same for functions: the translator's linker appends a linked module after the entry, so the text declares a
+ * linked function the entry calls and then defines it, and declares an intrinsic both modules call twice; LLVM takes
+ * a name once, and the translator's reader takes the definition. A declaration of a function the text defines is
+ * dropped, and a later declaration of a function declared before with the same signature (the line up to the end of
+ * its parameters; the attribute groups are the entry module's after the link) is dropped; one with another signature
+ * is refused. 0: nothing repeated; 1: *out (malloc'd, *out_n bytes) is the text without the repeats; -1: a global or
+ * a function given twice differently, named in why. Globals are the lines that begin with '@' (a function body's
+ * lines do not), functions the lines that begin with "define " or "declare ". */
 static size_t
 air_global_def_len(const char *line, size_t len)
 {
@@ -6250,19 +6256,83 @@ air_global_def_len(const char *line, size_t len)
    return n;
 }
 
+/* the name of the function a "define " or "declare " line gives (from its '@' to its '('), and in *sig_len the length of
+ * the line up to the ')' that closes its parameters; NULL when the line is not one */
+static char *
+air_function_line_name(void *mem, const char *line, size_t len, size_t *sig_len)
+{
+   if (!(len > 7 && !strncmp(line, "define ", 7)) && !(len > 8 && !strncmp(line, "declare ", 8)))
+      return NULL;
+   const char *at = memchr(line, '@', len);
+   if (!at)
+      return NULL;
+   const char *p = at + 1, *end = line + len;
+   if (p < end && *p == '"') {
+      p++;
+      while (p < end && *p != '"')
+         p++;
+      p++;
+   } else {
+      while (p < end && *p != '(')
+         p++;
+   }
+   if (p >= end || *p != '(')
+      return NULL;
+   char *name = ralloc_strndup(mem, at, p - at);
+   unsigned depth = 0;
+   for (const char *q = p; q < end; q++) {
+      if (*q == '(')
+         depth++;
+      else if (*q == ')' && !--depth) {
+         *sig_len = (size_t)(q + 1 - line);
+         return name;
+      }
+   }
+   return NULL;
+}
+
 static int
 air_dedupe_globals(const char *text, size_t size, char **out, size_t *out_n, char *why, size_t why_n)
 {
    void *mem = ralloc_context(NULL);
    struct hash_table *seen = _mesa_hash_table_create(mem, _mesa_hash_string, _mesa_key_string_equal);
+   struct hash_table *defined = _mesa_hash_table_create(mem, _mesa_hash_string, _mesa_key_string_equal);
+   struct hash_table *declared = _mesa_hash_table_create(mem, _mesa_hash_string, _mesa_key_string_equal);
    struct util_dynarray drop;   /* [start, end) of each line to leave out */
    util_dynarray_init(&drop, mem);
    int r = 0;
+   /* the functions the text defines */
+   for (size_t at = 0; at < size;) {
+      const char *line = text + at;
+      const char *nl = memchr(line, '\n', size - at);
+      const size_t len = nl ? (size_t)(nl - line) : size - at;
+      size_t sig = 0;
+      char *name = len > 7 && !strncmp(line, "define ", 7) ? air_function_line_name(mem, line, len, &sig) : NULL;
+      if (name)
+         _mesa_hash_table_insert(defined, name, name);
+      at += len + (nl ? 1 : 0);
+   }
    for (size_t at = 0; at < size;) {
       const char *line = text + at;
       const char *nl = memchr(line, '\n', size - at);
       const size_t len = nl ? (size_t)(nl - line) : size - at;
       const size_t next = at + len + (nl ? 1 : 0);
+      size_t sig = 0;
+      char *fname = len > 8 && !strncmp(line, "declare ", 8) ? air_function_line_name(mem, line, len, &sig) : NULL;
+      if (fname) {
+         struct hash_entry *e = _mesa_hash_table_search(declared, fname);
+         if (_mesa_hash_table_search(defined, fname) ||
+             (e && strlen((const char *)e->data) == sig && !memcmp(e->data, line, sig))) {
+            util_dynarray_append(&drop, at);
+            util_dynarray_append(&drop, next);
+            r = 1;
+         } else if (e) {
+            snprintf(why, why_n, "the text declares the function %s twice, differently", fname);
+            r = -1;
+            break;
+         } else
+            _mesa_hash_table_insert(declared, fname, ralloc_strndup(mem, line, sig));
+      }
       if (len > 1 && line[0] == '@') {
          const char *eq = NULL;
          for (size_t i = 1; i + 2 < len; i++) {

@@ -42,6 +42,7 @@ struct rtest {
    const char *tolerance;
    bool spirv_road;                  /* the frontend must refuse it: it passes only on the SPIR-V road */
    bool fc_both;                     /* the vertex function is made with the constants too */
+   const char *linked_air, *linked_fn; /* a visible function of another library, linked into the fragment stage */
 };
 
 static id<MTLBuffer>
@@ -903,6 +904,36 @@ rfn_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_linksamp: a linked visible function's constexpr sampler beside the fragment's own ---------------------------- */
+
+static float
+rls_texel(const struct rrun *r, int x, int y, unsigned c, bool repeat)
+{
+   if (repeat) {
+      x = ((x % 16) + 16) % 16;
+      y = ((y % 16) + 16) % 16;
+   } else if (x < 0 || x > 15 || y < 0 || y > 15)
+      return 0.0f;   /* clamp_to_zero: transparent black */
+   return r->tex[(y * 16 + x) * 4 + c] / 255.0f;
+}
+
+static bool
+rls_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         /* uv * 2 - 0.5 at the pixel's centre, in texels: never on a texel edge */
+         const float tx = (px_u(px) * 2 - 0.5f) * 16, ty = (px_w(py) * 2 - 0.5f) * 16;
+         const int x = (int)floorf(tx), y = (int)floorf(ty);
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = rls_texel(r, x, y, c, false) + 2 * rls_texel(r, x, y, c, true);
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -970,6 +1001,9 @@ static const struct rtest rtests[] = {
      "rgba8 2 LSB, r32float 1e-5, r32uint exact; color(0..2) read as half4, float, uint" },
    { "r_fetch_noatt", "r_fetch", "rff_vs", "rfn_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, setup_quad, rfn_check,
      "1e-6; color(1) read with no attachment 1: the dummy image's zeros" },
+   { "r_linksamp", "r_linksamp", "rls_vs", "rls_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rt_setup, rls_check,
+     "exact; the fragment's constexpr sampler (nearest, clamp_to_zero) and a linked visible function's (nearest, repeat), "
+     "both @__air_sampler_state in their modules", false, false, "r_linksamp_fx", "rls_fx" },
 };
 #undef F32
 #undef NOC
