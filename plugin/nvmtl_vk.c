@@ -646,6 +646,9 @@ static int nvmtl_storage_view_needed(uint32_t format, int requested, int native_
     return requested && !native_storage && !a8 && !compressed && twin && nvmtl_vk_format_is_storage(twin);
 }
 
+/* VkPipelineShaderStageNirCreateInfoMESA (Mesa's vk_pipeline): a compute stage given as a NIR shader, which Mesa clones */
+#define NVMTL_STYPE_NIR_STAGE ((VkStructureType)1000290001)
+typedef struct { VkStructureType sType; const void *pNext; void *nir; } nvmtl_nir_stage_info;
 /* Every compute pipeline creation goes through here, so the no-bounds-check choice cannot miss a site. */
 static VkResult nvmtl_create_compute_pipeline(VkDevice dev, VkPipelineCache cache, const VkComputePipelineCreateInfo *info,
                                               const VkAllocationCallbacks *allocator, VkPipeline *out)
@@ -862,6 +865,14 @@ static int (*pnvk_reprio)(int, unsigned long);
 // Both NULL in an older NVK: no command buffer is ever taken for dropped, as before.
 static int (*pnvk_fence_dropped)(VkDevice, VkFence);
 static unsigned (*pnvk_rec_stats)(uint64_t *, unsigned);
+/* NVK's AIR-to-NIR frontend (nvk/air, docs/AIR-TO-NIR.md): looked up only when the plugin opens NVK directly, so the
+   VkDevice it is handed is NVK's own. An older NVK has none of them, and every compute pipeline takes the SPIR-V road. */
+#include "nvmtl_air_nir.h"
+static nvmtl_air_to_nir_v1_fn pnvk_air_to_nir;
+static nvmtl_air_nir_free_v1_fn pnvk_air_nir_free;
+static nvmtl_air_nir_clone_v1_fn pnvk_air_nir_clone;
+static nvmtl_air_nir_serialize_v1_fn pnvk_air_nir_serialize;
+static nvmtl_air_nir_deserialize_v1_fn pnvk_air_nir_deserialize;
 static int nvmtl_drop_report_on(void)
 {
     static int on = -1;
@@ -1214,6 +1225,15 @@ static int nvmtl_vk_initialize(void)
             pnvk_reprio = (int (*)(int, unsigned long))dlsym(g_lib, "nvmtl_nvk_tsg_reprioritise_v1");
             pnvk_fence_dropped = (int (*)(VkDevice, VkFence))dlsym(g_lib, "nvmtl_nvk_fence_dropped_v1");
             pnvk_rec_stats = (unsigned (*)(uint64_t *, unsigned))dlsym(g_lib, "nvmtl_nvk_recover_stats_v1");
+            if (nvmtl_vk_vendor() == 0x10de) {
+                pnvk_air_to_nir = (nvmtl_air_to_nir_v1_fn)dlsym(g_lib, "nvmtl_air_to_nir_v1");
+                pnvk_air_nir_free = (nvmtl_air_nir_free_v1_fn)dlsym(g_lib, "nvmtl_air_nir_free_v1");
+                pnvk_air_nir_clone = (nvmtl_air_nir_clone_v1_fn)dlsym(g_lib, "nvmtl_air_nir_clone_v1");
+                pnvk_air_nir_serialize = (nvmtl_air_nir_serialize_v1_fn)dlsym(g_lib, "nvmtl_air_nir_serialize_v1");
+                pnvk_air_nir_deserialize = (nvmtl_air_nir_deserialize_v1_fn)dlsym(g_lib, "nvmtl_air_nir_deserialize_v1");
+                if (!pnvk_air_to_nir || !pnvk_air_nir_free || !pnvk_air_nir_clone || !pnvk_air_nir_serialize || !pnvk_air_nir_deserialize)
+                    pnvk_air_to_nir = NULL;   // all five or none: the road needs each of them
+            }
         }
         else { nvlog("vk: %s has no vkGetInstanceProcAddr", NVMTL_ICD_LIB); dlclose(g_lib); g_lib = NULL; }
     } else {
@@ -6284,10 +6304,12 @@ _Static_assert(sizeof(((nvk_pipeline *)0)->tess_vb) / sizeof(uint32_t) == NVMTL_
 _Static_assert(NVMTL_LOAD_ALL == (1u << (NVMTL_NCOL + 2)) - 1u, "NVMTL_LOAD_ALL must be every load bit: NVMTL_NCOL colour + depth + stencil");
 _Static_assert(NVMTL_RPX_MAX == (1u << (NVMTL_NCOL + 2)) - 4u, "NVMTL_RPX_MAX must be every nonzero load key minus the 3 that rpv[] holds");
 
+static void nvmtl_air_nir_release(nvk_pipeline *p);
 static void nvmtl_failed_pipeline(nvk_pipeline *pipeline)
 {
     if (pipeline->pipe) pvkDestroyPipeline(g_dev, (VkPipeline)pipeline->pipe, NULL);
     if (pipeline->mod) pvkDestroyShaderModule(g_dev, (VkShaderModule)pipeline->mod, NULL);
+    nvmtl_air_nir_release(pipeline);
     if (pipeline->layout) pvkDestroyPipelineLayout(g_dev, (VkPipelineLayout)pipeline->layout, NULL);
     if (pipeline->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)pipeline->rp, NULL);
     free(pipeline->ag_src);
@@ -6746,6 +6768,59 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     return 0;
 }
 
+// A compute kernel the AIR-to-NIR frontend translated (NVMTLAirNir.m). It gets the pipeline layout every compute
+// pipeline has (both stage sets and the heap, 48 bytes of push constants: the same as the SPIR-V road's, so a set bound
+// for one is compatible with the other), its descriptor masks from the result instead of a module, the align guard when
+// a buffer access promises more than 4 bytes (any misaligned buffer the kernel reads then runs a build that promises
+// none), and the pipeline compiled for local is kept as that size's variant. NVK's pipeline cache keeps its binary as it
+// keeps the SPIR-V road's (Mesa hashes the NIR it is given).
+static void nvmtl_air_nir_release(nvk_pipeline *p)
+{
+    if (p->air_nir && pnvk_air_nir_free) pnvk_air_nir_free(p->air_nir);
+    if (p->nir_owner) CFRelease((CFTypeRef)p->nir_owner);
+    p->air_nir = NULL; p->nir_owner = NULL;
+}
+int nvmtl_vk_air_nir_exports(void) { return pnvk_air_to_nir != NULL && g_dev != VK_NULL_HANDLE; }
+int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3])
+{
+    return !p || !p->air_nir || nvmtl_air_nir_size_ok(l, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations);
+}
+int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_result *res, const uint32_t local[3], nvk_pipeline *out)
+{
+    if (!nir || !res || !local || !pnvk_air_to_nir) return -1;
+    if (nvmtl_vk_init() || ensure_descriptors()) return -1;
+    if (!nvmtl_air_nir_size_ok(local, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations)) return -1;
+    memset(out, 0, sizeof *out);
+    if (nvmtl_air_nir_masks(res, out->bmask, &out->stex_hi[0], out->tbm[0])) { nvlog("vk: AIR-to-NIR result names a texel buffer that is no texture - not used"); return -1; }
+    memcpy(out->bmask2, out->bmask, sizeof out->bmask2);
+    out->bmask_ok = out->bmask2_ok = 1;
+    out->tbany = (out->tbm[0][0] | out->tbm[0][1] | out->tbm[0][2] | out->tbm[0][3]) != 0;
+    VkDescriptorSetLayout sl2c[3] = { g_setLayout, g_setLayout, g_heapLayout };
+    VkPushConstantRange pcr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES };
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, g_heapSet ? 3 : 2, sl2c, 1, &pcr };
+    void *layout = NULL;
+    if (nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &layout) != VK_SUCCESS) { nvlog("vk: vkCreatePipelineLayout(AIR-to-NIR compute) FAILED"); return -1; }
+    nvmtl_nir_stage_info ni = { NVMTL_STYPE_NIR_STAGE, NULL, nir };
+    VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &ni, 0, VK_SHADER_STAGE_COMPUTE_BIT, VK_NULL_HANDLE, "main", NULL },
+        (VkPipelineLayout)layout, VK_NULL_HANDLE, -1 };
+    void *pipe = NULL;
+    VkResult r = nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &pipe);
+    if (r != VK_SUCCESS || !pipe) { pvkDestroyPipelineLayout(g_dev, (VkPipelineLayout)layout, NULL); return -1; }
+    out->layout = layout; out->pipe = pipe;
+    if (res->size >= NVMTL_AIR_NIR_RESULT_V2_SIZE + sizeof res->global_align && res->global_align > 4 && res->buffer_mask && nvmtl_align_guard_on()) {
+        out->ag_mask = res->buffer_mask; out->ag_req = res->global_align;
+        atomic_fetch_add(&g_ag_guarded, 1);
+    }
+    // last, after every step that can fail (as the SPIR-V road's creation does)
+    if ((out->var = calloc(NVMTL_NVAR, sizeof *out->var))) {
+        out->capvar = NVMTL_NVAR; memcpy(out->var[0].l, local, sizeof out->var[0].l); out->var[0].pipe = out->pipe; out->nvar = 1;
+    }
+    memcpy(out->nir_local, local, sizeof out->nir_local);
+    out->air_nir = nir;
+    return 0;
+}
+
 int nvmtl_vk_tg_reject(const uint32_t l[3], const uint32_t *t, const char *kernel, uint32_t lin)
 {
     static _Atomic unsigned zero_n, over_n, lin_n;
@@ -6784,6 +6859,7 @@ static int nvmtl_cvar_parallel_on(void) {
     return on;
 }
 static pthread_mutex_t g_ag_lock = PTHREAD_MUTEX_INITIALIZER;
+int nvmtl_air_nir_safe_build(const nvk_pipeline *base, nvk_pipeline *out);   // NVMTLAirNir.m
 static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
 {
     if (!p->ag_mask) return p;
@@ -6798,9 +6874,10 @@ static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
     if (bad < 0) return p;
     pthread_mutex_lock(&g_ag_lock);
     nvk_pipeline *sp = (nvk_pipeline *)p->ag_safe;
-    if (!sp && p->ag_src) {
+    if (!sp && (p->ag_src || p->air_nir)) {
         sp = calloc(1, sizeof *sp);
-        if (sp && nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 1, sp)) { free(sp); sp = NULL; }
+        // a kernel on the AIR-to-NIR road is translated again with no buffer access promising more than 4 bytes
+        if (sp && (p->air_nir ? nvmtl_air_nir_safe_build(p, sp) : nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 1, sp))) { free(sp); sp = NULL; }
         p->ag_safe = sp;
         nvlog("align guard: buffer %d bound at GPU address %#llx is not %u-aligned - %s", bad, (unsigned long long)at, p->ag_req,
               sp ? "this kernel now runs its SAFE module on such bindings (Apple runs a broken alignment promise exactly)" : "SAFE module FAILED - such dispatches are SKIPPED");
@@ -6813,7 +6890,7 @@ static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
 static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
 {
     if (nvmtl_vk_tg_reject(l, NULL, "(variant)", p->lin)) return VK_NULL_HANDLE;
-    if (!p->mod) return (VkPipeline)p->pipe;
+    if (!p->mod && !p->air_nir) return (VkPipeline)p->pipe;
     // p->mod, p->layout and p->lin are written once when the pipeline is created, so only the table needs the lock.
     const int parallel = nvmtl_cvar_parallel_on();
     VkPipeline found = VK_NULL_HANDLE; void *winner = NULL;
@@ -6829,7 +6906,11 @@ static VkPipeline nvmtl_compute_variant(nvk_pipeline *p, const uint32_t l[3])
         VkComputePipelineCreateInfo cpi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0,
             { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, (VkShaderModule)p->mod, "main", &si },
             (VkPipelineLayout)p->layout, VK_NULL_HANDLE, -1 };
-        VkResult r = nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &cpi, NULL, &found);
+        // A kernel on the AIR-to-NIR road has no module: its variant is a copy of its NIR with the size changed.
+        nvmtl_nir_stage_info ni = { NVMTL_STYPE_NIR_STAGE, NULL, p->air_nir ? pnvk_air_nir_clone(p->air_nir, l) : NULL };
+        if (p->air_nir) { cpi.stage.pNext = &ni; cpi.stage.module = VK_NULL_HANDLE; cpi.stage.pSpecializationInfo = NULL; }
+        VkResult r = (p->air_nir && !ni.nir) ? VK_ERROR_OUT_OF_HOST_MEMORY : nvmtl_create_compute_pipeline(g_dev, VK_NULL_HANDLE, &cpi, NULL, &found);
+        if (ni.nir) pnvk_air_nir_free(ni.nir);
         if (parallel) pthread_mutex_lock(&g_var_lock);
         if (r != VK_SUCCESS) {
             if (found) pvkDestroyPipeline(g_dev, found, NULL);
@@ -13248,6 +13329,7 @@ void nvmtl_vk_pipeline_destroy(nvk_pipeline *p)
     pthread_mutex_unlock(&g_rpv_lock);
     if (p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rp, NULL);
     if (p->mod) pvkDestroyShaderModule(g_dev, (VkShaderModule)p->mod, NULL);
+    nvmtl_air_nir_release(p);
     if (p->layout) pvkDestroyPipelineLayout(g_dev, (VkPipelineLayout)p->layout, NULL);
     free(p->ag_src);
     memset(p, 0, sizeof *p);

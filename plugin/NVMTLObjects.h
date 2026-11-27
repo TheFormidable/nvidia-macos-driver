@@ -322,6 +322,13 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLComputePipelineState () { @public uint64_t _resid; NSUInteger _attrT, _askT; } @end
 // _sassKernel: machine code that runs before the Vulkan pipeline; _sassOnly: there is no Vulkan pipeline
 @interface NVMTLComputePipelineState () { @public id _sassKernel; BOOL _sassOnly; } @end
+// The road the pipeline's kernel took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V. On the AIR-to-NIR
+// road, _nirTg is the threadgroup-memory lengths it was translated with (nil for none) and _spvTwin the same kernel on
+// the SPIR-V road, made the first time a dispatch asks for a threadgroup size the road does not run.
+@interface NVMTLComputePipelineState () { @public uint8_t _road; NSDictionary *_nirTg; id _spvTwin; } @end
+// A function whose AIR is the translator's own rewrite (a mesh or object stage's kernel, a tile function's, a kernel with
+// a stage-in layout): its compute pipeline takes the SPIR-V road only.
+@interface NVMTLFunction () { @public BOOL _spirvOnly; } @end
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
 // _descriptor's vertex and fragment functions, read once when the pipeline is made: the descriptor is a copy nothing
 // changes afterwards, and a draw read them through two getters

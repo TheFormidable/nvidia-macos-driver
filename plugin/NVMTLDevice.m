@@ -2692,7 +2692,7 @@ id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32
         free(fidx); free(fsz); free(fpay);
         id<MTLComputePipelineState> cps = nil;
         if (spv) {
-            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
+            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel"; v->_spirvOnly = YES;
             NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
             if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
         }
@@ -2954,6 +2954,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
           linear ? "linear" : "nearest", repeat ? "repeat" : "clamp");
     return s; }
 
+// The AIR-to-NIR road for compute pipelines (NVMTLAirNir.m, imported at the end of this file)
+BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why);
+NVMTLComputePipelineState *nvmtl_air_nir_pipeline(NVMTLFunction *f, NSDictionary *tgLen, NSString **why);
+void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why, uint64_t ns);
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
     if (err) *err = nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"newComputePipelineState: Vulkan is not up in this process");
@@ -3012,12 +3016,24 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
                                         userInfo:@{ NSLocalizedDescriptionKey: @"function is not a kernel" }];
         return nil;
     }
-    NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
+    // AIR to NIR first (NVMTLAirNir.m): NVK translates the kernel's AIR itself. A kernel it refuses, or one NVK will not
+    // make a pipeline of, takes the SPIR-V road below exactly as before; NVMTL_AIR_NIR=0 sends every kernel there.
+    NSString *nirWhy = nil;
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    NVMTLComputePipelineState *ps = nvmtl_air_nir_wanted(f, objc_getAssociatedObject(f, &compatShaderKey) != nil, &nirWhy)
+                                  ? nvmtl_air_nir_pipeline(f, nil, &nirWhy) : nil;
+    if (ps) {
+        nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
+        nvmtl_air_nir_note(f, 1, NO, nil, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+        nvlog("newComputePipelineStateWithFunction: %s -> %p (AIR to NIR)", f->_fname.UTF8String, (__bridge void *)ps);
+    } else {
+    ps = [NVMTLComputePipelineState new];
     ps->_function = f;
     nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
     ps->_attrT = nvmtl_air_max_tg(f);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
+    nvmtl_air_nir_note(f, 0, NO, nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
     if (g_app_edit_last) {
         objc_setAssociatedObject(ps, &g_app_edit_ps_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
@@ -3025,6 +3041,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     }
     nvlog("newComputePipelineStateWithFunction: %s -> %p (%lu B of SPIR-V)",
           f->_fname.UTF8String, (__bridge void *)ps, (unsigned long)f->_spirv.length);
+    }
     nvmtl_vendor_attach_sass(self, ps, f);
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
@@ -3424,7 +3441,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         NSData *ospv = nvmtl_mesh_translate_fc(oll, @"kernel", of->_fc, &w);
         if (!ospv) { *why = [NSString stringWithFormat:@"object \"%@\" lowered kernel did not translate: %@", of->_fname, w]; return nil; }
         NVMTLFunction *okf = [NVMTLFunction new];
-        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib;
+        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib; okf->_spirvOnly = YES;
         NVMTLComputePipelineState *op = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:okf error:&pe];
         if (!op) { *why = [NSString stringWithFormat:@"object \"%@\": no compute pipeline (%@)", of->_fname, pe.localizedDescription ?: @"?"]; return nil; }
         *oout = op;
@@ -3434,7 +3451,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     NSData *vspv = nvmtl_mesh_translate(vll, @"vertex", &w);
     if (!vspv) { *why = [NSString stringWithFormat:@"\"%@\" generated vertex (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
     NVMTLFunction *kf = [NVMTLFunction new];
-    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib;
+    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib; kf->_spirvOnly = YES;
     NVMTLComputePipelineState *kp = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:kf error:&pe];
     if (!kp) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel: no compute pipeline (%@)", mf->_fname, pe.localizedDescription ?: @"?"]; return nil; }
     NVMTLFunction *vf = [NVMTLFunction new];
@@ -3536,3 +3553,4 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
 #import "NVMTLSass.m"
+#import "NVMTLAirNir.m"

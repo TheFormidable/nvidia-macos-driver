@@ -75,8 +75,21 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t gl_uniform_layout, gl_uniform_slot[2], gl_uniform_range[2], gl_uniform_tracked;
     uint32_t db_dyn;   /* the depth bounds test and its range are dynamic state of this pipeline (depth attachment + depthBounds feature) */
     uint32_t view_mask;   /* multiview: the views this pipeline's render pass runs (vertex amplification), 0 for an ordinary pass */
+    /* a compute kernel on the AIR-to-NIR road (NVMTLAirNir.m): its NIR shader, owned (nvmtl_air_nir_free_v1), which each
+       threadgroup-size variant is a copy of; the size it was translated for; and what the align guard's build needs (a
+       retained object of NVMTLAirNir.m's, released with the pipeline). NULL on the SPIR-V road. */
+    void *air_nir; uint32_t nir_local[3]; void *nir_owner;
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
+struct nvmtl_air_nir_result;
+/* A compute pipeline from an AIR-to-NIR result (nvmtl_vk.c): the layout every compute pipeline has, the descriptor masks
+   from the result, compiled for local and kept as that size's variant. Takes nir on success (the caller frees it on a
+   failure). 0 on success. */
+int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_result *res, const uint32_t local[3], nvk_pipeline *out);
+/* 1 when NVK exports the AIR-to-NIR road (the plugin opened it directly), 0 otherwise */
+int nvmtl_vk_air_nir_exports(void);
+/* 1 when a dispatch of threadgroup size l can run p, a kernel on the AIR-to-NIR road (always 1 on the SPIR-V road) */
+int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3]);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
 #include "nvmtl_sampler_desc.h"
 typedef struct { void *s; int linear, repeat; float lod_min, lod_max; nvmtl_sampler_desc desc; int full_state; } nvk_sampler;

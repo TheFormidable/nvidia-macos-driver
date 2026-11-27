@@ -166,6 +166,10 @@ env	NVK_ZINK_SUBDATA_STAGE	escape	on (NVK_ZINK_SUBDATA_STAGE=0 in the settings f
 env	NVK_ZINK_SURFACE_KEEP	escape	on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6)	3.0.7	3.2	The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7.
 env	NVMTL_AIRCACHE	dev	unset	2.9	-	unreviewed
 env	NVMTL_AIR_DUMP	diag	unset	2.9	-	unreviewed
+env	NVMTL_AIR_NIR	escape	on except in WindowServer (NVMTL_AIR_NIR=0 in the settings file: every compute pipeline is made from the translator's SPIR-V, as in 3.0.20)	3.0.21	3.2	A compute pipeline is made from the NIR that NVK's own AIR-to-NIR frontend builds from the kernel's AIR (nvk/air, docs/AIR-TO-NIR.md), with the translator's SPIR-V as the fallback for a kernel the frontend refuses, one NVK will not make a pipeline of, a dispatch with a pixel-coordinate sampler and a threadgroup size the road does not run; never in WindowServer, and only with an NVK that has the frontend.
+env	NVMTL_AIR_NIR_DEBUG	diag	unset	3.0.21	3.2	NVK's AIR-to-NIR frontend says on standard error where a module's static initializer could not be run, for looking into a refusal
+env	NVMTL_AIR_NIR_DUMP	diag	unset	3.0.21	3.2	NVK's AIR-to-NIR frontend writes the module it read (after its passes) to the file named, for looking into a refusal
+env	NVMTL_AIR_NIR_DUMP_FC	diag	unset	3.0.21	3.2	NVK's AIR-to-NIR frontend writes the module once the function constants are in to the file named, for looking into a refusal
 env	NVMTL_ANGLE_METAL	dev	unset	2.9	-	unreviewed
 env	NVMTL_APPLE_FAMILY	dev	unset	2.9	-	unreviewed
 env	NVMTL_APPLE_PIPELINE	dev	unset	2.9	-	unreviewed
@@ -1099,6 +1103,7 @@ procname	mtlprobe	internal	-	2.9	-	a branch on the process name; not a user swit
 procname	nvmtlrender	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	nvmtltest	internal	-	2.9	-	a branch on the process name; not a user switch
 procname	plugin-container	internal	-	3.0.5	-	a branch on the process name, Firefox's child processes, where the video library's decoders keep their last emitted pictures (NVENCVT_DEC_HOLD); not a user switch
+build	NVK_CRATE_CACHE	internal	unset	3.0.21	-	a build host setting: a folder of the Rust crates an earlier NVK build fetched, copied into the Mesa tree so meson downloads nothing; nothing of it reaches the shipped driver
 build	NVK_EXTRA_PATCHES	dev	unset	2.9	-	extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS <names> (NVK_EXTRA_PATCHES)"
 build	NVK_FLOOR	internal	unset (15.0: the release)	3.0.18	-	a build host setting: the macOS deployment floor NVK is built for; the original project's older-macOS test builds set it, nothing of it changes the shipped driver
 build	NVK_JOBS	internal	unset	2.9	-	a build host setting (a path, a job count); nothing of it reaches the shipped driver

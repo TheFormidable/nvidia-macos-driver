@@ -2979,6 +2979,7 @@ NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutput
     }
     NVMTLFunction *sf = [NVMTLFunction new];
     sf->_spirv = spirv; sf->_fname = fn->_fname; sf->_stage = fn->_stage; sf->_air = fn->_air; sf->_fc = fn->_fc;
+    sf->_spirvOnly = YES;   // its SPIR-V reads the stage-in layout the translator was given; its AIR does not
     sf->_lib = fn->_lib; sf->_fcv = fn->_fcv; sf->_specName = fn->_specName; sf->_needsLink = NO;
     return sf;
 }

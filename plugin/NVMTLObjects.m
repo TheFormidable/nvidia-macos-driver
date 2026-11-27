@@ -2651,6 +2651,12 @@ id gNVMTLMainDevice = nil;
 extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_samplers_amp(NVMTLFunction *, NSDictionary *, uint32_t, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
+// NVMTLAirNir.m: a threadgroup-memory variant of a kernel on the AIR-to-NIR road (nil: make it on the SPIR-V road), the
+// pipeline a dispatch of threadgroup size l runs (the kernel's SPIR-V twin for a size that road does not run), and the
+// per-process count of the roads
+NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, NSDictionary *samplers, NSDictionary *tgLen, NSString **why);
+NVMTLComputePipelineState *nvmtl_air_nir_for_size(NVMTLComputePipelineState *ps, const uint32_t l[3]);
+void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why, uint64_t ns);
 // facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
 enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
 uint32_t nvmtl_air_text_flags(NSString *ll);
@@ -7100,7 +7106,10 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
             selected = cached;
             if (!selected) {
                 NSString *why = nil;
-                NSData *spirv = nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
+                // A kernel on the AIR-to-NIR road whose threadgroup memory is sized here is translated again with the
+                // lengths; a pixel-coordinate sampler, or a refusal, makes the variant on the SPIR-V road as before.
+                if (_ps->_road == 1) selected = nvmtl_air_nir_variant(_ps, _samplers, _tgLen, &why);
+                NSData *spirv = selected ? nil : nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
                 if (spirv) {
                     selected = [NVMTLComputePipelineState new];
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
@@ -7118,8 +7127,9 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                     _ps->_samplerVariants[key] = [NSNull null];
                     return nil;
                 }
+                if (spirv) nvmtl_air_nir_note(_ps->_function, 0, YES, _ps->_road == 1 ? why : nil, 0);
                 _ps->_samplerVariants[key] = selected;
-                nvlog("compute pixel sampler variant built: %s", _ps->_function->_fname.UTF8String);
+                nvlog("compute pixel sampler variant built: %s (%s)", _ps->_function->_fname.UTF8String, selected->_road ? "AIR to NIR" : "SPIR-V");
             }
         }
         _e78VarFor = _ps; _e78VarSel = selected;
@@ -7376,6 +7386,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     uint32_t t[3] = { (uint32_t)(grid.width * tg.width), (uint32_t)(grid.height * tg.height), (uint32_t)(grid.depth * tg.depth) };
     if (nvmtl_vk_tg_reject(l, t, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     nvmtl_zprobe_dispatch(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, t, l);
@@ -7400,6 +7411,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     uint32_t t[3] = { (uint32_t)threads.width, (uint32_t)threads.height, (uint32_t)threads.depth };
     if (nvmtl_vk_tg_reject(l, t, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     nvmtl_zprobe_dispatch(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, t, l);
@@ -7576,6 +7588,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("indirect dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     if (nvmtl_vk_tg_reject(l, NULL, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     [self nvmtlE78Barrier:YES];
     if (![self nvmtlPrepareIndirectImages]) return;
