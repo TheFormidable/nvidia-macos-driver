@@ -93,11 +93,11 @@ do not exclude IONDRVSupport.
 
 ### Install the package
 
-Download `nullmoth-nvidia-local-<commit>.tar.gz` from this fork's
+Download the package (`nullmoth-nvidia-3.0.20.tar.gz` for release 2) from this fork's
 [Releases](https://github.com/TheFormidable/nvidia-macos-driver/releases), then in Terminal:
 
 ```bash
-tar -xzf nullmoth-nvidia-local-*.tar.gz && cd pkgroot
+tar -xzf nullmoth-nvidia-3.0.20.tar.gz && cd pkgroot
 shasum -a 256 -c SHA256SUMS
 sudo env CHECK=1 ./install.sh
 sudo ./install.sh && sudo shutdown -r now
@@ -139,6 +139,12 @@ The two AMFI boot arguments turn off code-signing enforcement for the whole syst
    nvmtl libraries.
 3. Register the CA in OpenCore as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor: `Lilu.kext`, then
    `AMFIAnchor.kext`, then the anchor kext the script made.
+
+Release 2 makes steps 1 and 2 optional: its package comes with the graphics stack signed with this fork's CA, and the
+matching anchor kext, `NVAnchorInjector.kext.zip`, is on the
+[release page](https://github.com/TheFormidable/nvidia-macos-driver/releases/tag/3.0.20) with the OpenCore steps.
+Install that anchor only if you trust this fork's signer: AMFI then accepts anything signed with its key, not only this
+driver. Make your own CA to trust only yourself.
 
 WindowServer then loads the plugin with AMFI enforcing. On the test machine this worked from its first boot, the GPU
 reported Metal 4, and 3.0.20 ran signed that way. It is still an **experiment**: one machine, and App Store, iMessage,

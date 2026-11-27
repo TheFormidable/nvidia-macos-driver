@@ -4,7 +4,7 @@ The headline items:
 
 - **One package for every macOS from 10.7 Lion to 26 Tahoe.** The installer reads the macOS version and installs the matching part by itself.
 - **Much faster OpenGL and Vulkan games.** Zink on NVK is the OpenGL driver now. Swaps no longer wait for the GPU or the display, the native Vulkan frontend shows the newest frame, and NVK uses the GPU's hierarchical Z.
-- **The graphics stack can load with AMFI left on.** You sign it with your own CA and register that CA with AMFIAnchor.
+- **The graphics stack can load with AMFI left on.** The package's graphics stack is signed with this fork's CA. Add this release's anchor kext to OpenCore through AMFIAnchor, or sign the package with a CA of your own.
 - **No manual "Allow" after a first install.**
 - **Screen sharing no longer stalls WindowServer.**
 
@@ -24,10 +24,10 @@ The headline items:
 
 ## Install
 
-Download `nullmoth-nvidia-local-<commit>.tar.gz` below (SHA-256 `<sha256>`). It was built from commit `<commit>` of `fable` over the NullMoth 2.9 release package, and it carries the 13 kits inside. Then, in Terminal:
+Download `nullmoth-nvidia-3.0.20.tar.gz` below (SHA-256 `670162b02223f014ea1a70e4207422454ac73df521a7e659a190e2d03d66702e`). It was built from commit `bf5de958` of `fable` over the NullMoth 2.9 release package, and it carries the 13 kits inside. Its graphics stack (NVMTLDriver.bundle, NVKZinkGLDriver.bundle and the nvmtl libraries) is signed with this fork's CA. With the two AMFI boot arguments of the README that signature changes nothing; with the [anchor kext](#amfi-left-on-the-anchor-kext-optional) it lets AMFI stay on. Then, in Terminal:
 
 ```
-tar -xzf nullmoth-nvidia-local-<commit>.tar.gz
+tar -xzf nullmoth-nvidia-3.0.20.tar.gz
 cd pkgroot
 sudo env CHECK=1 ./install.sh
 sudo ./install.sh && sudo shutdown -r now
@@ -39,6 +39,29 @@ Before you install:
 - **DLSS is downloaded by default**: about 750 MB the first time. These are NVIDIA's own files, checked against pinned hashes. `sudo env NULLMOTH_DLSS=0 ./install.sh` skips the step.
 - **macOS 26 and `alcid`:** macOS 26 has no AppleHDA, so AppleALC does nothing there. The audio driver leaves the onboard sound alone while `alcid` or `alcverbs` is in boot-args. Remove them to get speakers, headphones and microphone back.
 - **The first launch of each game is slower.** NVK's shader cache is keyed to its library, so each game's shaders are compiled again once.
+
+### AMFI left on: the anchor kext (optional)
+
+`NVAnchorInjector.kext.zip` below (SHA-256 `38baea8865d391ea6b347529fc0301a7305763a2d736a1b36826bfdc8763ae54`) holds the anchor kext for OpenCore. With it, the driver can run on macOS 15 and 26 without `amfi_get_out_of_my_way=0x1 amfi=0x80` in boot-args (tried on 26 only). It is a codeless kext: it carries only the public key of this fork's root certificate (key id `b3556ae9e7564be4ef5b453ac115790ca3f5f792`; the certificate's SHA-256 fingerprint is `DA:F9:81:B8:ED:2F:22:75:31:CE:88:E5:D5:17:07:02:32:33:24:6B:3E:8F:6D:AB:FB:5F:79:88:1F:1A:A7:DA`). The private keys stay on the maintainer's Mac and are not on GitHub.
+
+> [!IMPORTANT]
+> **Install the anchor only if you trust this fork's signer.** With it, AMFI on your Mac accepts anything signed with this fork's key, not only this driver. To trust only yourself, make your own CA and anchor, and sign the package with them ([docs/SIGNED-GRAPHICS-EXPERIMENT.md](../SIGNED-GRAPHICS-EXPERIMENT.md)).
+
+1. Work on a copy of your EFI on a USB stick. Keep the EFI that still has the two AMFI arguments.
+2. Put `NVAnchorInjector.kext` (from the zip) and `AMFIAnchor.kext` from [AMFIAnchor's releases](https://github.com/b00t0x/AMFIAnchor/releases) (0.1.2 on the test machine) in `EFI/OC/Kexts`, beside Lilu (1.7.2 or later).
+3. In `Kernel → Add`, in this order, each with `PlistPath` `Contents/Info.plist`:
+   - `Lilu.kext`, `ExecutablePath` `Contents/MacOS/Lilu`;
+   - `AMFIAnchor.kext`, `ExecutablePath` `Contents/MacOS/AMFIAnchor`;
+   - `NVAnchorInjector.kext`, with an empty `ExecutablePath`.
+
+   Set `MinKernel` `20.0.0` and `MaxKernel` `25.99.99` on the last two. Keep AMFIPass: the test machine loads it after the anchor.
+4. Remove `amfi_get_out_of_my_way=0x1 amfi=0x80` from boot-args in the stick's `config.plist`, and start from the stick.
+5. Check that it worked:
+   - `ioreg -r -c AMFIAnchor -l | grep -E 'InstallStatus|LoadedAnchors'` shows `InstallStatus` 1 and `org.theformidable.nvidia-signing`;
+   - `sysctl -n kern.bootargs` has no AMFI argument;
+   - `system_profiler SPDisplaysDataType` shows the card with Metal.
+
+The route covers macOS 15 and 26. The kits for 10.7 to 14 are not signed with this CA: on those releases, use the boot arguments their installer prints. The signing certificate is valid until 26 November 2027. This was tried on one machine only. If the desktop comes up without Metal, start from the EFI that still has the two AMFI arguments.
 
 ## What is new since 3.0.2
 
@@ -64,10 +87,10 @@ Before you install:
 ### Installing gets out of the way
 
 - **AMFI can stay on (optional).** Instead of the global `amfi_get_out_of_my_way=0x1 amfi=0x80` boot arguments, you can do this:
-  - Sign the graphics stack (NVMTLDriver.bundle, NVKZinkGLDriver.bundle and the nvmtl libraries) with a private CA that you create on your own Mac (`tools/make_amfi_anchor.sh`, `tools/sign_graphics.sh`).
+  - Sign the graphics stack (NVMTLDriver.bundle, NVKZinkGLDriver.bundle and the nvmtl libraries) with a CA. The release package comes signed with this fork's CA, and its anchor kext is published with it ([above](#amfi-left-on-the-anchor-kext-optional)). You can also use a private CA that you create on your own Mac (`tools/make_amfi_anchor.sh`, `tools/sign_graphics.sh`).
   - Register that CA in OpenCore as an [AMFIAnchor](https://github.com/b00t0x/AMFIAnchor) anchor: Lilu, then AMFIAnchor.kext, then the anchor kext.
 
-  On the test machine, WindowServer then loads the Metal plugin with AMFI enforcing and the GPU reports Metal 4, and 3.0.20 ran signed that way. This is still experimental: one machine. Your keys never leave your Mac. [docs/SIGNED-GRAPHICS-EXPERIMENT.md](../SIGNED-GRAPHICS-EXPERIMENT.md) has the steps.
+  On the test machine, WindowServer then loads the Metal plugin with AMFI enforcing and the GPU reports Metal 4, and 3.0.20 ran signed that way. This is still experimental: one machine. Signing keys never leave the Mac they were made on. [docs/SIGNED-GRAPHICS-EXPERIMENT.md](../SIGNED-GRAPHICS-EXPERIMENT.md) has the steps.
 - **A first install no longer needs "Allow" in System Settings > Privacy & Security.** The installer writes the approval for its own kexts into macOS's kext policy database, so one restart is enough. Where SIP keeps that database read-only, macOS asks as before, and the installer's last message says which case happened. Not yet tried on a Mac.
 - **3.0.13: the installer warns about `alcid`/`alcverbs` on macOS 26**, where they leave the onboard sound without a driver.
 
