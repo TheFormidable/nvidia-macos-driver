@@ -1,5 +1,20 @@
 # Changelog
 
+## Not in a package yet
+
+### AIR to NIR, phase 1: compute kernels without SPIR-V
+
+- **NVK reads Metal AIR itself** (`nvk/air/nvk_air_to_nir.c`, added to NVK's build by `nvk/nvk-air-nir.patch`, last
+  in the 3.0 chain). It exports `nvmtl_air_to_nir_v1`: given a compute kernel's bitcode, it opens the LLVM library the
+  request names (the plugin's `air-runtime`; NVK still links no LLVM), and builds the kernel's NIR directly, for the
+  plugin to pass to `vkCreateComputePipelines` in `VkPipelineShaderStageNirCreateInfoMESA`. The result binds its
+  buffers and grid as the translator's kernels do (`nvk/air/nvmtl_air_nir_abi.h`). What it translates and what it
+  refuses, and the later phases, are in `docs/AIR-TO-NIR.md`. The design follows Stela's; none of its code is used.
+- Nothing calls it yet: the plugin translates every kernel to SPIR-V as before, so the driver behaves as 3.0.20.
+- `tools/air-nir/run.sh` (new): the frontend and NAK on Linux, on Mesa's nouveau drm-shim as an RTX 5050. Of the 62
+  kernels it takes (its two fixtures and the translator's), 48 compile to shader model 120 code and 14 are refused
+  with a reason (ray tracing, a function pointer, a select between a constant table and a buffer); none fails.
+
 ## 3.0.20
 
 **Release 2 of this fork** (pre-release; release 1 was 3.0.2). On top of 3.0.19. In NVAccel, while a program reads a
