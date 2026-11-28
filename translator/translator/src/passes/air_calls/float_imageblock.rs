@@ -632,6 +632,22 @@ pub(in crate::passes) fn lower_float_math(
         {
             return Ok(lower_metal_pow(ctx, res, rty, args[0], args[1]));
         }
+        if args.len() == 1
+            && matches!(glsl_op, GLSLstd450::Asin | GLSLstd450::Acos)
+            && (is_half_scalar_or_vector(ctx, rty) || is_f32_scalar_or_vector(ctx, rty))
+        {
+            return Ok(lower_metal_asin_acos(ctx, res, rty, args[0], glsl_op == GLSLstd450::Asin));
+        }
+        if glsl_op == GLSLstd450::Fma {
+            // Metal's fma rounds once (a fused multiply-add); GLSL.std.450's Fma may be split into a multiply and an
+            // add unless it is NoContraction, which a Vulkan driver then keeps fused (nir ffma_weak without contract)
+            ctx.module.annotations.push(Instruction::new(
+                Op::Decorate,
+                None,
+                None,
+                vec![Operand::IdRef(res), Operand::Decoration(spirv::Decoration::NoContraction)],
+            ));
+        }
         let ext = ctx.glsl();
         let mut ops = vec![
             Operand::IdRef(ext),
@@ -1931,4 +1947,69 @@ mod tests {
         assert_eq!(threshold.to_bits(), 0x4AC9_0FDB);
         assert_eq!(f32::from_bits(0x4AC9_0FDC), 6_588_398.0);
     }
+}
+
+/// asin(x) as atan2(x, sqrt(max(1 - x * x, 0))) and acos(x) as atan2(sqrt(max(1 - x * x, 0)), x), a half in 32 bits:
+/// GLSL.std.450's Asin and Acos are polynomial approximations ~1e-4 off near +-1, outside the few ulp Metal's tables
+/// give them, and the AIR-to-NIR frontend (nvk_air_to_nir.c) computes them this way, through the same Atan2
+fn lower_metal_asin_acos(ctx: &mut Ctx, res: Word, rty: Word, x: Word, asin: bool) -> Vec<Instruction> {
+    let fty = super::rawbyte_unary::float_equivalent(ctx, rty);
+    let lanes = match type_def_of(ctx, fty) {
+        Some(def) if def.class.opcode == Op::TypeVector => match def.operands.get(1) {
+            Some(Operand::LiteralBit32(n)) => *n,
+            _ => 1,
+        },
+        _ => 1,
+    };
+    let mut out = Vec::new();
+    let w = if fty != rty {
+        let w = ctx.module.fresh_id();
+        out.push(Instruction::new(Op::FConvert, Some(fty), Some(w), vec![Operand::IdRef(x)]));
+        w
+    } else {
+        x
+    };
+    let one = super::splat_or_scalar(ctx, fty, 1.0, lanes);
+    let zero = super::splat_or_scalar(ctx, fty, 0.0, lanes);
+    let ext = ctx.glsl();
+    let square = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::FMul, Some(fty), Some(square), vec![Operand::IdRef(w), Operand::IdRef(w)]));
+    let rest = ctx.module.fresh_id();
+    out.push(Instruction::new(Op::FSub, Some(fty), Some(rest), vec![Operand::IdRef(one), Operand::IdRef(square)]));
+    let floor = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::ExtInst,
+        Some(fty),
+        Some(floor),
+        vec![
+            Operand::IdRef(ext),
+            Operand::LiteralExtInstInteger(GLSLstd450::FMax as u32),
+            Operand::IdRef(rest),
+            Operand::IdRef(zero),
+        ],
+    ));
+    let root = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::ExtInst,
+        Some(fty),
+        Some(root),
+        vec![Operand::IdRef(ext), Operand::LiteralExtInstInteger(GLSLstd450::Sqrt as u32), Operand::IdRef(floor)],
+    ));
+    let (y, xx) = if asin { (w, root) } else { (root, w) };
+    let angle = if fty != rty { ctx.module.fresh_id() } else { res };
+    out.push(Instruction::new(
+        Op::ExtInst,
+        Some(fty),
+        Some(angle),
+        vec![
+            Operand::IdRef(ext),
+            Operand::LiteralExtInstInteger(GLSLstd450::Atan2 as u32),
+            Operand::IdRef(y),
+            Operand::IdRef(xx),
+        ],
+    ));
+    if fty != rty {
+        out.push(Instruction::new(Op::FConvert, Some(rty), Some(res), vec![Operand::IdRef(angle)]));
+    }
+    out
 }

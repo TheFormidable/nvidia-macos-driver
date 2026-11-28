@@ -1063,7 +1063,8 @@ pub unsafe extern "C" fn nvmtl_lower_buffer_addresses_ex(
     err: *mut c_char, err_len: usize,
 ) -> i32 {
     if data.is_null() || out.is_null() || out_len.is_null() { return -1; }
-    let r = buffer_addresses::lower(std::slice::from_raw_parts(data,len))
+    // flags: 1 the SAFE build (every promise clamped), 2 the table a Uniform block, 8 no buffer kept a descriptor
+    let r = buffer_addresses::lower_keeping(std::slice::from_raw_parts(data,len), flags & 8 == 0)
         .and_then(|v| if flags & 2 != 0 { table_ubo::convert(&v) } else { Ok(v) })
         .and_then(|v| align_guard::guard(&v, flags & 1 != 0));
     match r {

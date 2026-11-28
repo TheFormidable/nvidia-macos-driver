@@ -140,9 +140,15 @@ fn keep_stated_align(scalar: u32, stated: Option<&Operand>) -> u32 {
 }
 
 pub fn lower(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    lower_keeping(bytes, true)
+}
+/// lower, with keep false: no buffer keeps its descriptor (kept_roots), every one is read through its address. The
+/// host's align-guard SAFE build of a kernel without buffer robustness: a buffer bound at an offset a descriptor cannot
+/// hold (below the device's 16-byte storage-buffer alignment) is still read where it is bound.
+pub fn lower_keeping(bytes: &[u8], keep: bool) -> Result<Vec<u8>, String> {
     match crate::linearize::apply(bytes) {
-        Ok((lin, _why)) => lower_addresses(&lin),
-        Err(_) => lower_addresses(bytes),
+        Ok((lin, _why)) => lower_addresses(&lin, keep),
+        Err(_) => lower_addresses(bytes, keep),
     }
 }
 /// A table the translator declared at TABLE_BINDING that buffer addresses can be read from: a StorageBuffer variable
@@ -173,7 +179,7 @@ fn existing_table(defs: &HashMap<u32, Instruction>, m: &rspirv::dr::Module, tv: 
     }
 }
 
-fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn lower_addresses(bytes: &[u8], keep: bool) -> Result<Vec<u8>, String> {
     let mut m = rspirv::dr::load_bytes(bytes).map_err(|e| e.to_string())?;
     let defs: HashMap<_,_> = m.types_global_values.iter().filter_map(|i| i.result_id.map(|n|(n,i.clone()))).collect();
     let sb_types: HashMap<u32,u32> = defs.iter().filter_map(|(&n,i)| {
@@ -206,7 +212,7 @@ fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // bounds-checks with robustBufferAccess; fixed-size blocks still move to addresses.
     let mut value_types = HashMap::new();
     for i in m.all_inst_iter() { if let (Some(n),Some(t)) = (i.result_id,i.result_type) { value_types.insert(n,t); } }
-    let (kept, kept_derived) = kept_roots(&m, &defs, &sb_types, &roots, &value_types);
+    let (kept, kept_derived) = if keep { kept_roots(&m, &defs, &sb_types, &roots, &value_types) } else { Default::default() };
     let roots: Vec<(u32,u32,u32)> = roots.into_iter().filter(|r| !kept.contains(&r.0)).collect();
     if roots.is_empty() { return Ok(bytes.to_vec()); }
     for &(n,_,b) in &roots {

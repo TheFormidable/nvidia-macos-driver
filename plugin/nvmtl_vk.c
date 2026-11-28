@@ -6992,7 +6992,10 @@ static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
     if (!sp && (p->ag_src || p->air_nir)) {
         sp = calloc(1, sizeof *sp);
         // a kernel on the AIR-to-NIR road is translated again with no buffer access promising more than 4 bytes
-        if (sp && (p->air_nir ? nvmtl_air_nir_safe_build(p, sp) : nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 1, sp))) { free(sp); sp = NULL; }
+        // and a SPIR-V road kernel without buffer robustness lowers every buffer to its address too (flag 8): a buffer
+        // its lowering kept a descriptor cannot be bound at an offset below NVMTL_SSBO_ALIGN (the dummy would be read)
+        if (sp && (p->air_nir ? nvmtl_air_nir_safe_build(p, sp)
+                              : nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 1u | (g_compute_unchecked ? 8u : 0u), sp))) { free(sp); sp = NULL; }
         p->ag_safe = sp;
         nvlog("align guard: buffer %d bound at GPU address %#llx is not %u-aligned - %s", bad, (unsigned long long)at, p->ag_req,
               sp ? "this kernel now runs its SAFE module on such bindings (Apple runs a broken alignment promise exactly)" : "SAFE module FAILED - such dispatches are SKIPPED");

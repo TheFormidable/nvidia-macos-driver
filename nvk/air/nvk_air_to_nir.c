@@ -2835,7 +2835,13 @@ air_float_function(struct air_tr *t, const char *fn, nir_def **s, unsigned n, co
       }
       else if (IS("atan")) r = nir_atan(b, w);
       else {
-         nir_def *c = nir_fsqrt(b, nir_fmax(b, nir_fsub(b, nir_imm_float(b, 1.0), nir_fmul(b, w, w)), nir_imm_float(b, 0.0)));
+         /* the translator's lower_metal_asin_acos: its GLSL FMax keeps infinities (vtn_glsl450) */
+         nir_def *rest = nir_fsub(b, nir_imm_float(b, 1.0), nir_fmul(b, w, w));
+         const uint32_t save = b->fp_math_ctrl;
+         b->fp_math_ctrl |= nir_fp_preserve_inf;
+         nir_def *m = nir_fmax(b, rest, nir_imm_float(b, 0.0));
+         b->fp_math_ctrl = save;
+         nir_def *c = nir_fsqrt(b, m);
          r = IS("asin") ? nir_atan2(b, w, c) : nir_atan2(b, c, w);
       }
       return air_narrow(b, r, x->bit_size);
