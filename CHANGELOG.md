@@ -2,6 +2,40 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 9: argument buffers, bounds-checked buffers, pixel-coordinate samples, written texture arrays
+
+- **Fixed: Terminal's GPU fault on 3.0.25** (Xid 31, one channel rebuilt): the helper invocations of QuartzCore's
+  glyph blit read bytes before its buffer on the AIR-to-NIR road, where the SPIR-V road's helper invocations return at
+  the entry. The frontend now returns them the same way, for the same fragments.
+- **Argument buffers take the road** (NVK's AIR-to-NIR frontend, ABI version 7), in kernels, vertex and fragment
+  functions: textures, samplers and buffers read from them as the translator reads them (the bindless heap by the
+  resource ID's slot, the per-draw slots of the fields it binds, the same reflection); the plugin binds the per-draw
+  slots the frontend names. Fixed on both roads: an argument buffer's `texture_buffer` was bound as an image, and
+  element 1 of a written texture array in an argument buffer was lost.
+- **A buffer the translator keeps bounds-checked is read through its descriptor on the road too**: a vertex or fragment
+  function that indexes a buffer with a value read from memory is asked for again with the buffers the translator's
+  module keeps as descriptors, which the road then reads with the same bounds checks (a read past the end gives 0).
+  Before, 30 functions of the AIR cache (Apple's GL programs) read such a buffer unchecked on the road.
+- **Pixel-coordinate samples** follow the translator exactly: its fetch emulation for every linear sample but a 2D
+  clamp-to-edge one at level 0 (a fragment's implicit level, depth textures, gathers and offsets no longer use the
+  hardware filter on the road), every address mode and dimension, refusals where the translator refuses.
+- **Fixed: written texture arrays lost every element but the first** (SPIR-V road, since round 8): each known element
+  is its own binding now, and one chosen at run time is read through the storage heap; the road does the same.
+- **Fixed on the SPIR-V road**: `fma` is fused as Metal's is; `asin` and `acos` are computed through `atan2`, not
+  GLSL's ~1e-4 approximations; a sample offset known only at run time is converted signed; the align guard sees the
+  buffers the lowering keeps as descriptors, and a kernel's SAFE build reads every buffer through its address. The
+  five tests that failed on the SPIR-V road since round 4 pass.
+- MPS's batch copy kernels with an `array_ref` of textures take the road.
+- **Fixed: an argument buffer's sampler could read another sampler's state** (both roads): when the last sampler
+  object of a state was released, its VkSampler was destroyed under the bindless heap slot that still named it, and a
+  sampler of another state made later at the same handle was given that slot. The heap now keeps each sampler it
+  places.
+- Tests (`tools/air-nir`): `ab_kernel`, `ab_encoder`, `oob_kernel`, `tex_pixmodes`, `tex_pixwrap`, `tex_pixborder`,
+  `tex_warrays`, `tex_aref`, `ib_refuse` (compute); `r_argbuf`, `r_argbuf_data`, `r_rleblit_helpers`,
+  `r_qcblit_helpers`, `r_oob2`, `r_oob_nospace`, `r_bsearch`, `r_pixfrag`, `r_fcin_missing`, `r_argbuf_reuse` (render). The AIR-cache
+  sweep: 5,636 functions translate (5,559), every reflection equal to the translator's; WindowServer's functions on
+  disk: 177 of 211 (173).
+
 ### AIR to NIR, round 8: framebuffer fetch on the road, linked samplers, arrays of textures
 
 - **Framebuffer fetch takes the road** (NVK's AIR-to-NIR frontend, ABI version 6): a fragment function's `[[color(n)]]`
