@@ -578,7 +578,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SURF_IMPORT_CACHE_MAX_MB` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_TABLE_SHADOW` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_TABLE_SSBO` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_TESS_ORDER_FLIP` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_TESS_ORDER_FLIP` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLAirNir.m, plugin/nvmtl_vk.c |
 | `NVMTL_TEW` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_TEX_RECYCLE` | escape | on except in WindowServer (NVMTL_TEX_RECYCLE=0: every dead texture is destroyed and every new one created and allocated, as in 3.0.5) | 3.0.6 | 3.2 | A dead ordinary colour texture of up to 32 MB keeps its Vulkan image and memory for at most a second, up to 32 images and 128 MB, and the next texture of the same format, size, mips, layers and usage takes them instead of four round trips to the kernel; they are given back first when video memory runs short; never in WindowServer, and never an image that was re-backed, migrated or sparse. | plugin/nvmtl_vk.c |
 | `NVMTL_TG_RESHAPE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |

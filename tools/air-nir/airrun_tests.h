@@ -2688,7 +2688,7 @@ pxw_check(struct run *r)
 /* tex_tbarray (metal/tex_tbarray.metal, PLUGIN_ONLY, round 10): texture_buffer arrays indexed at run time; textures 0-2
  * read (r32f, 64 texels), 4-5 written; slot 0 the index per thread. The frontend must refuse it (MUST_REFUSE): the
  * translator keeps each such array one array binding, which the plugin's layout holds with one descriptor, and the SPIR-V
- * * road reads the elements wrongly (zeros: measured in round 10, before the test was marked so) */
+ * road reads the elements wrongly (zeros: measured in round 10, before the test was marked so) */
 static void
 tba_setup(struct run *r)
 {
