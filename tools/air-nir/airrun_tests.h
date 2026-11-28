@@ -2370,6 +2370,37 @@ tex_pixel_check(struct run *r)
    return true;
 }
 
+/* tex_aref (metal/tex_aref.metal rewritten to an array_ref, PLUGIN_ONLY): textures 1 to 4 rgba8 8x8 at [[texture(1)]];
+ * slot 1 the indices, 6 past the bound ones (texture 7: nothing bound, the dummy's zeros) */
+static const uint32_t taref_k[8] = { 0, 3, 1, 6, 2, 0, 3, 1 };
+static void
+taref_setup(struct run *r)
+{
+   for (unsigned k = 1; k <= 4; k++) {
+      tex_image(r, k, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+      fill_bytes(r, k);
+   }
+   slot(r, 0, 64 * 32);
+   memcpy(slot(r, 1, sizeof taref_k), taref_k, sizeof taref_k);
+}
+
+static bool
+taref_check(struct run *r)
+{
+   const float *out = S(r, 0);
+   for (uint32_t i = 0; i < 64; i++) {
+      const uint32_t x = i % 8, y = i / 8, e = taref_k[i & 7];
+      float want[8];
+      for (unsigned c = 0; c < 4; c++) {
+         want[c] = rgba8_at(r, 3, 0, x, y, 0, c);
+         want[4 + c] = e < 4 ? rgba8_at(r, 1 + e, 0, x, y, 0, c) : 0.0f;
+      }
+      if (!check_f4(r, "out", out + i * 8, want, 8, 1e-6f))
+         return false;
+   }
+   return true;
+}
+
 /* tex_warrays (metal/tex_warrays.metal, PLUGIN_ONLY): textures 0 and 1 r32f texture buffers of 64 (read), 2 and 3 r32f
  * written texture buffers, 4 to 6 rgba16f 8x8 written (the array at [[texture(4)]]); slot 0 k (5: past the end), slot 1
  * the output */
@@ -3046,6 +3077,7 @@ static const struct test tests[] = {
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },
+   { "tex_aref", NULL, "tex_aref", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, taref_setup, taref_check },
    { "tex_warrays", NULL, "tex_warrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, twa_setup, twa_check },
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },

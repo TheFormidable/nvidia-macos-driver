@@ -395,7 +395,10 @@ main(int argc, char **argv)
                                                     NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_COLOR_INPUTS |
                                                     NVMTL_AIR_NIR_TEXTURE_ARRAYS | NVMTL_AIR_NIR_HEAP |
                                                     NVMTL_AIR_NIR_ARGBUF | NVMTL_AIR_NIR_TYPED_DUMMIES |
-                                                    (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0),
+                                                    (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0) |
+                                                    /* a kernel as the plugin's compute pipelines are made by default,
+                                                     * without buffer robustness (AIRSWEEP_ROBUST_COMPUTE=1: with it) */
+                                                    (l == 0 && !getenv("AIRSWEEP_ROBUST_COMPUTE") ? NVMTL_AIR_NIR_UNCHECKED : 0),
                                                     llvm_path, data, size, name, { 64, 1, 1 } };
                if (fcs) {
                   req.fc_count = nfc;

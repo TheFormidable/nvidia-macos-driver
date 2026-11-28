@@ -62,6 +62,16 @@ xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/tex_pixwrap.ll" "$HERE/metal/
   xcrun -sdk macosx metal -c -o "$OUT/air/tex_pixwrap.air" "$OUT/air/tex_pixwrap.ll" &&
   xcrun -sdk macosx metallib -o "$OUT/air/tex_pixwrap.metallib" "$OUT/air/tex_pixwrap.air" ||
   { echo "plugin-run.sh: tex_pixwrap not made" >&2; exit 2; }
+# tex_aref: its texture array argument an array_ref, as MPS's kernels carry one: the type name, and no literal count
+# after its index (MPS's is a global a function constant sets, which the translator does not hold the type to); the
+# Metal compiler folds a constant global back into a literal, so the count operand is 1
+xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/tex_aref.ll" "$HERE/metal/tex_aref.metal" &&
+  sed -E -i '' -e 's/!"array<texture2d<float, sample>, 4>"/!"array_ref<texture2d<float, sample>>"/' \
+    -e 's/(!"air.texture", !"air.location_index", i32 1, )i32 4,/\1i32 1,/' "$OUT/air/tex_aref.ll" &&
+  grep -q '!"air.location_index", i32 1, i32 1, !"air.sample", !"air.arg_type_name", !"array_ref<texture2d<float, sample>>"' "$OUT/air/tex_aref.ll" &&
+  xcrun -sdk macosx metal -c -o "$OUT/air/tex_aref.air" "$OUT/air/tex_aref.ll" &&
+  xcrun -sdk macosx metallib -o "$OUT/air/tex_aref.metallib" "$OUT/air/tex_aref.air" ||
+  { echo "plugin-run.sh: tex_aref not made" >&2; exit 2; }
 # PLUGIN_RUN_EXTRA_AIR: a folder of more .metallib files for the tests that name them (r_qcblit: qc_blit.metallib, made
 # from QuartzCore's own functions, which are not in this tree)
 if [ -n "${PLUGIN_RUN_EXTRA_AIR:-}" ]; then cp "$PLUGIN_RUN_EXTRA_AIR"/*.metallib "$OUT/air/" || exit 2; fi

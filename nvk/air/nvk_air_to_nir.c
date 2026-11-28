@@ -3473,6 +3473,16 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
 static bool
 air_texarray_type(struct air_tr *t, const char *name, char **elem, unsigned *count)
 {
+   /* array_ref<texture...> (MPS): its length is a function constant's; the translator reaches the texture indices
+    * left from its base, 128 at most (meta::textures TEXTURE_HANDLE_ARRAY_DESCRIPTOR_COUNT) */
+   if (name && !strncmp(name, "array_ref<", 10) && (!strncmp(name + 10, "texture", 7) || !strncmp(name + 10, "depth", 5))) {
+      const char *end = strrchr(name, '>');
+      if (!end || end <= name + 10)
+         return false;
+      *elem = ralloc_strndup(t->mem, name + 10, end - (name + 10));
+      *count = 128;
+      return true;
+   }
    if (!name || strncmp(name, "array<", 6) || (strncmp(name + 6, "texture", 7) && strncmp(name + 6, "depth", 5)))
       return false;
    const char *end = strrchr(name, '>'), *comma = NULL;
@@ -3498,8 +3508,8 @@ air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const c
    x->arg.type_name = elem;
    x->arg.fc_node = NULL;
    x->param = i;
-   x->count = count;
    x->base = (unsigned)MIN2(a->location, 127);
+   x->count = MIN2(count, 128 - x->base);   /* the per-draw table's texture slots end at 128 (the translator's min) */
    const int present = air_fc_arg_present(t, a);
    if (present < 0)
       unsupported(t, "texture argument %u exists only under a function constant %s", i,
@@ -3507,9 +3517,10 @@ air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const c
    x->absent = present == 0;
    if (x->absent)
       return x;
-   if (a->location + count > 128)
-      unsupported(t, "texture argument %u, an array of %u from index %llu, has no texture indices below 128", i, count,
+   if (a->location >= 128)
+      unsupported(t, "texture argument %u, an array from index %llu, has no texture indices below 128", i,
                   (unsigned long long)a->location);
+   (void)count;   /* x->count: the elements below 128, as the translator reaches them (an index past them, the last) */
    if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
       unsupported(t, "texture argument %u, an array of textures, is not passed by its address", i);
    x->proto.index = x->base;
