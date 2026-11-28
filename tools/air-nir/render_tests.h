@@ -1934,6 +1934,7 @@ rtile_setup(struct rrun *r)
    td.tileFunction = kf;
    td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
    td.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+   td.colorAttachments[2].pixelFormat = MTLPixelFormatBGRA8Unorm;
    td.threadgroupSizeMatchesTileSize = YES;
    r->tile_ps = kf ? [dev newRenderPipelineStateWithTileDescriptor:td options:MTLPipelineOptionNone reflection:nil error:&e] : nil;
    [kf release];
@@ -1986,6 +1987,12 @@ rtile_check(struct rrun *r)
             return false;
          if (got != d)
             return snprintf(r->why, sizeof r->why, "attachment 1 pixel (%u,%u): %.7g, want %.7g (exact)", px, py, got, d), false;
+         /* BGRA8Unorm: B, G, R, A in memory; red 1 - px / 255 */
+         const uint8_t *e = (const uint8_t *)r->back[2].contents + ((size_t)py * RW + px) * 4;
+         const uint8_t we[4] = { 128, (uint8_t)py, (uint8_t)(255 - px), 255 };
+         if (memcmp(e, we, 4))
+            return snprintf(r->why, sizeof r->why, "attachment 2 pixel (%u,%u): BGRA %u %u %u %u, want %u %u %u %u", px, py, e[0],
+                            e[1], e[2], e[3], we[0], we[1], we[2], we[3]), false;
       }
    return true;
 }
@@ -2314,9 +2321,9 @@ static const struct rtest rtests[] = {
    { "r_dummy_rw", "r_dummy", "rd_vs", "rdr_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rdrw_setup,
      rdrw_check, "exact; an unbound kept buffer and an unbound texture_buffer read 0 after a kernel wrote through unbound ones",
      false, false, NULL, NULL, NULL, true },
-   { "r_tile", "r_tile", "rt_vs", "rt_fs", { F32, MTLPixelFormatR32Float }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL,
+   { "r_tile", "r_tile", "rt_vs", "rt_fs", { F32, MTLPixelFormatR32Float, MTLPixelFormatBGRA8Unorm }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL,
      rtile_setup, rtile_check, "exact; a tile function over 16x16 tiles after the draw (red times setTileBytes' 2, the second "
-     "attachment plus one), its compute kernel on the road", false, false, NULL, NULL, NULL, true, NULL, NULL,
+     "attachment plus one, a BGRA8Unorm third's red inverted), its compute kernel on the road", false, false, NULL, NULL, NULL, true, NULL, NULL,
      "NVMTL_TILE_SHADING" },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
