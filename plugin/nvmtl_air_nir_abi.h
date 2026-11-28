@@ -116,6 +116,9 @@
                                                  * (2D, also 1D and multisampled: 1; 2D array: 2; 3D: 3; cube: 4; cube
                                                  * array: 5; a texel buffer keeps 0), as every heap access of the
                                                  * translator's does (passes/resources/dummy_slots.rs) */
+#define NVMTL_AIR_NIR_NO_PIXEL_HW   (1u << 16)  /* the translator keeps the fetch emulation for every pixel-coordinate
+                                                 * sample (NVMTL_NO_PIXEL_HW_FILTER, which the plugin reads), so does
+                                                 * the frontend: no linear one goes through the hardware filter */
 #define NVMTL_AIR_NIR_DESCRIPTORS   (1u << 15)  /* descriptor_buffers names the [[buffer(n)]] arguments the translator's
                                                  * module keeps as storage-buffer descriptors after the plugin's address
                                                  * lowering (wrapper/src/buffer_addresses.rs kept_roots: a buffer of an

@@ -4350,7 +4350,7 @@ air_pixel_sample(struct air_tr *t, LLVMValueRef call, const char *name, const st
    if (!dim123)
       unsupported(t, "a pixel-coordinate sample of a %s", x->type_name ? x->type_name : "texture");
    /* the hardware filter (sample.rs pixel_linear_hw_coord), never for a depth texture (sample_depth.rs) */
-   const char *nohw = getenv("NVMTL_NO_PIXEL_HW_FILTER");
+   const bool nohw = (t->req->flags & NVMTL_AIR_NIR_NO_PIXEL_HW) != 0;   /* NVMTL_NO_PIXEL_HW_FILTER, the plugin's */
    const bool lod_zero = !lod || (nir_src_is_const(nir_src_for_ssa(lod)) && nir_src_as_float(nir_src_for_ssa(lod)) == 0.0);
    if (linear && !x->depth && !x->array && x->dim == GLSL_SAMPLER_DIM_2D && !nohw && air_pixel_mode(s, 0) == 1 &&
        air_pixel_mode(s, 1) == 1 && mip == 0 && !implicit && !bias && lod_zero && !offset && !dyn_offset) {
@@ -8366,9 +8366,6 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          air_run_passes(t, ctx, fold);
       t->out = air_translate(t, pdev, &rs);
       t->status = NVMTL_AIR_NIR_OK;
-      const char *print = getenv("NVMTL_AIR_NIR_PRINT");   /* a diagnostic: the shader of the function so named */
-      if (print && t->out && t->out->info.name && !strcmp(print, t->out->info.name))
-         nir_print_shader(t->out, stderr);
    } else if (t->nir) {
       ralloc_free(t->nir);
       t->nir = NULL;

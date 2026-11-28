@@ -469,7 +469,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_NO_ORDER_BARRIER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_PARFAST` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_NO_PASS_TRANSITION` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
-| `NVMTL_NO_PIXEL_HW_FILTER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h, translator/translator/src/passes/air_calls/images/sample.rs |
+| `NVMTL_NO_PIXEL_HW_FILTER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLAirNir.m, plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h and 1 more |
 | `NVMTL_NO_POOL_REUSE` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_PSO_SKIP` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_NO_PTR_PHI_LOAD` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h, translator/translator/src/native/mod.rs |

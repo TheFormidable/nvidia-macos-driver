@@ -281,7 +281,8 @@ static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
          | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | (render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0)
          | (g_air_nir_v6 ? NVMTL_AIR_NIR_TEXTURE_ARRAYS : 0) | (g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0)
          | (g_air_nir_v7 && nvmtl_vk_bindless_heap_bindings() == 5 ? NVMTL_AIR_NIR_ARGBUF : 0)
-         | (g_air_nir_v7 && nvmtl_typed_dummies_wanted() ? NVMTL_AIR_NIR_TYPED_DUMMIES : 0) | extra;
+         | (g_air_nir_v7 && nvmtl_typed_dummies_wanted() ? NVMTL_AIR_NIR_TYPED_DUMMIES : 0)
+         | (getenv("NVMTL_NO_PIXEL_HW_FILTER") ? NVMTL_AIR_NIR_NO_PIXEL_HW : 0) | extra;   // as the translator reads it
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's
