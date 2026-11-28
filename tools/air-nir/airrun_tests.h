@@ -2722,6 +2722,61 @@ tba_check(struct run *r)
    return true;
 }
 
+/* tex_null, tex_null_tb (metal/tex_null.metal, PLUGIN_ONLY, round 11): null textures as the translator lowers them,
+ * its placeholder image at the first texture binding its module leaves free. tex_null: texture 0 (rgba8 16x16, also
+ * the placeholder's binding) and texture 1 (r32f 8x4, bound and not the kernel's); tex_null_tb: a texture_buffer at 0
+ * (r32f, 256 texels), so the placeholder at texture 1 (rgba8 16x16 here), texture 2 (r32f 8x4) bound and not read: a
+ * placeholder anywhere else reads another size or other texels */
+static void
+tnull_setup(struct run *r)
+{
+   const bool tb = !strcmp(r->t->name, "tex_null_tb");
+   if (tb) {
+      float *b = tex_buffer(r, 0, VK_FORMAT_R32_SFLOAT, 4, 256, false);
+      for (unsigned q = 0; q < 256; q++)
+         b[q] = (float)q * 0.25f + 3.0f;
+      tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 1, false);
+      fill_bytes(r, 1);
+      tex_image(r, 2, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 8, 4, 1, 1, 1, false);
+      fill_bytes(r, 2);
+   } else {
+      tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 16, 16, 1, 1, 1, false);
+      fill_bytes(r, 0);
+      tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 8, 4, 1, 1, 1, false);
+      fill_bytes(r, 1);
+   }
+   slot(r, 0, 256 * 3 * 16);
+}
+
+static bool
+tnull_check(struct run *r)
+{
+   const bool tb = !strcmp(r->t->name, "tex_null_tb");
+   const unsigned p = tb ? 1 : 0;   /* the placeholder's texture index */
+   float *want = calloc(256 * 12, 4);
+   for (unsigned i = 0; i < 256; i++) {
+      const unsigned x = i % 16, y = i / 16;
+      float *o = want + i * 12;
+      o[0] = 1;
+      o[1] = tb ? 1 : 0;   /* tex_null_tb: is_null_texture of the 3D null; tex_null: of the argument t */
+      o[2] = 16;
+      o[3] = 16;
+      const uint8_t *a = tex_at(r, p, 0, x, y, 0);
+      for (unsigned c = 0; c < 4; c++)
+         o[4 + c] = U8(a[c]);
+      if (tb) {
+         o[8] = (float)i * 0.25f + 3.0f, o[9] = 0, o[10] = 0, o[11] = 1;
+      } else {
+         const uint8_t *a = tex_at(r, 0, 0, x, y, 0);
+         for (unsigned c = 0; c < 4; c++)
+            o[8 + c] = U8(a[c]);
+      }
+   }
+   const bool ok = check_f4(r, "out", S(r, 0), want, 256 * 12, 1e-6f);
+   free(want);
+   return ok;
+}
+
 /* tex_bicubic (metal/tex_bicubic.metal, PLUGIN_ONLY, round 10): bicubic samples as the translator emulates them
  * (images/sample.rs lower_pixel_bicubic_sample, catmull_rom_weights), the references step by step as it computes;
  * tex_pixmodes's textures and pixel coordinates, the normalized ones in slot 2 (each pixel one over its axis' size) */
@@ -3204,6 +3259,8 @@ static const struct test tests[] = {
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
    { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tba_setup, tba_check },
+   { "tex_null", NULL, "tex_null", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
+   { "tex_null_tb", "tex_null", "tex_null_tb", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
    { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },

@@ -149,6 +149,16 @@
                                                  * explicit level raised to it; without it, a clamp on a sample without
                                                  * gradients is not applied (the translator's without its bit 4). A
                                                  * gradient sample's clamp is always applied (MinLod). */
+/* Since version 9: */
+#define NVMTL_AIR_NIR_NULL_TEXTURES (1u << 19)  /* the translator reads every sampled texture argument through the
+                                                 * bindless heap (its bindless-all mode: NVMTL_NO_BINDLESS_ALL unset), so
+                                                 * a null texture (air.get_null_texture_*) is its placeholder image
+                                                 * (default_null_image_of): a float sampled image of the call's shape at
+                                                 * the first texture binding (32 + n) its module leaves free, after the
+                                                 * texture_buffer and texture-array arguments it declares there, one per
+                                                 * shape in the order the calls come; is_null_texture of it is true.
+                                                 * Reading it reads whatever is bound at texture n, as the translator's
+                                                 * does. Without it such a function is refused, as before. */
 
 /* request.descriptor_elem_bits[n]: elements of more than one scalar width, typed member by member (round 11) */
 #define NVMTL_AIR_NIR_ELEM_MIXED     1u
@@ -375,9 +385,10 @@ typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data,
  * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs; one older than version 7 ignores NVMTL_AIR_NIR_ARGBUF,
  * NVMTL_AIR_NIR_TYPED_DUMMIES and NVMTL_AIR_NIR_DESCRIPTORS, refuses argument buffers, and refuses a vertex or fragment
  * function that indexes a buffer with a value read from memory without saying so in descriptor_wanted; one older than
- * version 8 ignores NVMTL_AIR_NIR_TESS and refuses a post-tessellation vertex function. */
+ * version 8 ignores NVMTL_AIR_NIR_TESS and refuses a post-tessellation vertex function; one older than version 9
+ * ignores NVMTL_AIR_NIR_NULL_TEXTURES and refuses a null texture. */
 typedef int (*nvmtl_air_nir_version_v1_fn)(void);
-#define NVMTL_AIR_NIR_VERSION 8
+#define NVMTL_AIR_NIR_VERSION 9
 #ifdef __cplusplus
 }
 #endif

@@ -430,6 +430,13 @@ struct air_tr {
    uint32_t vertex_inputs, varyings, color_outputs, fragment_flags;
    uint32_t color_inputs;       /* [[color(n)]] inputs declared (since version 6, NVMTL_AIR_NIR_COLOR_INPUTS) */
    bool heap_textures;          /* an array<texture, N> element is read through the bindless heap (version 6) */
+   /* null textures (version 9, NVMTL_AIR_NIR_NULL_TEXTURES): the texture bindings the translator's module declares
+    * before it lowers them (texture_buffer and texture-array arguments: null_occ, by texture index), and its
+    * placeholders, one per shape in the order the calls come (default_null_image_of) */
+   uint32_t null_occ[4];
+   struct air_texture *nulls[8];
+   unsigned nnulls;
+   bool nulls_placed;
    /* argument buffers (version 7, NVMTL_AIR_NIR_ARGBUF) */
    struct util_dynarray ab_texs, ab_samps, ab_fields;   /* struct air_ab_tex, air_ab_samp, air_ab_field */
    bool ab_texcalls;            /* the module names an image intrinsic (meta::embedded::body_uses_texture_intrinsic) */
@@ -3807,6 +3814,7 @@ struct air_texture {
    unsigned index;               /* [[texture(n)]] */
    enum glsl_sampler_dim dim;
    bool array, storage, depth, absent;
+   bool null;                    /* the translator's placeholder of a null texture (version 9) */
    enum glsl_base_type base;     /* float, int or uint: what a read gives before narrowing */
    enum gl_access_qualifier access;
    nir_variable *var;
@@ -3916,6 +3924,10 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
    x->var = nir_variable_create(t->nir, x->storage ? nir_var_image : nir_var_uniform, type, a->type_name);
    x->var->data.descriptor_set = t->set;
    x->var->data.binding = (x->storage ? 480 : 32) + x->index;
+   /* a read texture_buffer is the one sampled texture argument the translator's module declares a binding for (the
+    * others it reads through the heap): a null texture's placeholder does not land on it */
+   if (!x->storage && x->dim == GLSL_SAMPLER_DIM_BUF)
+      air_mask_set(t->null_occ, x->index);
    if (x->storage) {
       x->var->data.access = x->access;
       x->var->data.image.format = PIPE_FORMAT_NONE;
@@ -3984,6 +3996,10 @@ air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const c
    const char *access = a->access ? a->access : "air.sample";
    x->proto.storage = !strcmp(access, "air.write") || !strcmp(access, "air.read_write");
    x->elems = rzalloc_array(t->mem, struct air_texture *, count);
+   /* the translator declares a read array as one array binding at 32 + n (stage_input), before it lowers a null
+    * texture: the placeholder does not land on its first index (the others it leaves free) */
+   if (!x->proto.storage)
+      air_mask_set(t->null_occ, x->base);
    return x;
 }
 
@@ -4933,6 +4949,96 @@ air_pixel_sample(struct air_tr *t, LLVMValueRef call, const char *name, const st
 }
 
 
+/* The shape a null texture's name gives, as the translator reads it (images/resolve.rs intrinsic_texture_shape): the
+ * token after the last "_texture_" or "_depth_", 2D when none matches; false for a texture_buffer */
+static bool
+air_null_shape(const char *name, enum glsl_sampler_dim *dim, bool *array)
+{
+   static const struct { const char *tok; enum glsl_sampler_dim dim; bool array; } shapes[] = {
+      { "cube_array", GLSL_SAMPLER_DIM_CUBE, true }, { "buffer_1d", GLSL_SAMPLER_DIM_BUF, false },
+      { "1d_array", GLSL_SAMPLER_DIM_1D, true }, { "2d_ms_array", GLSL_SAMPLER_DIM_2D, true },
+      { "2d_array", GLSL_SAMPLER_DIM_2D, true }, { "buffer", GLSL_SAMPLER_DIM_BUF, false },
+      { "cube", GLSL_SAMPLER_DIM_CUBE, false }, { "1d", GLSL_SAMPLER_DIM_1D, false },
+      { "2d", GLSL_SAMPLER_DIM_2D, false }, { "3d", GLSL_SAMPLER_DIM_3D, false },
+   };
+   *dim = GLSL_SAMPLER_DIM_2D;
+   *array = false;
+   const char *a = NULL;
+   for (const char *m = name; (m = strstr(m, "_texture_")); m++) a = m + 9;
+   for (const char *m = name; (m = strstr(m, "_depth_")); m++) if (!a || m + 7 > a) a = m + 7;
+   if (a) {
+      for (unsigned i = 0; i < ARRAY_SIZE(shapes); i++) {
+         const size_t n = strlen(shapes[i].tok);
+         if (!strncmp(a, shapes[i].tok, n) && (a[n] == 0 || a[n] == '.' || a[n] == '_')) {
+            *dim = shapes[i].dim;
+            *array = shapes[i].array;
+            break;
+         }
+      }
+   }
+   return *dim != GLSL_SAMPLER_DIM_BUF;
+}
+
+/* A null texture (version 9, NVMTL_AIR_NIR_NULL_TEXTURES): the translator's placeholder (lower_get_null_texture,
+ * default_null_image_of), a float sampled image of the call's shape at the first texture binding its module leaves
+ * free when it lowers the call (allocate_default_texture_binding): in its bindless-all mode the only texture bindings
+ * declared by then are its read texture_buffer arguments, the first binding of each read texture array (null_occ) and
+ * the placeholders of shapes before it, made in the order the calls come. Reading it reads whatever is bound at that
+ * texture index, as the translator's does. */
+static struct air_texture *
+air_null_texture(struct air_tr *t, const char *name)
+{
+   if (!(t->req->flags & NVMTL_AIR_NIR_NULL_TEXTURES))
+      unsupported(t, "a null texture (%s; the request does not say the translator places its placeholder as "
+                  "NVMTL_AIR_NIR_NULL_TEXTURES describes)", name);
+   if (util_dynarray_num_elements(&t->ab_texs, struct air_ab_tex))
+      unsupported(t, "a null texture in a function with argument buffers' textures (where the translator's placeholder "
+                  "lands among their bindings is not followed here)");
+   enum glsl_sampler_dim dim;
+   bool array;
+   if (!air_null_shape(name, &dim, &array))
+      unsupported(t, "a null texture_buffer (%s)", name);
+   if (!t->nulls_placed) {
+      /* every null texture call of the entry, in the order the translator lowers them: one placeholder per shape */
+      t->nulls_placed = true;
+      unsigned next = 0;
+      for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(t->function); bb; bb = L.LLVMGetNextBasicBlock(bb))
+         for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i)) {
+            if (L.LLVMGetInstructionOpcode(i) != OP_CALL)
+               continue;
+            const char *callee = air_name(L.LLVMGetCalledValue(i), NULL);
+            enum glsl_sampler_dim d;
+            bool ar;
+            if (!callee || !air_starts(callee, "air.get_null_texture") || !air_null_shape(callee, &d, &ar))
+               continue;
+            bool have = false;
+            for (unsigned k = 0; k < t->nnulls; k++)
+               have |= t->nulls[k]->dim == d && t->nulls[k]->array == ar;
+            if (have)
+               continue;
+            while (next < 128 && ((t->null_occ[next / 32] >> (next % 32)) & 1))
+               next++;
+            if (next >= 128 || t->nnulls >= ARRAY_SIZE(t->nulls))
+               unsupported(t, "a null texture with no free texture binding left (the translator's would fail too)");
+            struct air_texture *x = rzalloc(t->mem, struct air_texture);
+            x->index = next++;
+            x->dim = d;
+            x->array = ar;
+            x->base = GLSL_TYPE_FLOAT;
+            x->null = true;
+            x->type_name = "the null texture's placeholder";
+            x->var = nir_variable_create(t->nir, nir_var_uniform, glsl_texture_type(d, ar, GLSL_TYPE_FLOAT), "null_texture");
+            x->var->data.descriptor_set = t->set;
+            x->var->data.binding = 32 + x->index;
+            t->nulls[t->nnulls++] = x;
+         }
+   }
+   for (unsigned k = 0; k < t->nnulls; k++)
+      if (t->nulls[k]->dim == dim && t->nulls[k]->array == array)
+         return t->nulls[k];
+   unsupported(t, "a null texture (%s) that is not a call in the entry", name);
+}
+
 static bool
 air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned nargs, struct air_val **out)
 {
@@ -4958,22 +5064,25 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (air_starts(name, queries[i]) && (strstr(name, "_texture_") || strstr(name, "_depth_")))
          query = queries[i];
    }
+   if (air_starts(name, "air.get_null_texture")) {
+      *out = air_make(t, NULL, AIR_TEXTURE, 1);
+      (*out)->res = air_null_texture(t, name);
+      return true;
+   }
    if (air_starts(name, "air.is_null_texture") && ARG(0)) {
-      /* the translator reads is_null_texture of a handle, an argument's or one in memory, as false (a null handle
-       * reads the heap's dummy) */
+      /* the translator reads is_null_texture of its placeholder as true (null_image_values), of a handle, an
+       * argument's or one in memory, as false (a null handle reads the heap's dummy) */
       struct air_val *h = air_get(t, ARG(0));
+      if (h->kind == AIR_TEXTURE && h->res && ((struct air_texture *)h->res)->null) {
+         *out = air_make(t, nir_imm_true(b), AIR_VALUE, 0);
+         return true;
+      }
       if ((h->kind == AIR_TEXTURE && h->res && !((struct air_texture *)h->res)->absent) || air_is_handle(t, h)) {
          *out = air_make(t, nir_imm_false(b), AIR_VALUE, 0);
          return true;
       }
    }
    if (!read && !write && !sample && !depth_sample && !compare && !gather && !fence && !query) {
-      /* a null texture (round 10, kept refused; MPS's array_ref kernels, which link visible functions MPS supplies at
-       * pipeline creation): the translator loads a placeholder image it declares at the first texture binding its own
-       * module leaves free (lower_get_null_texture, default_null_image_of) and tracks the value (null_image_values);
-       * neither the binding rule nor the tracking is ported */
-      if (air_starts(name, "air.get_null_texture"))
-         unsupported(t, "a null texture (%s: the translator's placeholder binding is not reproduced)", name);
       if (air_starts(name, "air.gather_depth_") ||
           air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
           air_starts(name, "air.get_num_samples_") || air_starts(name, "air.is_null_texture") ||

@@ -391,13 +391,15 @@ main(int argc, char **argv)
                 * (SIGALRM): sweep.py records the file as a crash and goes on after it */
                alarm(60);
                /* as the plugin asks at newFunctionWithName: (NVMTLAirNir.m nvmtl_air_nir_flags, no varyings), with a
-                * version-8 NVK and the bindless heap with its typed dummies: [[color(n)]] inputs, arrays of textures
-                * (round 8), argument buffers (round 9), a vertex function's post-tessellation form (round 10) */
+                * version-9 NVK and the bindless heap with its typed dummies: [[color(n)]] inputs, arrays of textures
+                * (round 8), argument buffers (round 9), a vertex function's post-tessellation form (round 10), null
+                * textures (round 11) */
                struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_TG_DEFAULT |
                                                     NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_COLOR_INPUTS |
                                                     NVMTL_AIR_NIR_TEXTURE_ARRAYS | NVMTL_AIR_NIR_HEAP |
                                                     NVMTL_AIR_NIR_ARGBUF | NVMTL_AIR_NIR_TYPED_DUMMIES |
                                                     (l > 0 ? NVMTL_AIR_NIR_TESS : 0) | NVMTL_AIR_NIR_MIN_LOD |
+                                                    NVMTL_AIR_NIR_NULL_TEXTURES |
                                                     (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0) |
                                                     /* a kernel as the plugin's compute pipelines are made by default,
                                                      * without buffer robustness (AIRSWEEP_ROBUST_COMPUTE=1: with it) */
