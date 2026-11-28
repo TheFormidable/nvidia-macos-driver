@@ -1152,6 +1152,23 @@ air_ssbo_deref(struct air_tr *t, const struct air_val *ptr, nir_def *off, unsign
    return d;
 }
 
+/* The alignment a descriptor buffer's access is emitted with (round 11): the plugin binds such a buffer where Metal binds
+ * it, at a 4-byte offset (NVK's nvk_ssbo_align_4b), and the SPIR-V road's build without alignment promises (its align
+ * guard's, every render module that promises one) lowers each access there to its scalar's alignment
+ * (wrapper/src/align_guard.rs). So with NVMTL_AIR_NIR_ALIGN4 an access promises at most its components' size, and no less
+ * than 4 bytes: NVK checks such an access component by component once it is split below that (a 64-bit value read in
+ * two halves would read its low half where the module's reads 0). The largest is reported (result.global_align), for the
+ * plugin's align guard to cover these buffers too. */
+static uint32_t
+air_ssbo_align(struct air_tr *t, uint32_t align, unsigned comp_bits)
+{
+   const uint32_t scalar = MAX2(comp_bits / 8u, 4u);
+   if ((t->req->flags & NVMTL_AIR_NIR_ALIGN4) && align > scalar)
+      align = scalar;
+   t->global_align = MAX2(t->global_align, align);
+   return align;
+}
+
 /* the width of buffer n's elements in the translator's module (0: not known, or mixed) */
 static unsigned air_ssbo_elem_bits(const struct air_tr *t, unsigned n) { return t->desc_forms && n < 32 ? t->desc_bits[n] : 0; }
 
@@ -1166,6 +1183,7 @@ air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsign
    if (align < bits / 8)
       unsupported(t, "a %u-bit load from buffer %u (a bounds-checked storage-buffer descriptor on the SPIR-V road) "
                   "aligned to %u bytes", bits, ptr->desc - 1u, align);
+   align = air_ssbo_align(t, align, bits == 64 && eb == 32 ? 32 : bits);
    nir_builder *b = &t->b;
    const enum gl_access_qualifier acc = ptr->desc_ro ? ACCESS_NON_WRITEABLE : 0;
    if (bits == 64 && eb == 32) {
@@ -1196,6 +1214,7 @@ air_ssbo_store(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t a
                   "aligned to %u bytes", bits, n, align);
    if (ptr->desc_ro)
       unsupported(t, "a store to buffer %u, which its metadata says is read only", n);
+   align = air_ssbo_align(t, align, bits == 64 && eb == 32 ? 32 : bits);   /* as a load's (air_ssbo_load) */
    nir_builder *b = &t->b;
    if (bits == 64 && eb == 32) {
       nir_def *c[8];

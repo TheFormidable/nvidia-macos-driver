@@ -462,11 +462,14 @@ static int nvmtl_air_nir_shader_with(NVMTLFunction *f, NSDictionary *tgLen, uint
 // bounds-checked storage-buffer descriptors, and only its module says which. That module is made (nvmtl_function_spirv),
 // lowered as the SPIR-V road's pipeline lowers it (nvmtl_vk_descriptor_buffers), and the frontend asked again with the
 // buffers it keeps (NVMTL_AIR_NIR_DESCRIPTORS), which it then reads through those descriptors at the same bindings.
+// *kept8 (when given): the buffers it so reads whose elements in that module are 64-bit or of mixed widths, which the
+// pipeline binds only at offsets that are multiples of 8 (nvk_pipeline.kept8, as the SPIR-V road's pipeline of the module).
 static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t extra, const uint32_t local[3],
                                 NSDictionary *varyings, NSDictionary *stageKey, NSDictionary *samplers,
                                 struct nvmtl_air_nir_result *res, void **nir, NSString **why,
-                                NSString **path, NSString **memoKey, BOOL *hit)
+                                NSString **path, NSString **memoKey, BOOL *hit, uint32_t *kept8)
 {
+    if (kept8) *kept8 = 0;
     const uint32_t flags = nvmtl_air_nir_flags(extra, varyings != nil);
     int rc = nvmtl_air_nir_shader_with(f, tgLen, flags, local, varyings, stageKey, samplers, NULL, res, nir, why, path, memoKey, hit);
     if (rc == 0 || !g_air_nir_v7 || res->size < offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted ||
@@ -483,6 +486,8 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
     }
     rc = nvmtl_air_nir_shader_with(f, tgLen, flags | NVMTL_AIR_NIR_DESCRIPTORS, local, varyings, stageKey, samplers, &kept, res, nir,
                                    why, path, memoKey, hit);
+    extern uint32_t nvmtl_vk_kept8_of(const uint8_t bits[32], uint32_t mask);
+    if (rc == 0 && kept8) *kept8 = nvmtl_vk_kept8_of(kept.bits, kept.mask);
     static _Atomic unsigned said;
     if (rc == 0 && !*hit && atomic_fetch_add(&said, 1) < 64)
         nvlog("air-nir: %s indexes buffer(s) %#x with values read from memory; the translator's module keeps %#x as storage-buffer "
@@ -555,7 +560,8 @@ static NVMTLComputePipelineState *nvmtl_air_nir_make(NVMTLFunction *f, NSDiction
     uint32_t local[3];
     nvmtl_air_nir_local(f, local);
     struct nvmtl_air_nir_result res; void *nir = NULL; NSString *path = nil, *memoKey = nil; BOOL hit = NO;
-    if (nvmtl_air_nir_shader(f, tgLen, 0, local, nil, nil, samplers, &res, &nir, why, &path, &memoKey, &hit)) return nil;
+    uint32_t k8 = 0;
+    if (nvmtl_air_nir_shader(f, tgLen, 0, local, nil, nil, samplers, &res, &nir, why, &path, &memoKey, &hit, &k8)) return nil;
     if (res.stage != NVMTL_AIR_NIR_STAGE_KERNEL) { pnvk_air_nir_free(nir); *why = @"it is not a kernel"; return nil; }
     if (res.static_sampler_count) {
         uint32_t slots[32]; unsigned n = 0;
@@ -576,6 +582,7 @@ static NVMTLComputePipelineState *nvmtl_air_nir_make(NVMTLFunction *f, NSDiction
         *why = @(no.message);
         return nil;
     }
+    ps->_p.kept8[0] = k8;
     ps->_p.nir_owner = (void *)CFBridgingRetain(@[ f, tgLen ?: @{}, samplers ?: @{} ]);
     ps->_function = f; ps->_road = 1; ps->_nirTg = tgLen.count ? [tgLen copy] : nil; ps->_attrT = nvmtl_air_max_tg(f);
     if (ns) *ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0;
@@ -668,12 +675,12 @@ int nvmtl_air_nir_safe_build(const nvk_pipeline *base, nvk_pipeline *out)
     if (![o isKindOfClass:[NSArray class]] || o.count != 3) return -1;
     NVMTLFunction *f = o[0]; NSDictionary *tg = [o[1] count] ? o[1] : nil, *sw = [o[2] count] ? o[2] : nil;
     struct nvmtl_air_nir_result res; void *nir = NULL; NSString *path = nil, *memoKey = nil, *why = nil; BOOL hit = NO;
-    if (nvmtl_air_nir_shader(f, tg, NVMTL_AIR_NIR_ALIGN4, base->nir_local, nil, nil, sw, &res, &nir, &why, &path, &memoKey, &hit)) {
+    if (nvmtl_air_nir_shader(f, tg, NVMTL_AIR_NIR_ALIGN4, base->nir_local, nil, nil, sw, &res, &nir, &why, &path, &memoKey, &hit, NULL)) {
         nvmtl_air_nir_line("air-nir: kernel %s: no build without alignment promises: %s", f->_fname.UTF8String ?: "?", why.UTF8String ?: "?");
         return -1;
     }
     if (nvmtl_vk_compute_pipeline_create_nir(nir, &res, base->nir_local, out)) { pnvk_air_nir_free(nir); return -1; }
-    out->ag_mask = 0;
+    out->ag_mask = 0; out->kept8[0] = base->kept8[0];
     out->nir_owner = (void *)CFBridgingRetain(o);
     return 0;
 } }
@@ -845,12 +852,12 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
     if (!vv || !fv) return -1;
     const uint32_t one[3] = { 1, 1, 1 };
     struct nvmtl_air_nir_result vres, fres; void *vn = NULL, *fn = NULL; NSString *path = nil, *memoKey = nil; BOOL vhit = NO, fhit = NO;
-    NSString *stageWhy = nil;
+    NSString *stageWhy = nil; uint32_t vk8 = 0, fk8 = 0;
     if (nvmtl_air_nir_shader(vf, nil, NVMTL_AIR_NIR_ALIGN4, one, vv, vkey,
-                             vf->_samplerStates, &vres, &vn, &stageWhy, &path, &memoKey, &vhit)) {
+                             vf->_samplerStates, &vres, &vn, &stageWhy, &path, &memoKey, &vhit, &vk8)) {
         *why = [NSString stringWithFormat:@"vertex %@: %@", vf->_fname, stageWhy ?: @"?"]; return -1; }
     if (nvmtl_air_nir_shader(ff, nil, NVMTL_AIR_NIR_ALIGN4, one, fv, @{ @"stage": @"fragment" },
-                             ff->_samplerStates, &fres, &fn, &stageWhy, &path, &memoKey, &fhit)) {
+                             ff->_samplerStates, &fres, &fn, &stageWhy, &path, &memoKey, &fhit, &fk8)) {
         pnvk_air_nir_free(vn);
         *why = [NSString stringWithFormat:@"fragment %@: %@", ff->_fname, stageWhy ?: @"?"]; return -1; }
     int rc = -1;
@@ -875,6 +882,7 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
         if (!rc) nvmtl_air_nir_ws_arm();
         if (!rc && nvmtl_vk_pipeline_create_nir(vn, &vres, fn, &fres, rt, vin, samples, td, out)) {
             *why = @"NVK would not make a pipeline of the two stages' NIR"; rc = -1; }
+        if (!rc) { out->kept8[0] = vk8; out->kept8[1] = fk8; }
     }
     pnvk_air_nir_free(vn); pnvk_air_nir_free(fn);
     g_air_nir_hit = vhit && fhit;

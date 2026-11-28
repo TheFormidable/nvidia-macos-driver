@@ -164,6 +164,8 @@ static PFN_vkGetCalibratedTimestampsEXT pvkGetCalibratedTimestampsEXT;
 static nvmtl_gpu_clock g_gpu_clock;
 static char g_name[256];
 static VkPhysicalDeviceLimits g_lim;
+static uint32_t g_ssbo_align = 16;   /* the device's minStorageBufferOffsetAlignment (16, or 4 with NVK's nvk_ssbo_align_4b) */
+static int g_null_desc;              /* VK_EXT_robustness2 nullDescriptor enabled */
 static uint32_t g_sm_count;
 static _Atomic int g_state;
 /* device-loss bookkeeping (nvmtl_vk_note_loss) */
@@ -1277,6 +1279,13 @@ static int nvmtl_vk_initialize(void)
     }
     snprintf(g_name, sizeof g_name, "%s", pp.deviceName);
     g_lim = pp.limits;
+    {   /* NVK gives the plugin's instance (engine NVMTL) 4-byte storage-buffer offsets (nvk-air-nir.patch, drirc
+         * nvk_ssbo_align_4b): a buffer the translator keeps a storage-buffer descriptor is bound where Metal binds it.
+         * An older NVK says 16, and such a buffer at a 4-byte offset is not bound (as before). */
+        const VkDeviceSize a = g_lim.minStorageBufferOffsetAlignment;
+        g_ssbo_align = a == 4 || a == 8 || a == 16 ? (uint32_t)a : 16;
+        nvlog("vk: storage-buffer descriptors at %u-byte offsets (minStorageBufferOffsetAlignment %llu)", g_ssbo_align, (unsigned long long)a);
+    }
     { VkPhysicalDeviceShaderSMBuiltinsPropertiesNV sm = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV };
       VkPhysicalDeviceProperties2 p2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sm };
       pvkGetPhysicalDeviceProperties2(g_pdev, &p2); g_sm_count = sm.shaderSMCount;
@@ -1295,21 +1304,22 @@ static int nvmtl_vk_initialize(void)
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, g_qfam, 1, &prio };
 
-    static const char *kWant[17] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
+    static const char *kWant[18] = { "VK_EXT_extended_dynamic_state3", "VK_EXT_depth_clip_enable", "VK_EXT_memory_budget",
                                     "VK_KHR_acceleration_structure", "VK_KHR_ray_query", "VK_KHR_deferred_host_operations",
                                     "VK_EXT_external_memory_host",
                                     "VK_EXT_image_drm_format_modifier",
                                     "VK_KHR_external_memory_fd",
                                     "VK_EXT_mutable_descriptor_type", "VK_KHR_cooperative_matrix", "VK_EXT_calibrated_timestamps", "VK_EXT_sample_locations", "VK_KHR_pipeline_executable_properties",
-                                    "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness" };
-    const char *exts[20]; uint32_t next = 0; int have[17] = {0};   // 17 wanted + DLSS's three
+                                    "VK_EXT_provoking_vertex", "VK_KHR_vertex_attribute_divisor", "VK_EXT_pipeline_robustness",
+                                    "VK_EXT_robustness2" };
+    const char *exts[21]; uint32_t next = 0; int have[18] = {0};   // 18 wanted + DLSS's three
     uint32_t na = 0;
     if (pvkEnumerateDeviceExtensionProperties &&
         pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, NULL) == VK_SUCCESS && na) {
         VkExtensionProperties *props = calloc(na, sizeof *props);
         if (props && pvkEnumerateDeviceExtensionProperties(g_pdev, NULL, &na, props) == VK_SUCCESS)
             for (uint32_t i = 0; i < na; i++)
-                for (int w = 0; w < 17; w++)
+                for (int w = 0; w < 18; w++)
                     if (!have[w] && !strcmp(props[i].extensionName, kWant[w])) { have[w] = 1; exts[next++] = kWant[w]; }
         free(props);
     }
@@ -1378,6 +1388,22 @@ static int nvmtl_vk_initialize(void)
     if (g_mutable) { mdf = (VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &mdf; }
     static VkPhysicalDevicePipelineRobustnessFeaturesEXT prf;
     if (g_compute_unchecked) { prf = (VkPhysicalDevicePipelineRobustnessFeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES_EXT, v12.pNext, VK_TRUE }; v12.pNext = &prf; }
+    /* Null descriptors only (VK_EXT_robustness2's nullDescriptor; robustBufferAccess2 and robustImageAccess2 stay off): a
+     * storage buffer a bounds-checked pipeline declares and nothing usable is bound at (unbound, or at an offset no
+     * descriptor can hold) is a null descriptor, which reads 0 and drops its stores, instead of the plugin's dummy
+     * buffer, which every such binding shared: a draw that wrote through one changed what the next one read. */
+    static VkPhysicalDeviceRobustness2FeaturesEXT r2f;
+    if (have[17]) {
+        PFN_vkGetPhysicalDeviceFeatures2 gpf = (PFN_vkGetPhysicalDeviceFeatures2)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFeatures2");
+        VkPhysicalDeviceRobustness2FeaturesEXT q2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+        VkPhysicalDeviceFeatures2 qf2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &q2 };
+        if (gpf) gpf(g_pdev, &qf2);
+        g_null_desc = q2.nullDescriptor == VK_TRUE;
+        if (g_null_desc) { r2f = (VkPhysicalDeviceRobustness2FeaturesEXT){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT, v12.pNext, VK_FALSE, VK_FALSE, VK_TRUE }; v12.pNext = &r2f; }
+    }
+    nvlog("vk: null descriptors %s", g_null_desc ? "ON - an unusable storage-buffer binding of a bounds-checked pipeline reads 0 and drops its stores"
+                                                 : have[17] ? "OFF (nullDescriptor not supported) - such a binding is the write dummy"
+                                                            : "OFF (VK_EXT_robustness2 ABSENT) - such a binding is the write dummy");
     static VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pef;
     if (g_pstat) { pef = (VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR){ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, v12.pNext, VK_TRUE }; v12.pNext = &pef; }
     VkPhysicalDeviceDepthClipEnableFeaturesEXT clipf = {
@@ -3464,7 +3490,12 @@ int nvmtl_vk_image_create(uint32_t w, uint32_t h, nvk_image *out) { return nvmtl
 #define NVMTL_GL_UNIFORM_BINDING 641
 #define NVMTL_BINDING_NUMBER(i) ((i) == NVMTL_ADDRESS_BINDING ? NVMTL_ADDRESS_BINDING_NUMBER : \
                                  (i) >= NVMTL_STEX_BASE ? NVMTL_STEX_BINDING_NUMBER + ((i) - NVMTL_STEX_BASE) : (i))
-#define NVMTL_SSBO_ALIGN 16
+/* A buffer bound at off can be a storage-buffer descriptor there: off a multiple of the device's alignment (4 with
+ * NVK's nvk_ssbo_align_4b, else 16), and of 8 too for a buffer whose module reads 64-bit elements through it (kept8) */
+static inline int nvmtl_ssbo_offset_ok(size_t off, int kept8)
+{
+    return (off % g_ssbo_align) == 0 && (!kept8 || (off % 8) == 0);
+}
 #define NVMTL_NSTEX 128
 #define NVMTL_STEX_BASE (NVMTL_ADDRESS_BINDING + 1)
 #define NVMTL_STEX_BINDING_NUMBER 480
@@ -3632,6 +3663,7 @@ typedef struct { nvmtl_slot s[2][NVMTL_NBIND];
                  uint32_t lastdyn[2]; void *lasttab[2];
                  uint64_t lasttb[2][4];   /* the texel-buffer mask the last set was written with */
                  uint32_t lastgl[2]; VkBuffer lastubuf[2]; VkDeviceSize lasturange[2];
+                 uint32_t lastk8[2], lastsbn[2];   /* the last set's kept8 mask and null-descriptor choice (nvmtl_snapshot_set_c) */
                  /* samplers a shader brought itself, parked in sampler slots it leaves free, and what each displaced */
                  uint32_t park_mask[2]; uint8_t park_kind[2][NVMTL_NSAMP], park_saved_kind[2][NVMTL_NSAMP];
                  void *park_h[2][NVMTL_NSAMP], *park_saved[2][NVMTL_NSAMP];
@@ -3653,7 +3685,9 @@ static VkDescriptorPool      g_descPools[NVMTL_MAX_POOLS];
 static unsigned              g_ndescPools;
 static pthread_mutex_t       g_desc_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned              g_peak_sets, g_peak_fbs;
-static nvk_buffer            g_dummyBuf;
+static nvk_buffer            g_dummyBuf;    /* zeros: only read-only bindings hold it (a sampled texel buffer, the GL uniform buffer) */
+static nvk_buffer            g_sinkBuf;     /* the write dummy: storage buffers and written texel buffers with nothing bound */
+static void                 *g_sinkTexAlias, *g_sinkTexView;
 static nvk_image             g_dummyImg;
 #define NVMTL_BINDLESS_SLOTS      131072
 #define NVMTL_BINDLESS_QUARANTINE 1024
@@ -3987,6 +4021,7 @@ static int ensure_descriptors_locked(void)
     }
     if (nvmtl_desc_pool_open()) return -1;
     if (nvmtl_vk_buffer_create(256, 1, &g_dummyBuf)) return -1;
+    if (nvmtl_vk_buffer_create(256, 1, &g_sinkBuf)) return -1;
     if (nvmtl_vk_image_create_fmt(1, 1, 0, &g_dummyImg)) return -1;
     if (nvmtl_vk_image_create_ex2(1, 1, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 1, 1, &g_dummyStex) || !g_dummyStex.storage) {
         nvlog("vk: NO storage dummy image (RGBA8 storage refused) — a declared-but-unbound storage texture stays unwritten");
@@ -4015,6 +4050,10 @@ static int ensure_descriptors_locked(void)
     }
     if (g_mutable && nvmtl_vk_texel_view_create(&g_dummyBuf, 0, 256, VK_FORMAT_R8G8B8A8_UNORM, 1, &g_dummyTexAlias, &g_dummyTexView, NULL)) {
         nvlog("vk: par3 NO texel dummy — texture buffers are turned OFF for this process (the layout stays mutable)"); g_mutable = 0; }
+    // the written texel buffers' dummy is the write dummy's view (its own buffer): a draw writing through an unbound
+    // texture_buffer<access::write> no longer changes what an unbound one reads
+    if (g_mutable && nvmtl_vk_texel_view_create(&g_sinkBuf, 0, 256, VK_FORMAT_R8G8B8A8_UNORM, 1, &g_sinkTexAlias, &g_sinkTexView, NULL)) {
+        nvlog("vk: NO written texel dummy - unbound written texture buffers keep the texel dummy"); g_sinkTexView = g_dummyTexView; g_sinkTexAlias = NULL; }
     /* The sampler a shader gets at a slot nothing was bound to. A Metal constexpr sampler defaults to mip_filter::none,
      * so this one reads level 0 only: with maxLod unclamped it picked a mip level, and CoreAnimation's Dock badge digit (a
      * 108x108 texture with seven never-filled levels, drawn into 46 px) sampled an empty level and vanished (I-057, N-127). */
@@ -4096,8 +4135,10 @@ static int ensure_descriptors_locked(void)
                   VkBufferView *tf = g_dummyTexView ? (VkBufferView *)malloc(sizeof *tf * NVMTL_BINDLESS_SLOTS) : NULL;
                   if (tf) { for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) tf[k] = (VkBufferView)g_dummyTexView;
                             VkWriteDescriptorSet w3 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 3, 0, NVMTL_BINDLESS_SLOTS, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, tf };
+                            pvkUpdateDescriptorSets(g_dev, 1, &w3, 0, NULL);
+                            for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) tf[k] = (VkBufferView)g_sinkTexView;   /* written: the write dummy's */
                             VkWriteDescriptorSet w4 = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, hset, 4, 0, NVMTL_BINDLESS_SLOTS, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, tf };
-                            pvkUpdateDescriptorSets(g_dev, 1, &w3, 0, NULL); pvkUpdateDescriptorSets(g_dev, 1, &w4, 0, NULL); free(tf); }
+                            pvkUpdateDescriptorSets(g_dev, 1, &w4, 0, NULL); free(tf); }
                   nvlog("vk: BINDLESS heap prefilled - every slot holds the storage dummy at binding 2%s (NVMTL_HEAP_PREFILL=1)", tf ? " and the texel dummy at 3-4" : "; no texel dummy yet, 3-4 stay unwritten");
                   { const nvk_image *sd = g_dummyStexArray.view ? &g_dummyStexArray : &g_dummyStex;
                     nvlog("vk: the heap's storage dummy is image %p view %p: %ux%u, %u layer%s, vk format %u, metal type %u (%s)",
@@ -4105,7 +4146,7 @@ static int ensure_descriptors_locked(void)
                           sd == &g_dummyStexArray ? "a 2D array: the type the game's handle writes declare" : "2D only: the array dummy was not created"); }
                   pthread_mutex_lock(&g_sl_lock);
                   if (!nvmtl_sl_init(&g_sl, NVMTL_BINDLESS_SLOTS))
-                      for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, nvmtl_heap_storage_dummy(), 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_dummyTexView, 0); } }
+                      for (uint32_t k = 0; k < NVMTL_BINDLESS_SLOTS; k++) { nvmtl_sl_write(&g_sl, k, 2, nvmtl_heap_storage_dummy(), 0); if (tf) { nvmtl_sl_write(&g_sl, k, 3, g_dummyTexView, 0); nvmtl_sl_write(&g_sl, k, 4, g_sinkTexView, 0); } }
                   pthread_mutex_unlock(&g_sl_lock);
               } else if (hnb == 5) nvlog("vk: BINDLESS heap bindings 2-4 left unwritten for unfilled slots (%s)", prefill ? "no storage dummy" : "NVMTL_HEAP_PREFILL=0"); }
             if (nvmtl_typed_dummies_wanted() && hnb == 5) {
@@ -4355,14 +4396,14 @@ static void nvmtl_vk_bindless_drop_now(uint32_t slot)
     // image's memory - a page fault once that memory was freed (the first-scene fault with the five-binding heap on).
     if (g_heap_storage_binding) {
         VkDescriptorImageInfo si = { VK_NULL_HANDLE, (VkImageView)nvmtl_heap_storage_dummy(), VK_IMAGE_LAYOUT_GENERAL };
-        VkBufferView tv = (VkBufferView)g_dummyTexView;
+        VkBufferView tv = (VkBufferView)g_dummyTexView, sv = (VkBufferView)g_sinkTexView;
         VkWriteDescriptorSet w[3]; uint32_t n = 0;
         if (nvmtl_heap_storage_dummy()) w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 2, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &si, NULL, NULL };
         if (tv) { w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 3, slot, 1, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, NULL, NULL, &tv };
-                  w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv }; }
+                  w[n++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 4, slot, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &sv }; }
         if (n) { pvkUpdateDescriptorSets(g_dev, n, w, 0, NULL); nvmtl_heap_write_fence(); }
         if (nvmtl_heap_storage_dummy()) nvmtl_slots_write(slot, 2, nvmtl_heap_storage_dummy());
-        if (tv) { nvmtl_slots_write(slot, 3, tv); nvmtl_slots_write(slot, 4, tv); }
+        if (tv) { nvmtl_slots_write(slot, 3, tv); nvmtl_slots_write(slot, 4, sv); }
     }
     nvmtl_slots_drop(slot);
     if (g_bl_stor) atomic_store(&g_bl_stor[slot], NULL);   /* binding 2 is the dummy again (nvmtl_bl_storage) */
@@ -4764,7 +4805,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
     // address is identical for every empty slot; querying it per slot costs a
     // Vulkan call for each of the many unbound buffers in small WebGL draws.
     uint64_t addresses[2 * NVMTL_NBUF + NVMTL_NTEX];
-    const uint64_t dummy = nvmtl_vk_buffer_address(&g_dummyBuf);
+    const uint64_t dummy = nvmtl_vk_buffer_address(&g_sinkBuf);   /* an unbound buffer's address can be written: the write dummy */
     nvmtl_bindtable *t = c->table;
     for (unsigned i = 0; i < NVMTL_NBUF; ++i) {
         nvmtl_slot *s = t ? &t->s[which][i] : NULL;
@@ -4844,12 +4885,14 @@ static VkDescriptorSet nvmtl_snapshot_set_t(nvk_cmdbuf *c, uint32_t which, uint3
 }
 #define NVMTL_E78_HAS(m, i) (!(m) || (((m)[(i) >> 6] >> ((i) & 63)) & 1))
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
-                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform);
+                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform,
+                                             uint32_t kept8, int sb_null);
 static VkDescriptorSet nvmtl_snapshot_set_m(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb)
-{ return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL, NULL); }
+{ return nvmtl_snapshot_set_md(c, which, stex_hi, mask, tb, VK_NULL_HANDLE, NULL, NULL, 0, !g_compute_unchecked); }
 #define NVMTL_COPY_HAS(m, i) ((m) && (((m)[(i) >> 6] >> ((i) & 63)) & 1))
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t stex_hi, const uint64_t *mask, const uint64_t *tb,
-                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform)
+                                             VkDescriptorSet from, const uint64_t *copym, const VkDescriptorBufferInfo *uniform,
+                                             uint32_t kept8, int sb_null)
 {
     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE;
     VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
@@ -4935,7 +4978,11 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         if (nvmtl_table_ubo()) { dyn = (uint32_t)addressInfo.offset; tab = (void *)addressInfo.buffer; addressInfo.offset = 0; }
     }
     if (which < 2) { c->dyn_out[which] = dyn; c->tab_out[which] = tab; }
-    VkDescriptorBufferInfo dummyB = { (VkBuffer)g_dummyBuf.buf, 0, VK_WHOLE_SIZE };
+    /* A storage buffer the shader declares and nothing usable is bound at: a null descriptor where the pipeline checks
+     * buffer bounds (it reads 0 and drops its stores), else the write dummy, never the zero dummy the read-only bindings
+     * share (a draw that wrote through such a binding changed what later draws read there) */
+    VkDescriptorBufferInfo dummyB = sb_null && g_null_desc ? (VkDescriptorBufferInfo){ VK_NULL_HANDLE, 0, VK_WHOLE_SIZE }
+                                                           : (VkDescriptorBufferInfo){ (VkBuffer)g_sinkBuf.buf, 0, VK_WHOLE_SIZE };
     VkDescriptorImageInfo  dummyI = { VK_NULL_HANDLE, (VkImageView)g_dummyImg.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo  dummyS = { g_dummySampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
     nvmtl_bindtable *t = (nvmtl_bindtable *)c->table;
@@ -4947,10 +4994,18 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         const VkDescriptorBufferInfo *pb = NULL; const VkDescriptorImageInfo *pi = NULL;
         if (ty == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER || ty == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
             if (i == NVMTL_ADDRESS_BINDING) pb = &addressInfo;
-            else if (sl && sl->kind == NVMTL_SLOT_BUF && (sl->off % NVMTL_SSBO_ALIGN) == 0) {
+            else if (sl && sl->kind == NVMTL_SLOT_BUF && nvmtl_ssbo_offset_ok(sl->off, i < 32 && (kept8 >> i & 1))) {
+                // where Metal binds it: the device's storage-buffer offset alignment is 4 with NVK's nvk_ssbo_align_4b
                 bi[i] = (VkDescriptorBufferInfo){ (VkBuffer)sl->h, sl->off, VK_WHOLE_SIZE }; pb = &bi[i];
             } else {
-                if (sl && sl->kind == NVMTL_SLOT_BUF) { static int said; if (!said++) nvlog("vk: buffer slot %u is bound at offset %zu, not a multiple of %d — reachable only through the address table", i, sl->off, NVMTL_SSBO_ALIGN); }
+                if (sl && sl->kind == NVMTL_SLOT_BUF) {
+                    static _Atomic int said;
+                    if (said++ < 8) nvlog("vk: buffer %u is bound at offset %zu, not a multiple of %u%s - its storage-buffer descriptor "
+                                          "is %s on both roads (said up to 8 times)", i, sl->off,
+                                          (i < 32 && (kept8 >> i & 1)) ? (g_ssbo_align > 8 ? g_ssbo_align : 8u) : g_ssbo_align,
+                                          (i < 32 && (kept8 >> i & 1)) ? " (its module reads 64-bit elements there)" : "",
+                                          pb == NULL && sb_null && g_null_desc ? "null (reads 0, drops stores)" : "the write dummy");
+                }
                 pb = &dummyB;
             }
         } else if (ty == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
@@ -4985,7 +5040,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
         uint32_t i = NVMTL_STEX_BASE + j;
         const nvmtl_slot *sl = nvmtl_slot_checked(t ? &t->s[which][i] : NULL, which, i);
         if (tb && ((tb[2 + (j >> 6)] >> (j & 63)) & 1)) {
-            tv[i] = (VkBufferView)(sl && sl->kind == NVMTL_SLOT_TEXBUF && sl->h ? sl->h : g_dummyTexView);
+            tv[i] = (VkBufferView)(sl && sl->kind == NVMTL_SLOT_TEXBUF && sl->h ? sl->h : g_sinkTexView);   /* written: the write dummy's */
             w[nw++] = (VkWriteDescriptorSet){ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, NVMTL_BINDING_NUMBER(i), 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, NULL, NULL, &tv[i] };
             continue;
         }
@@ -5032,7 +5087,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     }
     if (!t || !nvmtl_enc78_on(NVMTL_E78_H3))
         return nvmtl_snapshot_set_md(c, which, p->stex_hi[which], p->gmask_ok ? p->gmask[which] : NULL,
-            p->tbany ? p->tbm[which] : NULL, VK_NULL_HANDLE, NULL, uniform);
+            p->tbany ? p->tbm[which] : NULL, VK_NULL_HANDLE, NULL, uniform, p->kept8[which], !p->sb_unchecked);
     const uint64_t all[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
     // The masks without the framebuffer-fetch set when they exist; otherwise the masks that count it, which are a
     // superset and so always safe. Falling straight to "all" would write every descriptor on every draw of a pipeline
@@ -5048,8 +5103,10 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
     static const uint64_t notb[4] = { 0, 0, 0, 0 };
     const uint64_t *tb = p->tbany ? p->tbm[which] : notb;
     const uint32_t glkey = p->gl_uniform_layout ? p->gl_uniform_slot[which] + 1u : 0;
+    // a buffer at an offset only some pipelines' modules may be bound at (kept8), and the null or write dummy elsewhere
+    const uint32_t k8 = p->kept8[which], sbn = !p->sb_unchecked;
     const int sametb = !memcmp(t->lasttb[which], tb, sizeof notb)
-        && t->lastgl[which] == glkey
+        && t->lastgl[which] == glkey && t->lastk8[which] == k8 && t->lastsbn[which] == sbn
         && (!uniform || (t->lastubuf[which] == uniform->buffer && t->lasturange[which] == uniform->range));
     int live = sametb && t->last[which] && !t->dirty[which] && t->last_idx[which] < c->nsets
                && (VkDescriptorSet)c->sets[t->last_idx[which]].set == t->last[which];
@@ -5102,8 +5159,9 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         }
         for (int k = 0; k < 4; k++) cm[k] &= ~t->chg[which][k];
     }
-    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, p->tbany ? tb : NULL, from, from ? cm : NULL, uniform);
+    VkDescriptorSet s = nvmtl_snapshot_set_md(c, which, hi, m, p->tbany ? tb : NULL, from, from ? cm : NULL, uniform, k8, (int)sbn);
     if (!s) return s;
+    t->lastk8[which] = k8; t->lastsbn[which] = sbn;
     t->last[which] = s; t->last_idx[which] = c->nsets - 1; t->last_hi[which] = hi; t->dirty[which] = 0;
     memcpy(t->lasttb[which], tb, sizeof notb);
     t->lastgl[which] = glkey;
@@ -5792,6 +5850,25 @@ static NSData *nvmtl_address_shader(const void *data, size_t len) {
         d = nvmtl_address_shader_g(data, len, 1, NULL);
     }
     return d;
+}
+// The kept buffers of a lowered module (nvmtl_air_nir_kept_buffers) whose runtime array's elements are not all 8, 16 or
+// 32 bits wide (nvmtl_air_nir_kept_forms: 64-bit, or widths mixed): an access there may promise 8 bytes, so such a buffer
+// is bound only at an offset that is a multiple of 8 (nvmtl_ssbo_offset_ok). 0 for a module this does not read.
+static uint32_t nvmtl_kept8_of(const void *spv, size_t n)
+{
+    uint32_t mask = 0, guarded = 0, k8 = 0; uint8_t bits[32];
+    if (!spv || n < 20 || nvmtl_air_nir_kept_buffers((const uint32_t *)spv, n / 4, &mask) || !mask ||
+        nvmtl_air_nir_kept_forms((const uint32_t *)spv, n / 4, bits, &guarded)) return 0;
+    for (uint32_t b = 0; b < 32; b++)
+        if ((mask >> b & 1) && bits[b] != 8 && bits[b] != 16 && bits[b] != 32) k8 |= 1u << b;
+    return k8;
+}
+uint32_t nvmtl_vk_kept8_of(const uint8_t bits[32], uint32_t mask)
+{
+    uint32_t k8 = 0;
+    for (uint32_t b = 0; b < 32; b++)
+        if ((mask >> b & 1) && bits[b] != 8 && bits[b] != 16 && bits[b] != 32) k8 |= 1u << b;
+    return k8;
 }
 // The buffers the SPIR-V road's pipeline of this module reads through storage-buffer descriptors: the module lowered as
 // that pipeline lowers it (nvmtl_address_shader for a render stage, nvmtl_address_shader_g for a kernel), its set-0
@@ -6546,6 +6623,7 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     vs = vdata.bytes; vn = vdata.length; fs = fdata.bytes; fn = fdata.length;
     if (nvmtl_vk_init()) return -1;
     memset(out, 0, sizeof *out);
+    out->kept8[0] = nvmtl_kept8_of(vs, vn); out->kept8[1] = nvmtl_kept8_of(fs, fn);
     out->gl_uniform_layout = (uint32_t)uniform_layout;
     NSData *tvsd = nil, *ttcd = nil;
     if (td) {
@@ -6793,6 +6871,7 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     if (!g_heapSet && nvmtl_spirv_uses_set(cs, n / 4, 2)) {
         nvlog("vk: compute pipeline REFUSED - the kernel indexes the bindless heap (set 2) and this device has none"); return -1; }
     memset(out, 0, sizeof *out);
+    out->kept8[0] = nvmtl_kept8_of(cs, n); out->sb_unchecked = (uint32_t)g_compute_unchecked;
     if (!(flags & 1) && ag[0]) {
         if (!(out->ag_src = malloc(ag_srcn))) { nvlog("align guard: out of memory keeping a module's source - pipeline REFUSED"); return -1; }
         memcpy(out->ag_src, ag_src, ag_srcn); out->ag_srcn = ag_srcn; out->ag_mask = ag[0]; out->ag_req = ag[1] >= 8 ? ag[1] : 8;
@@ -6864,6 +6943,7 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
     if (nvmtl_vk_init() || ensure_descriptors()) return -1;
     if (!nvmtl_air_nir_size_ok(local, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations)) return -1;
     memset(out, 0, sizeof *out);
+    out->sb_unchecked = (uint32_t)g_compute_unchecked;   /* kept8 is the caller's (NVMTLAirNir.m) */
     if (nvmtl_air_nir_masks(res, out->bmask, &out->stex_hi[0], out->tbm[0])) { nvlog("vk: AIR-to-NIR result names a texel buffer that is no texture - not used"); return -1; }
     memcpy(out->bmask2, out->bmask, sizeof out->bmask2);
     out->bmask_ok = out->bmask2_ok = 1;
@@ -6881,8 +6961,11 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
     VkResult r = nvmtl_opaque_CreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &cpi, NULL, &pipe);
     if (r != VK_SUCCESS || !pipe) { pvkDestroyPipelineLayout(g_dev, (VkPipelineLayout)layout, NULL); return -1; }
     out->layout = layout; out->pipe = pipe;
-    if (res->size >= NVMTL_AIR_NIR_RESULT_V2_SIZE + sizeof res->global_align && res->global_align > 4 && res->buffer_mask && nvmtl_align_guard_on()) {
-        out->ag_mask = res->buffer_mask; out->ag_req = res->global_align;
+    // the buffers read through their addresses and, since round 11, those read through storage-buffer descriptors at
+    // 4-byte offsets (nvk_ssbo_align_4b): an access to either promising more than 4 bytes needs the SAFE build there
+    const uint32_t dm = res->size >= offsetof(struct nvmtl_air_nir_result, descriptor_mask) + sizeof res->descriptor_mask ? res->descriptor_mask : 0;
+    if (res->size >= NVMTL_AIR_NIR_RESULT_V2_SIZE + sizeof res->global_align && res->global_align > 4 && (res->buffer_mask | dm) && nvmtl_align_guard_on()) {
+        out->ag_mask = res->buffer_mask | dm; out->ag_req = res->global_align;
         atomic_fetch_add(&g_ag_guarded, 1);
     }
     // last, after every step that can fail (as the SPIR-V road's creation does)
@@ -7086,7 +7169,7 @@ static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
         sp = calloc(1, sizeof *sp);
         // a kernel on the AIR-to-NIR road is translated again with no buffer access promising more than 4 bytes
         // and a SPIR-V road kernel without buffer robustness lowers every buffer to its address too (flag 8): a buffer
-        // its lowering kept a descriptor cannot be bound at an offset below NVMTL_SSBO_ALIGN (the dummy would be read)
+        // its lowering kept a descriptor cannot be bound at an offset nvmtl_ssbo_offset_ok refuses (null or the dummy)
         if (sp && (p->air_nir ? nvmtl_air_nir_safe_build(p, sp)
                               : nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 1u | (g_compute_unchecked ? 8u : 0u), sp))) { free(sp); sp = NULL; }
         p->ag_safe = sp;
@@ -7317,7 +7400,7 @@ static int nvmtl_fault_resolve(nvk_cmdbuf *c, uint64_t a, char *out, size_t cap)
 {
     int lk;
     if (!a) return snprintf(out, cap, "0");
-    if (a == nvmtl_vk_buffer_address(&g_dummyBuf)) return snprintf(out, cap, "-");
+    if (a == nvmtl_vk_buffer_address(&g_dummyBuf) || a == nvmtl_vk_buffer_address(&g_sinkBuf)) return snprintf(out, cap, "-");
     for (nvmtl_address_page *pg = c->address_pages; pg; pg = pg->next) {
         const uint64_t lo = nvmtl_vk_buffer_address(&pg->buffer);
         if (a >= lo && a < lo + (uint64_t)NVMTL_TABLES_PER_PAGE * NVMTL_TABLE_BYTES) return snprintf(out, cap, "0x%llx=P", (unsigned long long)a);
@@ -7635,7 +7718,7 @@ static void nvmtl_fault_slot_report(uint64_t ptr, FILE *f)
                              (unsigned long long)ptr, (unsigned long long)handle, handle & (1ull << 62) ? "SET" : "clear", handle & (1ull << 63) ? "set" : "clear", handle & (1ull << 61) ? "set" : "clear",
                              (uint32_t)handle, slot, handle & (1ull << 62) ? "" : " (NOT a heap token: a no-slot texture, sampler, pipeline or foreign value aliasing the slot)");
     nvmtl_fx_emit_both(f, line);
-    const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
+    const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_sinkTexView } };   // the heap's storage dummy (2D array when it exists)
     lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
     { const int lm = nvmtl_loss_mutex_lock(&g_mm_lock, "g_mm_lock"); nvmtl_sl_report(&g_sl, &g_im, &g_vw, slot, &d, owner, &g_mm, nvmtl_fx_emit_both, f); if (lm) pthread_mutex_unlock(&g_mm_lock); }
     const void *v2 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[2].view : NULL, *v0 = g_sl.s && slot < g_sl.n ? g_sl.s[slot].b[0].view : NULL;
@@ -7730,7 +7813,7 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
                           snprintf(hs, sizeof hs, "fault context: dispatch %u was encoded against heap set %p (GPU 0x%llx); the heap set now is %p: %s", c->fx.total - nd + j + 1, d->heap_set, (unsigned long long)sa, (void *)g_heapSet, d->heap_set == g_heapSet ? "SAME object" : "MISMATCH - another set");
                           nvmtl_fx_emit_both(f, hs); }
             for (unsigned i = 0; i < NVMTL_NBUF && o < (int)sizeof line - 120; i++) {
-                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
+                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf) || tbl[i] == nvmtl_vk_buffer_address(&g_sinkBuf)) continue;
                 char r[160]; nvmtl_fault_resolve(c, tbl[i], r, sizeof r);
                 o += snprintf(line + o, sizeof line - (size_t)o, " b%u=%s", i, r);
                 fprintf(f, "root dispatch %u b%u 0x%llx %s\n", c->fx.total - nd + j + 1, i, (unsigned long long)tbl[i], r);
@@ -7757,7 +7840,7 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
                 nvmtl_fx_writers(&g_fx, &c->fx, c->cb, c->fx_seq, d->ordinal, d->root[r].idx, d->root[r].lo, d->root[r].hi, nvmtl_fx_emit_both, f);
             // a root with no host view: its first 64 bytes as the newest copy into it left them in the copy's source
             for (unsigned i = 0; i < NVMTL_NBUF; i++) {
-                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf)) continue;
+                if (!tbl[i] || tbl[i] == nvmtl_vk_buffer_address(&g_dummyBuf) || tbl[i] == nvmtl_vk_buffer_address(&g_sinkBuf)) continue;
                 lk = nvmtl_loss_mutex_lock(&g_lv_lock, "g_lv_lock"); const nvmtl_lv_entry *e = nvmtl_lv_find(&g_lv, tbl[i]); const int hasmap = e && e->map; if (lk) pthread_mutex_unlock(&g_lv_lock);
                 if (hasmap) continue;
                 lk = nvmtl_loss_mutex_lock(&g_fx_lock, "g_fx_lock"); const nvmtl_fx_copy *cp = nvmtl_fx_copy_covering(&g_fx, tbl[i], tbl[i] + 64); const nvmtl_fx_copy cc = cp ? *cp : (nvmtl_fx_copy){0}; if (lk) pthread_mutex_unlock(&g_fx_lock);
@@ -7817,7 +7900,7 @@ static void nvmtl_fault_file_write(nvk_cmdbuf *c)
     if (lk) pthread_mutex_unlock(&g_keep_lock);
     nvmtl_loss_section(f, "address pages");
     {   // every heap slot's health, and every image this process made, with its lifetime
-        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_dummyTexView } };   // the heap's storage dummy (2D array when it exists)
+        const nvmtl_sl_dummies d = { { g_dummyImg.view, NULL, nvmtl_heap_storage_dummy(), g_dummyTexView, g_sinkTexView } };   // the heap's storage dummy (2D array when it exists)
         lk = nvmtl_loss_mutex_lock(&g_sl_lock, "g_sl_lock");
         nvmtl_sl_census(&g_sl, &g_im, &g_vw, &d, nvmtl_fx_emit_both, f);
         if (lk) pthread_mutex_unlock(&g_sl_lock);

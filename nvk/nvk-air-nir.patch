@@ -9,3 +9,22 @@
    'nvk_upload_queue.c',
    'nvk_upload_queue.h',
    'nvk_video_session.c',
+--- a/src/nouveau/vulkan/00-nvk-defaults.conf
++++ b/src/nouveau/vulkan/00-nvk-defaults.conf
+@@ -11,6 +11,16 @@
+             <option name="nvk_ssbo_align_4b" value="true" />
+         </engine>
+ 
++        <engine engine_name_match="^NVMTL$">
++            <!--
++               NullMoth's Metal plugin: Metal binds a device buffer at any offset its data type is aligned to,
++               and the buffers its translated functions keep bounds-checked storage-buffer descriptors are bound
++               where Metal binds them (4-byte offsets): the alignment its accesses promise is checked by the
++               plugin's align guard, not assumed from the base.
++               -->
++            <option name="nvk_ssbo_align_4b" value="true" />
++        </engine>
++
+         <application name="Artifact Classic" executable="dcg">
+             <option name="force_vk_vendor" value="-1" />
+         </application>

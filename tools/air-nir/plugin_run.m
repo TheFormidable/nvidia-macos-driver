@@ -865,6 +865,13 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
       [ce dispatchThreads:MTLSizeMake(t->tess->patches, 1, 1) threadsPerThreadgroup:MTLSizeMake(t->tess->patches, 1, 1)];
       [ce endEncoding];
    }
+   if (r->pre_cps) {
+      /* a kernel first, with nothing bound (r_dummy.metal rdw_k: it writes through the dummies) */
+      id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+      [ce setComputePipelineState:r->pre_cps];
+      [ce dispatchThreads:MTLSizeMake(r->pre_threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(r->pre_threads, 1, 1)];
+      [ce endEncoding];
+   }
    id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
    [re setRenderPipelineState:ps];
    if (ds)
@@ -1157,6 +1164,7 @@ run_render_test(const struct rtest *t)
    [r.tfac release];
    [r.tfac_in release];
    [r.tfac_cps release];
+   [r.pre_cps release];
    for (unsigned i = 0; i < RMAXTEX; i++) {
       [r.ftex[i] release];
       [r.tstage[i] release];

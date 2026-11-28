@@ -63,6 +63,10 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint64_t gmask[2][4]; uint32_t gmask_ok;
     uint64_t gmask2[2][4], bmask2[4]; uint32_t gmask2_ok, bmask2_ok;   /* the same with the framebuffer-fetch set (3) left out like the heap (NVMTL_DESC_MASK) */
     uint32_t ag_mask, ag_req; void *ag_src; size_t ag_srcn; void *ag_safe;
+    /* the buffers of each stage's set its module keeps storage-buffer descriptors of 64-bit or mixed-width elements:
+       bound only at an offset that is a multiple of 8 as well (a 64-bit access there promises 8 bytes) */
+    uint32_t kept8[2];
+    uint32_t sb_unchecked;   /* a compute pipeline made without buffer bounds checks: no null storage-buffer descriptor */
     uint64_t shape_identity;
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;

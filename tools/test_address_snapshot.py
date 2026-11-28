@@ -41,7 +41,7 @@ typedef struct {nvmtl_slot s[2][NVMTL_NBUF+NVMTL_NTEX];} nvmtl_bindtable;
 typedef struct {void *map;VkBuffer buf;uint64_t address;} nvk_buffer;
 typedef struct nvmtl_address_page {nvk_buffer buffer;struct nvmtl_address_page *next;int life;} nvmtl_address_page;
 typedef struct {unsigned icb_slot,icb_ntabs;uint64_t *icb_tabs[2];unsigned address_count;nvmtl_address_page *address_pages;nvmtl_bindtable *table;} nvk_cmdbuf;
-static nvk_buffer g_dummyBuf={.address=0x123000};
+static nvk_buffer g_sinkBuf={.address=0x123000};   /* the write dummy: an unbound buffer's address */
 static pthread_mutex_t g_pl_lock=PTHREAD_MUTEX_INITIALIZER;
 static int g_pl,queries,fail_alloc;
 static unsigned pages;

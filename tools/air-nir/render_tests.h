@@ -39,6 +39,8 @@ struct rrun {
    id<MTLBuffer> tfac;                            /* a tessellation pipeline's factors (setTessellationFactorBuffer:) */
    id<MTLComputePipelineState> tfac_cps;          /* ... written by this kernel first, one thread per patch, when set */
    id<MTLBuffer> tfac_in;                         /* its buffer(1) */
+   id<MTLComputePipelineState> pre_cps;           /* a kernel dispatched before each draw with nothing bound (round 11) */
+   unsigned pre_threads;
    float tcp[9 * 8];                              /* r_tess_tri's control points */
    char why[256];
 };
@@ -1832,39 +1834,88 @@ rk_check(struct rrun *r)
    return true;
 }
 
-/* ---- r_oob_misaligned (round 10): a kept descriptor bound at offset 4 --------------------------------------------- */
+/* ---- r_oob_misaligned (rounds 10, 11): a kept descriptor bound at offset 4 ---------------------------------------- */
+
+/* the write dummy's kernel (r_dummy.metal rdw_k), dispatched before each draw of the test with nothing bound: it writes
+ * through a device buffer's address and a written texture_buffer that are not there */
+static void
+rdummy_pre(struct rrun *r)
+{
+   NSError *e = nil;
+   id<MTLFunction> kf = [r->lib newFunctionWithName:@"rdw_k"];
+   r->pre_cps = kf ? [dev newComputePipelineStateWithFunction:kf error:&e] : nil;
+   [kf release];
+   r->pre_threads = 16;   /* 256 bytes through the buffer, 16 texels */
+   if (!r->pre_cps)
+      snprintf(r->pre, sizeof r->pre, "no pipeline of the kernel rdw_k: %s", e.localizedDescription.UTF8String ?: "?");
+}
 
 static void
 romis_setup(struct rrun *r)
 {
    rob_setup(r);
-   /* the palette from 4 bytes into its buffer, as setFragmentBuffer:offset:4 binds it: below the 16-byte storage-buffer
-    * alignment it cannot be a descriptor, and both roads bind the plugin's dummy buffer there */
+   /* the palette from 4 bytes into its buffer, as setFragmentBuffer:offset:4 binds it, and read there as Metal reads it:
+    * the device's storage-buffer offsets are 4-byte aligned (NVK's nvk_ssbo_align_4b for the plugin) */
    r->fbuf_off[0] = 4;
+   rdummy_pre(r);
 }
 
-/* the dummy is the plugin's 256-byte buffer: an entry inside it reads what the dummy holds (zeros, unless an earlier draw
- * wrote a dummy binding: the same on both roads, the attachments compared by final-runs.sh), one past it 0 */
+/* entry e from byte 4 + 16 e of the buffer: Metal's palette at offset 4. The descriptor's range is the buffer's last
+ * ROB_PAL * 16 - 4 bytes, and each 32-bit component is bounds-checked: the last entry's fourth component lies past it (0),
+ * as do the entries past the end and those whose 32-bit byte offset wraps past 4 GiB onto one past it (rob_entry) */
 static bool
 romis_check(struct rrun *r)
 {
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
    const uint32_t *idx = r->fbuf[3].contents;
-   const float *seen[16] = { NULL };
-   const float zero[4] = { 0, 0, 0, 0 };
+   const uint8_t *base = (const uint8_t *)r->fbuf[0].contents;
+   const size_t len = ROB_PAL * 16, off = 4;
    for (unsigned py = 0; py < RH; py++)
       for (unsigned px = 0; px < RW; px++) {
-         const uint32_t at = idx[py * RW + px] * 16u;   /* mod 2^32, as the descriptor access computes it */
-         if (at + 16u > 256u || at > 256u) {
-            if (!rwant(r, 0, px, py, zero, 4, 0))
-               return false;
-            continue;
+         const int e = rob_entry(idx[py * RW + px]);
+         float want[4] = { 0, 0, 0, 0 };
+         for (unsigned c = 0; e >= 0 && c < 4; c++) {
+            const size_t at = off + (size_t)e * 16 + c * 4;
+            if (at + 4 <= len)
+               memcpy(&want[c], base + at, 4);
          }
-         const unsigned e = at / 16u;
-         if (!seen[e])
-            seen[e] = rcol(r, 0, px, py);
-         else if (!rwant(r, 0, px, py, seen[e], 4, 0))
-            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (the dummy's entry %u read twice differently)", e), false;
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return false;
       }
+   return true;
+}
+
+/* ---- r_dummy_rw (round 11): bindings nothing is bound at, after a kernel wrote through such bindings --------------- */
+
+static void
+rdrw_setup(struct rrun *r)
+{
+   setup_quad(r);
+   uint32_t idx[RW * RH];
+   for (unsigned i = 0; i < RW * RH; i++)
+      idx[i] = i % 16;   /* within what rdw_k wrote */
+   r->fbuf[0] = rbuf(idx, sizeof idx);
+   rdummy_pre(r);
+}
+
+/* a device buffer the translator keeps a bounds-checked descriptor, and a texture_buffer, both unbound: 0 on both roads
+ * (a null descriptor; the zero dummy's texel view), whatever the kernel before the draw wrote through its unbound ones */
+static bool
+rdrw_check(struct rrun *r)
+{
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
+   const float zero[4] = { 0, 0, 0, 0 };
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++)
+         if (!rwant(r, 0, px, py, zero, 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (an unbound binding read what a write "
+                            "through another one left)"), false;
    return true;
 }
 
@@ -2052,9 +2103,12 @@ static const struct rtest rtests[] = {
    { "r_kept", "r_kept", "rk_vs", "rk_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rk_setup, rk_check,
      "exact; buffers the translator keeps descriptors: a ulong palette past its end and straddling it (0), a float and a "
      "ulong buffer written, past their ends (dropped, the straddling ulong whole)", false, false, NULL, NULL, NULL, true },
-   { "r_oob_misaligned", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, romis_setup,
-     romis_check, "exact; r_oob's palette bound at offset 4: no descriptor there, the dummy on both roads (its 256 bytes, then 0)", false,
-     false, NULL, NULL, NULL, true },
+   { "r_oob_misaligned", "r_dummy", "rd_vs", "rd_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, romis_setup,
+     romis_check, "exact; r_oob's palette bound at offset 4, read there as Metal reads it (each component bounds-checked), after a "
+     "kernel wrote through unbound bindings", false, false, NULL, NULL, NULL, true },
+   { "r_dummy_rw", "r_dummy", "rd_vs", "rdr_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rdrw_setup,
+     rdrw_check, "exact; an unbound kept buffer and an unbound texture_buffer read 0 after a kernel wrote through unbound ones",
+     false, false, NULL, NULL, NULL, true },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
      "value per level", false, false, NULL, NULL, NULL, true, NULL },
