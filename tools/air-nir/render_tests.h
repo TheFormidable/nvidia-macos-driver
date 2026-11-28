@@ -33,6 +33,7 @@ struct rrun {
    float pal[16][4];                              /* r_buffers' palette */
    uint32_t idx[1000];
    uint8_t abt[12][16 * 16 * 4];                  /* r_argbuf's textures */
+   char pre[192];                                 /* what a setup found wrong before the draw (r_argbuf_reuse) */
    char why[256];
 };
 
@@ -1389,6 +1390,63 @@ rab_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_argbuf_reuse: r_argbuf after samplers of other states held heap slots and were released ------------------- */
+
+/* Six samplers (linear, each with its own address mode: no state r_argbuf uses) each take a heap slot through its
+ * gpuResourceID and are released before the next is made, then r_argbuf's five are made. A heap slot names one sampler
+ * state for the process (nvmtl_vk_bindless_sampler_slot): two of these eleven samplers may share a slot only when
+ * their states are the same. Before round 9 the last release destroyed the VkSampler under its slot, and a sampler of
+ * another state made at the same handle was given that slot, its descriptor naming the destroyed one (r_argbuf's
+ * samplers read as nearest repeat, about one setup in ten when its resources are made again in one process). */
+static void
+rsr_setup(struct rrun *r)
+{
+   static const MTLSamplerAddressMode modes[6] = { MTLSamplerAddressModeRepeat, MTLSamplerAddressModeMirrorRepeat,
+      MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeMirrorClampToEdge, MTLSamplerAddressModeClampToZero,
+      MTLSamplerAddressModeClampToBorderColor };
+   static const char *const names[6] = { "linear repeat", "linear mirrored_repeat", "linear clamp_to_edge",
+                                         "linear mirrored_clamp_to_edge", "linear clamp_to_zero", "linear clamp_to_border (white)" };
+   static const char *const rnames[3] = { "nearest clamp_to_edge", "nearest repeat", "nearest mirrored_repeat" };
+   static const unsigned rstate[5] = { 0, 0, 1, 0, 2 };   /* rab_setup's samplers: modes[] there */
+   uint32_t slot[11];
+   unsigned state[11];
+   for (unsigned k = 0; k < 6; k++) {
+      MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+      sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+      sd.sAddressMode = sd.tAddressMode = modes[k];
+      sd.borderColor = MTLSamplerBorderColorOpaqueWhite;
+      sd.normalizedCoordinates = YES;
+      sd.supportArgumentBuffers = YES;
+      id<MTLSamplerState> s = [dev newSamplerStateWithDescriptor:sd];
+      [sd release];
+      slot[k] = (uint32_t)s.gpuResourceID._impl;
+      state[k] = 3 + k;
+      [s release];
+   }
+   rab_setup(r);
+   for (unsigned i = 0; i < 5; i++) {
+      slot[6 + i] = (uint32_t)r->fsamp[i].gpuResourceID._impl;
+      state[6 + i] = rstate[i];
+   }
+   for (unsigned a = 0; a < 11 && !r->pre[0]; a++)
+      for (unsigned b = a + 1; b < 11; b++)
+         if (slot[a] && slot[a] == slot[b] && state[a] != state[b]) {
+            snprintf(r->pre, sizeof r->pre, "heap slot %u given to a %s sampler and then to a %s one", slot[a],
+                     state[a] >= 3 ? names[state[a] - 3] : rnames[state[a]], state[b] >= 3 ? names[state[b] - 3] : rnames[state[b]]);
+            break;
+         }
+}
+
+static bool
+rsr_check(struct rrun *r)
+{
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
+   return rab_check(r);
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -1488,6 +1546,9 @@ static const struct rtest rtests[] = {
    { "r_argbuf_data", "r_argbuf_data", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rab_setup,
      rab_check, "4e-5; r_argbuf indexed by values read from buffers: an argument buffer the translator keeps a descriptor, "
      "the SPIR-V road's", true, false, NULL, NULL },
+   { "r_argbuf_reuse", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rsr_setup,
+     rsr_check, "4e-5; r_argbuf after six samplers of other states held heap slots and were released: no slot changes its "
+     "sampler state", false, false, NULL, NULL },
 };
 #undef F32
 #undef NOC

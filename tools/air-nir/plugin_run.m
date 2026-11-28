@@ -884,6 +884,22 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
    [re endEncoding];
 }
 
+/* the attachments and the depth target into the buffers the checks read */
+static void
+rreadback(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLTexture> *col, id<MTLTexture> depth)
+{
+   id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+   for (unsigned i = 0; i < RMAXCOL; i++)
+      if (col[i])
+         [be copyFromTexture:col[i] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
+                    toBuffer:r->back[i] destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * rbpp(t->col[i])
+     destinationBytesPerImage:(NSUInteger)RW * RH * rbpp(t->col[i])];
+   if (depth)
+      [be copyFromTexture:depth sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
+                 toBuffer:r->dback destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * 4 destinationBytesPerImage:(NSUInteger)RW * RH * 4];
+   [be endEncoding];
+}
+
 static enum outcome
 run_render_test(const struct rtest *t)
 { @autoreleasepool {
@@ -1009,17 +1025,9 @@ run_render_test(const struct rtest *t)
       [be endEncoding];
    }
    rencode(cb, t, &r, ps, ds, col, depth, 1);
-   id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-   for (unsigned i = 0; i < RMAXCOL; i++)
-      if (col[i])
-         [be copyFromTexture:col[i] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
-                    toBuffer:r.back[i] destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * rbpp(t->col[i])
-     destinationBytesPerImage:(NSUInteger)RW * RH * rbpp(t->col[i])];
-   if (depth)
-      [be copyFromTexture:depth sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(RW, RH, 1)
-                 toBuffer:r.dback destinationOffset:0 destinationBytesPerRow:(NSUInteger)RW * 4 destinationBytesPerImage:(NSUInteger)RW * RH * 4];
-   [be endEncoding];
-   bool ok = submit(cb, name, why, sizeof why);
+   rreadback(cb, t, &r, col, depth);
+   bool submitted = submit(cb, name, why, sizeof why);
+   bool ok = submitted;
    if (ok && corrupt) {
       for (unsigned i = 0; i < RMAXCOL; i++)
          if (r.back[i])
@@ -1032,6 +1040,36 @@ run_render_test(const struct rtest *t)
       if (!ok)
          snprintf(why, sizeof why, "%s", r.why);
    }
+   /* PLUGIN_RUN_REPEAT=<n>: the draw n times, each in its own command buffer into the same targets, every one read back
+    * and checked; the first that fails ends it (a check of a result that changes from run to run) */
+   const unsigned repeat = getenv("PLUGIN_RUN_REPEAT") ? (unsigned)strtoul(getenv("PLUGIN_RUN_REPEAT"), NULL, 10) : 1;
+   for (unsigned rep = 1; ok && !corrupt && rep < repeat; rep++) {
+      @autoreleasepool {
+         for (unsigned i = 0; i < RMAXCOL; i++)
+            if (r.back[i])
+               memset(r.back[i].contents, 0, (size_t)RW * RH * rbpp(t->col[i]));
+         id<MTLCommandBuffer> rcb = [queue commandBuffer];
+         rencode(rcb, t, &r, ps, ds, col, depth, 1);
+         rreadback(rcb, t, &r, col, depth);
+         submitted = submit(rcb, name, why, sizeof why);
+         ok = submitted && t->check(&r);
+         if (submitted && !ok)
+            snprintf(why, sizeof why, "draw %u of %u: %s", rep + 1, repeat, r.why);
+      }
+   }
+   /* a failed check, or every one with PLUGIN_RUN_DUMP=1: the attachments as read back, OUTDIR/<test>.att<i>.bin (RW x
+    * RH texels of the attachment's format), to compare with a run that passed */
+   if (submitted && (!ok || (getenv("PLUGIN_RUN_DUMP") && getenv("PLUGIN_RUN_DUMP")[0] == '1')))
+      for (unsigned i = 0; i < RMAXCOL; i++)
+         if (r.back[i]) {
+            char dp[1024];
+            snprintf(dp, sizeof dp, "%s/%s.att%u.bin", out_dir, name, i);
+            FILE *df = fopen(dp, "wb");
+            if (df) {
+               fwrite(r.back[i].contents, 1, (size_t)RW * RH * rbpp(t->col[i]), df);
+               fclose(df);
+            }
+         }
    if (ok && t->spirv_road && road == 1) {
       ok = false;
       snprintf(why, sizeof why, "took the AIR-to-NIR road, which must refuse it");
@@ -1206,19 +1244,27 @@ main(int argc, char **argv)
       for (int a = 5; a < argc; a++)
          want |= !strcmp(argv[a], "align_misaligned") || !strcmp(argv[a], "compute");
       if (want)
-         run_align_test() == PASS ? pass++ : fail++;
+         switch (run_align_test()) {
+         case PASS: pass++; break;
+         case FAIL: fail++; break;
+         case SKIPPED: skipped++; break;
+         }
    }
+   /* PLUGIN_RUN_TIMES=<n>: each render test n times over, from its setup (new resources, samplers and argument
+    * buffers each time) */
+   const unsigned times = getenv("PLUGIN_RUN_TIMES") ? (unsigned)strtoul(getenv("PLUGIN_RUN_TIMES"), NULL, 10) : 1;
    for (unsigned i = 0; i < sizeof rtests / sizeof *rtests; i++) {
       bool want = argc == 5;
       for (int a = 5; a < argc; a++)
          want |= !strcmp(argv[a], rtests[i].name) || !strcmp(argv[a], "render");
       if (!want)
          continue;
-      switch (run_render_test(&rtests[i])) {
-      case PASS: pass++; break;
-      case FAIL: fail++; break;
-      case SKIPPED: skipped++; break;
-      }
+      for (unsigned n = 0; n < (times ? times : 1); n++)
+         switch (run_render_test(&rtests[i])) {
+         case PASS: pass++; break;
+         case FAIL: fail++; break;
+         case SKIPPED: skipped++; break;
+         }
    }
    if (ws_phase >= 0)
       switch (run_ws_test(ws_phase)) {

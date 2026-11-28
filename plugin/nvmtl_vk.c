@@ -3784,6 +3784,20 @@ static VkResult nvmtl_sampler_acquire(const VkSamplerCreateInfo *info, VkSampler
     return VK_SUCCESS;
 }
 
+// One more reference on an interned sampler, for an owner that keeps its handle beyond the sampler object that
+// acquired it (the bindless sampler heap, nvmtl_vk_bindless_sampler_slot). 0 when the interner does not own the handle.
+static int nvmtl_sampler_retain(VkSampler handle)
+{
+    if (handle == VK_NULL_HANDLE) return 0;
+    pthread_mutex_lock(&g_sampler_intern_lock);
+    uint32_t i = g_sampler_handle_heads[nvmtl_sampler_handle_bucket(handle)];
+    while (i && g_sampler_entries[i].handle != handle) i = g_sampler_entries[i].handle_next;
+    const int ok = i && g_sampler_entries[i].refs != UINT64_MAX;
+    if (ok) ++g_sampler_entries[i].refs;
+    pthread_mutex_unlock(&g_sampler_intern_lock);
+    return ok;
+}
+
 static void nvmtl_sampler_release(VkSampler handle)
 {
     if (handle == VK_NULL_HANDLE) return;
@@ -4168,6 +4182,10 @@ static void nvmtl_heap_write_locked(uint32_t slot, void *view)
 // A heap slot for a sampler an argument buffer carries (Metal argument buffers hold samplers by gpuResourceID). Samplers
 // come from nvmtl_sampler_acquire's cache, so one VkSampler per distinct state: slots are kept for the process and shared
 // by every sampler object with that state. 0 = no slot (no heap, or 2047 distinct states already placed).
+// The heap holds its own reference on each sampler it places (nvmtl_sampler_retain): before round 9 the last sampler
+// object of a state destroyed the VkSampler under its slot, the slot kept naming it, and a new sampler that came back
+// at the same handle with another state was given that slot and read whatever the old sampler's descriptor had become
+// (r_argbuf's samplers taken as nearest repeat, about one setup in ten when its resources are made again in one process)
 static void *g_heap_samplers[NVMTL_BINDLESS_SAMPLER_SLOTS]; static uint32_t g_heap_sampler_n = 1;
 uint32_t nvmtl_vk_bindless_sampler_slot(void *vksampler)
 {
@@ -4175,11 +4193,11 @@ uint32_t nvmtl_vk_bindless_sampler_slot(void *vksampler)
     uint32_t slot = 0;
     pthread_mutex_lock(&g_heap_lock);
     for (uint32_t k = 1; k < g_heap_sampler_n; k++) if (g_heap_samplers[k] == vksampler) { slot = k; break; }
-    if (!slot && g_heap_sampler_n < NVMTL_BINDLESS_SAMPLER_SLOTS) {
+    if (!slot && g_heap_sampler_n < NVMTL_BINDLESS_SAMPLER_SLOTS && nvmtl_sampler_retain((VkSampler)vksampler)) {
         slot = g_heap_sampler_n++; g_heap_samplers[slot] = vksampler;
         VkDescriptorImageInfo ii = { (VkSampler)vksampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
         VkWriteDescriptorSet w = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, g_heapSet, 1, slot, 1, VK_DESCRIPTOR_TYPE_SAMPLER, &ii, NULL, NULL };
-        pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL);
+        pvkUpdateDescriptorSets(g_dev, 1, &w, 0, NULL); nvmtl_heap_write_fence();
     }
     pthread_mutex_unlock(&g_heap_lock);
     if (!slot) { static int said; if (!said++) nvlog("vk: BINDLESS sampler heap FULL (%d states) - an argument-buffer sampler reads the default", NVMTL_BINDLESS_SAMPLER_SLOTS - 1); }

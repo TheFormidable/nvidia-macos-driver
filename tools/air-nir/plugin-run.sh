@@ -14,7 +14,10 @@
 # NVMTL_AIR_NIR in the environment picks the road (unset: AIR to NIR first; 0: the SPIR-V road only);
 # PLUGIN_RUN_CORRUPT=1 checks the checks. PLUGIN_RUN_VULKAN_INCLUDE: the Vulkan headers (default: the Mesa tree next
 # to NVK.dylib). PLUGIN_RUN_INSTALLED: the installed bundle (default /Library/GPUBundles/NVMTLDriver.bundle). Exit as
-# plugin_run's (3: GPU work stopped).
+# plugin_run's (3: GPU work stopped). For a result that changes from run to run, on the render tests:
+# PLUGIN_RUN_TIMES=<n> runs each n times over from its setup (new resources and samplers each time),
+# PLUGIN_RUN_REPEAT=<n> draws it n times with the same resources, each read back and checked, and PLUGIN_RUN_DUMP=1
+# writes every attachment as read back to OUTDIR/<test>.att<i>.bin (a failed check always does).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../.." && pwd)
 PLUGIN=${1:?usage: plugin-run.sh NVMTLDriver NVK.dylib OUTDIR [TEST...]}; NVK=${2:?}; OUT=${3:?}; shift 3
