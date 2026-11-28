@@ -1194,6 +1194,8 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
 
 /* A load of an LLVM type: bools are bytes in memory, thread and threadgroup pointers 64-bit words; a structure or an
  * array element by element, at the offsets of LLVM's data layout. */
+static nir_variable *air_heap_var(struct air_tr *t, unsigned binding, enum glsl_sampler_dim dim, bool array,
+                                  enum glsl_base_type base, bool shadow);
 static struct air_val *air_texarray_load(struct air_tr *t, struct air_val *ptr);
 
 static struct air_val *
@@ -3546,13 +3548,19 @@ air_texarray_load(struct air_tr *t, struct air_val *ptr)
       v->res = x->elems[k];
       return v;
    }
-   if (x->proto.storage)
-      unsupported(t, "an element of a written array of textures chosen at run time (the translator's is a descriptor array "
-                  "the plugin's bindings do not hold)");
    if (x->proto.dim == GLSL_SAMPLER_DIM_BUF)
-      unsupported(t, "an element of an array of texture_buffers chosen at run time");
+      unsupported(t, "an element of an array of texture_buffers chosen at run time (the translator keeps such an array one "
+                  "array binding, which the plugin's bindings do not hold)");
    if (!(t->req->flags & NVMTL_AIR_NIR_HEAP))
       unsupported(t, "an element of an array of textures chosen at run time, without the bindless heap (NVMTL_AIR_NIR_HEAP)");
+   if (x->proto.storage && !(t->req->flags & NVMTL_AIR_NIR_ARGBUF))
+      unsupported(t, "an element of a written array of textures chosen at run time, without the heap's storage images "
+                  "(NVMTL_AIR_NIR_ARGBUF)");
+   if (x->proto.storage && !x->heap) {
+      /* a written element: the storage heap at the same slot, as the translator's split_storage_texture_arrays reads it */
+      x->heap = air_heap_var(t, NVMTL_AIR_NIR_HEAP_STORAGE, x->proto.dim, x->proto.array, x->proto.base, false);
+      x->heap->data.access = x->proto.access;
+   }
    if (!x->heap) {
       const struct glsl_type *et = glsl_texture_type(x->proto.dim, x->proto.array, x->proto.base);
       x->heap = nir_variable_create(t->nir, nir_var_uniform, glsl_array_type(et, 0, 0), "bindless_heap");
@@ -4519,7 +4527,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       nir_deref_instr *d = air_texture_deref(t, x);
       nir_image_deref_store(b, &d->def, air_pad4(b, c), nir_undef(b, 1, 32), v, nir_imm_int(b, 0),
                             .image_dim = x->dim, .image_array = x->array, .format = PIPE_FORMAT_NONE,
-                            .access = x->access, .src_type = air_tex_type(x));
+                            .access = x->access | (x->heap_slot ? ACCESS_NON_UNIFORM : 0), .src_type = air_tex_type(x));
       return true;
    }
 
@@ -4563,7 +4571,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
             unsupported(t, "a read of a level other than 0 of a storage texture");
          color = nir_image_deref_load(b, 4, 32, &d->def, air_pad4(b, c), nir_undef(b, 1, 32), nir_imm_int(b, 0),
                                       .image_dim = x->dim, .image_array = x->array, .format = PIPE_FORMAT_NONE,
-                                      .access = x->access, .dest_type = air_tex_type(x));
+                                      .access = x->access | (x->heap_slot ? ACCESS_NON_UNIFORM : 0),
+                                      .dest_type = air_tex_type(x));
       } else if (x->dim == GLSL_SAMPLER_DIM_MS) {
          /* read_texture_2d_ms[_array](texture, read sampler, coord, [layer,] sample, access): the sample where a
           * level would be, a texel fetch of that sample (the translator's OpImageFetch with Sample) */

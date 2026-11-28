@@ -400,6 +400,9 @@ struct Ctx {
     image_array_vars: HashMap<Word, (Word, (Dim, bool), ImageComp, bool)>,
     /// sampled texture-array entry parameters -> (Metal texture index of element 0, element count)
     image_array_base: HashMap<Word, (u32, u32)>,
+    /// a written texture array argument's variable, or a texture_buffer array's -> its first Metal texture index, its
+    /// element count and whether it is written (resources::split_storage_texture_arrays)
+    storage_image_arrays: HashMap<Word, (u32, u32, bool)>,
     sampler_array_vars: HashMap<Word, Vec<Word>>,
     bindless_heap_vars: HashMap<Word, Word>,
     address_table: Option<(Word, Word, Option<Word>)>,
@@ -493,6 +496,7 @@ impl Ctx {
             image_storage: HashSet::default(),
             image_array_vars: HashMap::default(),
             image_array_base: HashMap::default(),
+            storage_image_arrays: HashMap::default(),
             sampler_array_vars: HashMap::default(),
             bindless_heap_vars: HashMap::default(),
             address_table: None,
@@ -3106,6 +3110,7 @@ pub(crate) fn transform_with_options_and_sidecar(
 
     resources::sink_loop_header_texture_array_loads(&mut ctx, entry_idx);
     resources::route_texture_array_elements_through_heap(&mut ctx, entry_idx);
+    resources::split_storage_texture_arrays(&mut ctx, entry_idx);
     ctx.emit_sidecar.local_pointer_field_stores.clear();
     ctx.emit_sidecar.aggregate_pointer_values.clear();
     finalize(&mut ctx, entry_idx, &stage, frag, vert)?;

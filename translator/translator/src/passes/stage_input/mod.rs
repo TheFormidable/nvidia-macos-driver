@@ -789,6 +789,14 @@ pub(super) fn build_stage_input(
             )?;
             decorate_binding(&mut ctx.module, var, descriptor_layout.set, binding);
             ctx.interface_buffer_var(var);
+            if wtex_dims.contains_key(pid) || dim == Dim::DimBuffer {
+                // element k is texture base + k: a known one its own binding, a written image's chosen at run time
+                // through the storage heap (resources::split_storage_texture_arrays)
+                if let Some(base) = metal_texture_index.filter(|base| *base < 128) {
+                    ctx.storage_image_arrays
+                        .insert(var, (base, descriptor_count.min(128 - base), wtex_dims.contains_key(pid)));
+                }
+            }
             if !wtex_dims.contains_key(pid) && dim != Dim::DimBuffer {
                 // the per-draw table holds slots for texture indices 0..128; an array_ref's length is unknown
                 // (its count is that ceiling), so it reaches the indices left from its base

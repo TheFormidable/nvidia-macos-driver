@@ -4320,6 +4320,8 @@ static void nvmtl_slot_drop_reap(void)
     while (due) { nvmtl_pl_node *e = due; due = e->cool; nvmtl_slot_drop *d = (nvmtl_slot_drop *)((char *)e - offsetof(nvmtl_slot_drop, life)); nvmtl_vk_bindless_drop_now(d->slot); free(d); }
     if (n && (g_sd.reaped & 0xFFF) < n) nvlog("vk: heap slots dropped after their submits completed: %llu so far, %llu waiting", (unsigned long long)g_sd.reaped, (unsigned long long)g_sd.ncool);
 }
+/* per heap slot, the storage view nvmtl_bl_storage last wrote at binding 2 */
+static void *_Atomic *_Atomic g_bl_stor;
 static void nvmtl_vk_bindless_drop_now(uint32_t slot)
 {
     pthread_mutex_lock(&g_heap_lock);
@@ -4340,6 +4342,7 @@ static void nvmtl_vk_bindless_drop_now(uint32_t slot)
         if (tv) { nvmtl_slots_write(slot, 3, tv); nvmtl_slots_write(slot, 4, tv); }
     }
     nvmtl_slots_drop(slot);
+    if (g_bl_stor) atomic_store(&g_bl_stor[slot], NULL);   /* binding 2 is the dummy again (nvmtl_bl_storage) */
     g_heap_fifo[(g_heap_fifo_head + g_heap_fifo_n) % NVMTL_BINDLESS_SLOTS] = slot; g_heap_fifo_n++;
     if (g_heap_live) g_heap_live--;
     pthread_mutex_unlock(&g_heap_lock);
@@ -11500,11 +11503,35 @@ int nvmtl_vk_bind_texture_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void
     if (!r && !same && c->table && set < 2) { extern uint32_t nvmtl_bl_slot(void *); ((nvmtl_bindtable *)c->table)->s[set][NVMTL_NBUF + index].size = view ? nvmtl_bl_slot(view) : 0; }
     return r;
 }
+// The storage view of a texture bound at [[texture(n)]] also goes to binding 2 of the heap slot the per-draw table holds
+// for texture n (nvmtl_bl_slot gave that slot the sampled view, binding 0): an element of a written array of textures
+// chosen at run time is written through it (the translator's split_storage_texture_arrays, the frontend's written
+// arrays). Once per slot and view; a dropped slot's binding 2 goes back to the storage dummy (nvmtl_vk_bindless_drop_now).
+static void nvmtl_bl_storage(uint32_t slot, void *view)
+{
+    if (!slot || slot >= NVMTL_BINDLESS_SLOTS || !g_heap_storage_binding) return;
+    if (!g_bl_stor) {
+        void *_Atomic *fresh = (void *_Atomic *)calloc(NVMTL_BINDLESS_SLOTS, sizeof *fresh), *_Atomic *none = NULL;
+        /* the first binder publishes the record; another's is freed */
+        if (!fresh) return;
+        if (!atomic_compare_exchange_strong(&g_bl_stor, &none, fresh)) free(fresh);
+    }
+    if (atomic_load(&g_bl_stor[slot]) == view) return;
+    nvmtl_vk_bindless_put_storage(slot, view);
+    atomic_store(&g_bl_stor[slot], view);
+    { static int said; if (!said++) nvlog("vk: bindless-all - a bound storage texture's view at binding 2 of its table slot %u "
+                                          "(written texture arrays indexed at run time)", slot); }
+}
 int nvmtl_vk_bind_storage_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void *view)
 {
     if (index >= NVMTL_NSTEX) return -1;
     nvmtl_fx_bind_storage(&c->fx, index, view);
-    return nvmtl_bind_slot(c, set, NVMTL_STEX_BASE + index, view ? NVMTL_SLOT_TEX : NVMTL_SLOT_NONE, view, 0);
+    const int r = nvmtl_bind_slot(c, set, NVMTL_STEX_BASE + index, view ? NVMTL_SLOT_TEX : NVMTL_SLOT_NONE, view, 0);
+    if (!r && view && c->table && set < 2 && index < NVMTL_NTEX) {
+        const nvmtl_slot *tx = &((nvmtl_bindtable *)c->table)->s[set][NVMTL_NBUF + index];
+        if (tx->kind == NVMTL_SLOT_TEX && tx->size) nvmtl_bl_storage((uint32_t)tx->size, view);
+    }
+    return r;
 }
 
 int nvmtl_vk_have_polygon_mode(void) { return g_dyn3; }

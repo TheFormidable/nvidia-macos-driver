@@ -2370,6 +2370,55 @@ tex_pixel_check(struct run *r)
    return true;
 }
 
+/* tex_warrays (metal/tex_warrays.metal, PLUGIN_ONLY): textures 0 and 1 r32f texture buffers of 64 (read), 2 and 3 r32f
+ * written texture buffers, 4 to 6 rgba16f 8x8 written (the array at [[texture(4)]]); slot 0 k (5: past the end), slot 1
+ * the output */
+static void
+twa_setup(struct run *r)
+{
+   for (unsigned k = 0; k < 2; k++) {
+      float *tb = tex_buffer(r, k, VK_FORMAT_R32_SFLOAT, 4, 64, false);
+      for (unsigned q = 0; q < 64; q++)
+         tb[q] = rndf(-50, 50);
+   }
+   for (unsigned k = 2; k < 4; k++)
+      tex_buffer(r, k, VK_FORMAT_R32_SFLOAT, 4, 64, true);
+   for (unsigned k = 4; k < 7; k++)
+      tex_image(r, k, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 1, 1, true);
+   *(uint32_t *)slot(r, 0, 16) = 5;
+   slot(r, 1, 64 * 16);
+}
+
+static bool
+twa_check(struct run *r)
+{
+   const float *tb0 = r->tex[0].stage.map, *tb1 = r->tex[1].stage.map, *wtb1 = r->tex[3].stage.map, *out = S(r, 1);
+   for (unsigned i = 0; i < 64; i++) {
+      const float want[4] = { tb1[i] + tb0[i] * 2.0f, 0, 0, 3 };
+      if (!check_f4(r, "out", out + i * 4, want, 4, 1e-5f))
+         return false;
+      const float wb = (float)i + 0.25f;
+      if (!check_f4(r, "wtb[1]", wtb1 + i, &wb, 1, 0))
+         return false;
+   }
+   for (unsigned k = 4; k < 7; k++) {
+      for (unsigned i = 0; i < 64; i++) {
+         const unsigned e = (i & 3u) == 3u ? 5u : (i % 3u == 1u ? 0u : 2u), slot_ = e > 2 ? 2 : e;
+         float want[4] = { 0, 0, 0, 0 }, got[4];
+         if (k == 5) {
+            want[0] = (float)i, want[1] = 1, want[2] = 2, want[3] = 3;
+         } else if (k - 4 == slot_) {
+            want[0] = (float)i * 0.5f, want[1] = (float)e, want[2] = 0, want[3] = 1;
+         }
+         for (unsigned c = 0; c < 4; c++)
+            got[c] = h2f(((const uint16_t *)tex_at(r, k, 0, i % 8, i / 8, 0))[c]);
+         if (!check_f4(r, k == 4 ? "w[0]" : k == 5 ? "w[1]" : "w[2]", got, want, 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (texel %u)", i), false;
+      }
+   }
+   return true;
+}
+
 /* tex_pixmodes, tex_pixwrap (metal/tex_pixmodes.metal, metal/tex_pixwrap.metal, PLUGIN_ONLY): pixel-coordinate
  * samples as the translator lowers them, the references here step by step as its emulation computes (images/sample.rs
  * lower_pixel_linear_sample and clamp_pixel_coord_component_finite, fetch_coord.rs, gather.rs lower_pixel_gather_2d).
@@ -2997,6 +3046,7 @@ static const struct test tests[] = {
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },
+   { "tex_warrays", NULL, "tex_warrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, twa_setup, twa_check },
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
