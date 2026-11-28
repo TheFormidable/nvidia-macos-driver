@@ -2381,6 +2381,79 @@ tex_cubew_check(struct run *r)
    return check_u32(r, "sizes", S(r, 0), want, 3, 0);
 }
 
+/* pack565 (after 3.0.28): air.pack.unorm.rgb565 of float3 and of half3, as the translator packs it: NClamp(c, 0, 1)
+ * (NaN to 0) times 31, 63, 31, rounded to even, at bits 0, 5, 11; the operands mix the edges (NaN, +-inf, -0.5, 0, 1,
+ * 1.5) with values whose scaled form lies on or near a half */
+static void
+pack565_setup(struct run *r)
+{
+   float *in = slot(r, 0, 64 * 16);
+   static const float edge[] = { NAN, INFINITY, -INFINITY, -0.5f, 0.0f, 1.0f, 1.5f, -0.0f };
+   for (unsigned k = 0; k < 64 * 4; k++) {
+      const uint32_t c = rnd() % 4;
+      in[k] = c == 0 ? edge[rnd() % 8] : c == 1 ? ((float)(rnd() % 63) + 0.5f) / (k % 4 == 1 ? 63.0f : 31.0f) : rndf(-0.1f, 1.1f);
+   }
+   slot(r, 1, 64 * 4);
+}
+static uint32_t p565(const float *v)
+{
+   static const float max[3] = { 31.0f, 63.0f, 31.0f };
+   static const unsigned shift[3] = { 0, 5, 11 };
+   uint32_t acc = 0;
+   for (unsigned k = 0; k < 3; k++) {
+      const float c = fminf(fmaxf(v[k], 0.0f), 1.0f);   /* NClamp: fmaxf(NaN, 0) is 0 */
+      acc |= (uint32_t)nearbyintf(c * max[k]) << shift[k];
+   }
+   return acc & 0xffffu;
+}
+static bool
+pack565_check(struct run *r)
+{
+   const float *in = S(r, 0);
+   const uint16_t *out = S(r, 1);
+   for (unsigned i = 0; i < 64; i++) {
+      float h[3];
+      for (unsigned k = 0; k < 3; k++)
+         h[k] = h2f(f2h(in[i * 4 + k]));
+      const uint32_t want[2] = { p565(in + i * 4), p565(h) }, got[2] = { out[i * 2], out[i * 2 + 1] };
+      if (!check_u32(r, "pack565 float3, half3", got, want, 2, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u: %g %g %g)", i, in[i * 4],
+                         in[i * 4 + 1], in[i * 4 + 2]), false;
+   }
+   return true;
+}
+
+/* sample_bias_k (after 3.0.28): a kernel's sample with a bias, which the translator takes at level 0 (the bias
+ * dropped), and with min_lod_clamp(1) too, the level then raised to 1 (FMax), on a 4x4 R32Float texture of three levels
+ * whose texels all differ */
+static void
+sbias_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 4, 4, 1, 1, 3, false);
+   float *t = r->tex[0].stage.map;
+   for (unsigned k = 0; k < 16 + 4 + 1; k++)
+      t[k] = (float)(k + 1) * 0.125f;
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 16.0f);
+   float *b = slot(r, 0, 16 * 4);
+   for (unsigned i = 0; i < 16; i++)
+      b[i] = i % 4 == 0 ? 0.0f : rndf(0.5f, 3.0f);
+   slot(r, 1, 16 * 2 * 16);
+}
+static bool
+sbias_check(struct run *r)
+{
+   const float *got = S(r, 1);
+   for (unsigned i = 0; i < 16; i++) {
+      const unsigned x = i % 4, y = i / 4 % 4;
+      const float l0 = *(const float *)tex_at(r, 0, 0, x, y, 0), l1 = *(const float *)tex_at(r, 0, 1, x / 2, y / 2, 0);
+      if (got[i * 8] != l0)
+         return FAILF(r, "bias sample, thread %u = %g, expected level 0's %g", i, got[i * 8], l0);
+      if (got[i * 8 + 4] != l1)
+         return FAILF(r, "bias sample with min_lod_clamp(1), thread %u = %g, expected level 1's %g", i, got[i * 8 + 4], l1);
+   }
+   return true;
+}
+
 /* tex_fence */
 static void
 tex_fence_setup(struct run *r)
@@ -3493,6 +3566,9 @@ static const struct test tests[] = {
      tex_gdepth_check },
    { "tex_cube_write", NULL, "tex_cube_write", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, MUST_ROAD, NULL, tex_cubew_setup,
      tex_cubew_check },
+   { "pack565", "pack565_bias", "pack565", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, pack565_setup, pack565_check },
+   { "sample_bias_k", "pack565_bias", "sample_bias_k", { 16, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, sbias_setup,
+     sbias_check },
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },

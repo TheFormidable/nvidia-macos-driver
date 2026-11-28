@@ -3512,7 +3512,7 @@ air_integer_function(struct air_tr *t, const char *fn, bool is_signed, nir_def *
 /* air.pack.<format>.<type> and air.unpack.<format>.<type>: the GLSL.std.450 family the translator lowers them to
  * (dispatch_texture.rs packed_format): unorm4x8, snorm4x8, unorm2x16, snorm2x16, half2x16, NIR's ops for what
  * spirv_to_nir makes of those; a half vector is packed from float and unpacked to float, then narrowed. The other
- * formats (srgb, rgb10a2, rg11b10f, rgb9e5, rgb565) stay refused. */
+ * formats (srgb, rgb10a2, rg11b10f, rgb9e5, rgb565 but its pack) stay refused. */
 static nir_def *
 air_pack(struct air_tr *t, const char *name, nir_def *x, const struct air_type *rt)
 {
@@ -3526,6 +3526,27 @@ air_pack(struct air_tr *t, const char *name, nir_def *x, const struct air_type *
    };
    const bool pack = air_starts(name, "air.pack.");
    const char *f = name + (pack ? strlen("air.pack.") : strlen("air.unpack."));
+   /* air.pack.unorm.rgb565.v3f32/v3f16 (after 3.0.28), as the translator packs it (dispatch_texture.rs
+    * lower_pack_rgb565): the vector widened to float, each component NClamp(c, 0, 1) times 31, 63, 31, RoundEven, to
+    * uint, at bits 0, 5, 11, ORed, the 16-bit result. Its unpack the translator has not, and stays refused */
+   if (pack && air_starts(f, "unorm.rgb565.")) {
+      if (x->num_components != 3 || (x->bit_size != 32 && x->bit_size != 16) || rt->is_float || rt->bits != 16 ||
+          rt->components != 1)
+         unsupported(t, "the AIR function %s of this type", name);
+      nir_def *v = x->bit_size == 32 ? x : nir_f2f32(b, x), *acc = NULL;
+      static const struct { float max; unsigned shift; } fields[3] = { { 31.0f, 0 }, { 63.0f, 5 }, { 31.0f, 11 } };
+      for (unsigned k = 0; k < 3; k++) {
+         const uint32_t save = b->fp_math_ctrl;
+         b->fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;   /* as spirv_to_nir makes NClamp */
+         nir_def *c = nir_fclamp(b, nir_channel(b, v, k), nir_imm_float(b, 0.0f), nir_imm_float(b, 1.0f));
+         b->fp_math_ctrl = save;
+         nir_def *u = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, c, fields[k].max)));
+         if (fields[k].shift)
+            u = nir_ishl_imm(b, u, fields[k].shift);
+         acc = acc ? nir_ior(b, acc, u) : u;
+      }
+      return nir_u2u16(b, acc);
+   }
    for (unsigned i = 0; i < ARRAY_SIZE(formats); i++) {
       if (!air_starts(f, formats[i].format))
          continue;
@@ -5429,8 +5450,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
                bias = bias->bit_size == 32 ? bias : nir_f2f32(b, bias);
             }
          } else {
-            if (!level && !air_is_zero(v))
-               unsupported(t, "a sample with a bias outside a fragment function (no derivatives there)");
+            /* a bias outside a fragment function (no derivatives there): level 0, the bias dropped, as the translator
+             * samples it (sample_depth.rs push_image_sample_min_lod, push_image_sample_dref; after 3.0.28) */
             lod = air_def(t, v);
             lod = !level ? nir_imm_float(b, 0) : lod->bit_size == 32 ? lod : nir_f2f32(b, lod);
          }
