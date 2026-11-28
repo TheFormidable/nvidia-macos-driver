@@ -601,6 +601,9 @@ rq_check(struct rrun *r)
 
 /* the constants: fci_col true, fci_junk false (its attribute and its varying do not exist) */
 static const struct fcset fc_fcin = { 2, { { 0, 1, { 1 } }, { 1, 1, { 0 } } } };
+/* r_fcin_missing: fci_col not given at all. The translator reads a constant left out as 0 (the input and the output it
+ * guards do not exist); the frontend cannot know that the pipeline means 0 and must refuse (SPIR-V road only) */
+static const struct fcset fc_fcin_missing = { 1, { { 1, 1, { 0 } } } };
 
 static void
 rfi_vdesc(MTLVertexDescriptor *vd)
@@ -625,6 +628,18 @@ rfi_setup(struct rrun *r)
       memcpy(v[i], row, sizeof row);
    }
    r->vbuf[2] = rbuf(v, sizeof v);
+}
+
+static bool
+rfi_missing_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float want[4] = { px_u(px), px_v(py), 0, 0 };
+         if (!rwant(r, 0, px, py, want, 4, 1e-4f))
+            return false;
+      }
+   return true;
 }
 
 static bool
@@ -1414,6 +1429,9 @@ static const struct rtest rtests[] = {
      NULL, setup_quad, rfo_check, "1e-4; attachment 0 keeps its clear colour", false, true },
    { "r_fcin", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin,
      rfi_vdesc, rfi_setup, rfi_check, "1e-4", false, true },
+   { "r_fcin_missing", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin_missing,
+     rfi_vdesc, rfi_setup, rfi_missing_check, "1e-4; a constant guarding a stage input not given: the translator reads 0, "
+     "the frontend must refuse", true, true },
    { "r_rleblit", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatBGRA8Unorm, MTLPixelFormatBGRA8Unorm }, NOC,
      MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup, rbl_check,
      "bgra8 1 LSB; CoreAnimation's buffer-to-image blit, a fragment byte read at buffer(9)" },
