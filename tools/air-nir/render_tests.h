@@ -1481,7 +1481,8 @@ rsr_check(struct rrun *r)
  * factors come from a kernel, one patch at 0 (not drawn); their varyings are affine in the barycentrics, exact. */
 
 struct tq_cpv { float pos[4], st[2], pad[2]; };
-static const unsigned tq_x0[2] = { 8, 34 }, tq_x1[2] = { 30, 56 }, tq_y0 = 8, tq_y1 = 56;   /* pixels: [x0, x1) x [y0, y1) */
+/* pixels [x0, x1) x [y0, y1); pixel (30, 40), which PLUGIN_RUN_CORRUPT changes, inside the first */
+static const unsigned tq_x0[2] = { 6, 36 }, tq_x1[2] = { 34, 60 }, tq_y0 = 8, tq_y1 = 56;
 
 static void
 tq_vdesc(MTLVertexDescriptor *vd)

@@ -1011,7 +1011,10 @@ run_render_test(const struct rtest *t)
       [vf release]; [ff release]; [lib release];
       return SKIPPED;
    }
-   const bool road_on = !(getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0"));
+   /* the road is on unless NVMTL_AIR_NIR=0; framebuffer fetch by copies (NVMTL_FETCH_COPY=1) keeps a fragment that
+    * reads [[color(n)]] on the SPIR-V road by design (r_rog's) */
+   const bool road_on = !(getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0")) &&
+                        !(getenv("NVMTL_FETCH_COPY") && !strcmp(getenv("NVMTL_FETCH_COPY"), "1"));
    if (ps && t->road && road_on && road != 1) {
       /* a pipeline the road must make (round 10's): the SPIR-V road's is a failure here */
       printf("%-16s FAIL     took the SPIR-V road, which it must not with the road on (not drawn)\n", name);
