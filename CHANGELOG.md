@@ -1,5 +1,411 @@
 # Changelog
 
+## 3.0.30
+
+**AIR to NIR, round 12** (not released; packaged and signed for the owner's RTX 5050). On top of 3.0.29. CoreAnimation's
+`fixed_*` pipelines take the road (they read function constants CoreAnimation leaves unset), and with them the
+desktop's own SPIR-V-road pipelines; more of the AIR cache takes the road as the translator makes it; a multisampled
+tile function translates. NVK's AIR-to-NIR ABI is version 10: the plugin and NVK change together.
+
+### What changed
+
+- A function constant the pipeline does not give reads 0 on the road, as the translator reads it (and
+  `is_function_constant_defined` false): CoreAnimation's `fixed_vert_*_gen` vertex functions and their pipelines,
+  which went to the SPIR-V road on the desktop, take the road. Tests: `r_fcopt`, `r_fcopt_gen`; `r_fcin_missing`,
+  `fc_refuse`, `fc_kernel_c`, `fc_kernel_none`, `fc_texture_none` (refused before) take the road.
+- The road decides itself which buffers the translator keeps bounds-checked, when it is sure of the translator's
+  answer (ABI version 10); otherwise it asks the translator's module as before. Over the AIR cache it decides 3 of 433,
+  all as the translator; those translate in 0.4 to 1 ms instead of 3 to 16 ms.
+- On the road, as the translator makes them: `read_write` cube textures and written cube arrays; run-time choices of
+  texture handles (a select or a phi, a null texture against an argument); a null `texture_buffer`; a texture handle
+  held as an integer (SceneKit's lighting fragments). Tests: `tex_cube_rwk`, `tex_cube_arrw`, `tex_choice`,
+  `tex_choice_null`, `tex_null_tbuf`.
+- **Fixed on both roads (translator): a multisampled tile function that loops over its samples could not be made**
+  (`newFunctionWithName` gave nothing). It and its tile pipeline are made now. Test: `r_tile_ms`.
+- Still refused, with the reason: explicit imageblocks, kernels with `stage_in`, a sampled cube read by texel (the
+  SPIR-V road reads 0 there), a multisampled tile function's attachments on the road.
+- Not found: System Information's crash on 3.0.29 (17:25Z on 2026-11-28, NAK's legalize pass reading an instruction
+  whose memory another owner had zeroed, on the SPIR-V road). Every reproduction offline, AddressSanitizer builds of
+  the plugin and NVK included, came out clean. Since 3.0.30 CoreAnimation's pipelines in that path take the road.
+
+### What ran where
+
+On the RTX 5050 (2026-11-28, macOS 26.7.3, the development plugin and this tree's NVK and translator, 3.0.29
+installed; the four fault counters 0 before and after every run): with the road on 141 tests pass twice and once from
+the first run's caches (135 on the road), on the SPIR-V road 140 pass twice; with corrupted outputs every test that
+dispatches or draws fails on both roads; compute with buffer robustness 85 on each road; the attachments are equal on
+both roads byte for byte (19 of 19, the tile tests' 4); each new test fails with 3.0.29's NVK (or translator). Offline,
+the AIR cache: 5,919 of 10,814 functions translate with reflections equal to the translator's, 0 different;
+WindowServer's 179 of 211 as before. The translator's tests: the same 26 failures as round 11's tree. Details:
+`docs/AIR-TO-NIR.md`, round 12.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+| `NVMTL_TILE_SHADING` unset (the default) | environment | A tile pipeline is refused with its reason, as before 3.0.29 |
+
+## 3.0.29
+
+**AIR to NIR, round 11 continued** (not released; packaged and signed for the owner's RTX 5050). On top of 3.0.28, which
+was never installed: one package with all of round 11. Tile functions run, on both roads, and their kernel takes the
+road; a fragment that reads `[[sample_id]]` is shaded per sample on the road; null textures and more of the AIR
+cache's calls take the road as the translator makes them. NVK's AIR-to-NIR ABI is version 9: the plugin and NVK change
+together.
+
+### What changed
+
+- Null textures (`texture2d<float>()`, MPS's and RenderBox's `air.get_null_texture_*`) take the road (NVK's frontend,
+  ABI version 9): the translator's placeholder image, at the texture binding it lands on (often an argument's own), and
+  `is_null_texture` as the translator answers it. Tests: `tex_null`, `tex_null_tb`.
+- **Fixed on both roads: a tile function (`NVMTL_TILE_SHADING=1`) changed nothing** - its colour attachments, made with
+  render-target usage only as Metal allows, were bound to the dummy; that dispatch now gives them storage twins. Its
+  compute kernel (the translator's rewrite) now takes the road. A multisampled tile function that loops over its
+  samples is still refused by the translator's library path (both roads). Test: `r_tile`.
+- **Fixed on the road: a fragment reading `[[sample_id]]` or a sample-interpolated varying ran once per pixel**; it
+  is now shaded per sample, as the SPIR-V road's module is.
+- On the road, as the translator makes them: `simd_shuffle_and_fill_down/up` with a cluster width, the quad-group
+  builtins and `quadgroups_per_threadgroup`, the SIMD-group width call; `mad_sat` on 32-bit scalars; depth gathers
+  (2D, 2D array); `depth2d_ms` and `depth2d_ms_array` reads and queries; write-only `texturecube`s (a 2D-array image
+  written at the face); rgb565 packing; a sample with a bias in a vertex or kernel function (level 0, as the
+  translator). The frontend now refuses what the translator refuses there (a vector `mad_sat`, a depth
+  texture's array-size query). Tests: `simd_fill`, `mad_sat`, `mad_sat_v`, `tex_gather_depth`, `tex_depth_ms`,
+  `tex_depth_asize`, `tex_cube_write`, `pack565`, `sample_bias_k`.
+- Still refused, with the reason: explicit imageblocks (the translator's cell staging), sampled and `read_write` cube
+  reads, written cube arrays, a null `texture_buffer`, run-time choices of handles.
+
+### What ran where
+
+On the RTX 5050 (2026-11-28, macOS 26.7.3, the development plugin and this tree's NVK and translator, 3.0.27
+installed; the four fault counters 0 before and after every run): with the road on 133 tests pass twice and once
+from the first run's caches (123 on the road), on the SPIR-V road 132 pass twice; with corrupted outputs every test that
+dispatches or draws fails on both roads; compute with buffer robustness 79 on each road; the attachments are equal on
+both roads byte for byte (19 of 19, `r_tile`'s three); each new test fails with 3.0.27's plugin and NVK on the road
+(`r_tile` on both roads). Offline, the AIR cache: 5,910 of 10,814 functions translate with reflections equal to the
+translator's, 0 different; WindowServer's 179 of 211 as before. Details: `docs/AIR-TO-NIR.md`, round 11.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+| `NVMTL_TILE_SHADING` unset (the default) | environment | A tile pipeline is refused with its reason, as before 3.0.29 |
+
+## 3.0.28
+
+**AIR to NIR, round 11** (not released; packaged and signed for the owner's RTX 5050, not installed). On top of 3.0.27.
+Buffers the translator keeps bounds-checked are bound where Metal binds them, unbound bindings no longer share one
+dummy, and run-time arrays of `texture_buffer`s read their elements, on both roads; more of the translator's buffer
+forms take the road.
+
+### What changed
+
+- **Fixed on both roads: a buffer the translator keeps bounds-checked, bound at an offset below 16 bytes, read the
+  plugin's shared dummy** instead of the buffer. NVK gives the plugin's instance 4-byte storage-buffer offsets
+  (`nvk_ssbo_align_4b`), the plugin binds such a buffer where Metal binds it, and what its accesses promise is checked by
+  the align guard as a device buffer's.
+- **Fixed on both roads: unbound bindings shared one dummy**, so a draw writing through one changed what another read.
+  An unbound storage buffer of a bounds-checked pipeline is now a null descriptor (reads 0, stores dropped:
+  `VK_EXT_robustness2`'s `nullDescriptor`); every other writable dummy has a buffer of its own.
+- **Fixed on both roads: arrays of `texture_buffer`s indexed at run time** read zeros on the SPIR-V road (and were
+  refused on the road). Both read and write the element through the bindless heap's texel buffers, at the slot the
+  per-draw table now holds for a bound texture buffer.
+- On the road: the translator's raw form of a kept buffer (stores guarded against offsets past 4 GiB, guarded the same
+  way) and kept arrays of structs of mixed scalar widths (each value as itself, 64-bit members whole).
+- Unchanged, with the reason: raster order groups stay unordered on both roads (NVK has no fragment shader interlock);
+  null textures and imageblocks stay refused.
+- Tests (`tools/air-nir`): `r_oob_misaligned` (Metal's data now), `r_dummy_rw`, `r_kept_mixed`, `r_kept_guarded`
+  (render), `tex_tbarray` (compute, on the road); `plugin_run` can dispatch a kernel before a draw.
+
+### What ran where
+
+On the RTX 5050 (2026-11-28, the development plugin and this tree's NVK and translator, 3.0.27 installed; the four
+fault counters 0 before and after every run): with the road on 122 tests pass twice and once warm (114 on the road), on
+the SPIR-V road 121 twice; with corrupted outputs every test that dispatches or draws fails; the new tests fail on both
+roads with 3.0.27's plugin, NVK and translator. The translator's tests: 2,599 pass, the same 26 fail as at 941c6185.
+Offline, the AIR cache 5,893 of 10,814 equal, 0 different; WindowServer 179 of 211.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+
+## 3.0.21 to 3.0.27
+
+AIR to NIR, phases 1 to 4 and rounds 6 to 10: packaged and signed for testing on the owner's RTX 5050, not released.
+3.0.28 and 3.0.29 carry all of it.
+
+### AIR to NIR, round 10: tessellation, raster order groups, dual-source blending, minimum-LOD clamps, kept buffers
+
+- **Post-tessellation vertex functions take the road** (NVK's AIR-to-NIR frontend, ABI version 8): the frontend makes
+  the tessellation evaluation stage the plugin's tessellation path makes of the translator's module (control points,
+  patch inputs, the instance and the patch id where the plugin's control stage writes them, the spacing and vertex
+  order it sets, the same reflection), and the plugin builds its control and vertex stages from what that stage reads.
+  All 223 of the AIR cache (SceneKit's) translate.
+- **Fixed on both roads: a sample's minimum-LOD clamp was dropped** unless the sample had gradients: `bias(b)` with
+  `min_lod_clamp(c)` read levels below c (D3DMetal's converted shaders carry one on every sample). With the device's
+  `shaderResourceMinLod`, now enabled, the translator and the frontend apply it (an implicit level's `MinLod`, an
+  explicit level raised to it).
+- Dual-source blending (`[[color(0), index(1)]]`), raster order groups on colour inputs, textures and buffers (bound as
+  the translator binds them, without interlock: WindowServer's `inplace_copy` fragments), bicubic samples (the
+  translator's sixteen-texel emulation), and stores and 64-bit values in the buffers the translator keeps bounds-checked
+  (in the form its module has them, read off the module), argument buffers so kept among them, take the road.
+- Still refused, with the reason: imageblocks (tile functions, the translator's cell staging), MPS's null textures,
+  `texture_buffer` arrays indexed at run time (which the SPIR-V road reads wrongly).
+- Tests (`tools/air-nir`): `r_tess_quad`, `r_tess_pow2`, `r_tess_fodd`, `r_tess_feven`, `r_tess_ccw`, `r_tess_tri`,
+  `r_rog`, `r_dual`, `r_minlod`, `r_kept`, `r_oob_misaligned` (render), `tex_bicubic`, `tex_tbarray` (compute); a test
+  can require the road (`road`, `MUST_ROAD`); `plugin_run` draws patches. The AIR-cache sweep: 5,893 functions
+  translate (5,636), every reflection equal to the translator's; WindowServer's functions on disk: 179 of 211 (177).
+
+### AIR to NIR, round 9: argument buffers, bounds-checked buffers, pixel-coordinate samples, written texture arrays
+
+- **Fixed: Terminal's GPU fault on 3.0.25** (Xid 31, one channel rebuilt): the helper invocations of QuartzCore's
+  glyph blit read bytes before its buffer on the AIR-to-NIR road, where the SPIR-V road's helper invocations return at
+  the entry. The frontend now returns them the same way, for the same fragments.
+- **Argument buffers take the road** (NVK's AIR-to-NIR frontend, ABI version 7), in kernels, vertex and fragment
+  functions: textures, samplers and buffers read from them as the translator reads them (the bindless heap by the
+  resource ID's slot, the per-draw slots of the fields it binds, the same reflection); the plugin binds the per-draw
+  slots the frontend names. Fixed on both roads: an argument buffer's `texture_buffer` was bound as an image, and
+  element 1 of a written texture array in an argument buffer was lost.
+- **A buffer the translator keeps bounds-checked is read through its descriptor on the road too**: a vertex or fragment
+  function that indexes a buffer with a value read from memory is asked for again with the buffers the translator's
+  module keeps as descriptors, which the road then reads with the same bounds checks (a read past the end gives 0).
+  Before, 30 functions of the AIR cache (Apple's GL programs) read such a buffer unchecked on the road.
+- **Pixel-coordinate samples** follow the translator exactly: its fetch emulation for every linear sample but a 2D
+  clamp-to-edge one at level 0 (a fragment's implicit level, depth textures, gathers and offsets no longer use the
+  hardware filter on the road), every address mode and dimension, refusals where the translator refuses.
+- **Fixed: written texture arrays lost every element but the first** (SPIR-V road, since round 8): each known element
+  is its own binding now, and one chosen at run time is read through the storage heap; the road does the same.
+- **Fixed on the SPIR-V road**: `fma` is fused as Metal's is; `asin` and `acos` are computed through `atan2`, not
+  GLSL's ~1e-4 approximations; a sample offset known only at run time is converted signed; the align guard sees the
+  buffers the lowering keeps as descriptors, and a kernel's SAFE build reads every buffer through its address. The
+  five tests that failed on the SPIR-V road since round 4 pass.
+- MPS's batch copy kernels with an `array_ref` of textures take the road.
+- **Fixed: an argument buffer's sampler could read another sampler's state** (both roads): when the last sampler
+  object of a state was released, its VkSampler was destroyed under the bindless heap slot that still named it, and a
+  sampler of another state made later at the same handle was given that slot. The heap now keeps each sampler it
+  places.
+- Tests (`tools/air-nir`): `ab_kernel`, `ab_encoder`, `oob_kernel`, `tex_pixmodes`, `tex_pixwrap`, `tex_pixborder`,
+  `tex_warrays`, `tex_aref`, `ib_refuse` (compute); `r_argbuf`, `r_argbuf_data`, `r_rleblit_helpers`,
+  `r_qcblit_helpers`, `r_oob2`, `r_oob_nospace`, `r_bsearch`, `r_pixfrag`, `r_fcin_missing`, `r_argbuf_reuse` (render). The AIR-cache
+  sweep: 5,636 functions translate (5,559), every reflection equal to the translator's; WindowServer's functions on
+  disk: 177 of 211 (173).
+
+### AIR to NIR, round 8: framebuffer fetch on the road, linked samplers, arrays of textures
+
+- **Framebuffer fetch takes the road** (NVK's AIR-to-NIR frontend, ABI version 6): a fragment function's `[[color(n)]]`
+  inputs are read as the translator reads them, an input attachment at set 3, binding 192 + n, read once at the entry,
+  and the road's pipeline gets the SPIR-V road's set 3 and fetch masks, so a draw binds the pass's colour views (the
+  dummy image's zeros with fetch off, WindowServer's default) and splits as before. Core Animation's and RenderBox's
+  fragments read their attachments: 161 of the 209 refusals the desktop's processes cached on 3.0.24. Fetch emulated by
+  copies (`NVMTL_FETCH_COPY=1`) stays on the SPIR-V road.
+- **Fixed: a fragment linked with a visible function sampled with the wrong constexpr sampler** (SPIR-V road): RenderBox's
+  `custom_effect_fragment` and the effect linked into it (`custom_fn`) each name their constexpr sampler
+  `@__air_sampler_state`, with different states; the translator's linker kept both definitions under one name and the
+  fragment sampled with the effect's (repeat for clamp-to-zero in `r_linksamp`), and a linked function's own constexpr
+  samplers were bound nowhere. The linker now renames a dependency's local global the module already defines
+  differently, and lists the dependency's constexpr samplers; a pipeline binds the samplers of the stages it is built
+  from. Those pipelines now also take the road (the frontend refused the text; it also drops the repeated function
+  declarations the linker leaves).
+- Arrays of textures (`array<texture2d<T>, N>`): an element by a known index is that texture's own binding, a sampled
+  one chosen at run time is read through the bindless heap as the translator reads it. Texture calls through a choice of
+  argument handles that known branches decide (Apple's GL `__main`, Minecraft's) take the road. Argument indices from
+  function constants already did with their values (`fc_argindex`). Argument buffers stay on the SPIR-V road.
+- Tests (`tools/air-nir`): `r_fetch`, `r_fetch_mrt`, `r_fetch_noatt`, `r_linksamp`, `r_handlechoice` (render),
+  `tex_arrays`, `fc_argindex` (compute). The AIR-cache sweep: 5,559 functions translate (5,517), every reflection equal
+  to the translator's; WindowServer's functions on disk: 173 of 211 (166).
+
+### AIR to NIR, round 7: Terminal's GPU fault, a per-process fallback, WindowServer on the road
+
+- **Fixed: Terminal's window stopped drawing on 3.0.21 to 3.0.23** (Xid 31, three channel rebuilds, then the device
+  lost). Its one pipeline on the road is QuartzCore's `buffer_image_blit_vert_lpf` / `buffer_image_blit_frag_lpf`,
+  whose fragment reads one byte at `int(x + offset + y * bpr)`. NVK's AIR-to-NIR frontend lowered float-to-integer
+  conversions to NIR's bare `f2i`/`f2u`, and NAK's F2I gives `0x80000000` for a NaN: the read went 2 GiB below the
+  buffer. Metal, and the translator (`finalize.rs` `metal_nan_to_zero_conversions`), give 0. Every `air.convert` from
+  a float and LLVM's `fptosi`/`fptoui` now select 0 for a NaN (`nvk/air/nvk_air_to_nir.c` `air_f2int`).
+- **The frontend matches the translator's other Metal rewrites**: `isnan`, `isinf` and `isfinite` keep NaN and
+  infinities (the builder's fast math let NIR fold `x != x` to false); precise `fmin`, `fmax`, `min`, `max`,
+  `clamp`, `fmin3`, `fmax3`, `fmedian3` and `llvm.minnum`/`maxnum` are NaN-aware (GLSL's NMin/NMax/NClamp); `round`
+  is Metal's (half away from zero by the truncation and its remainder: `sign(x) * floor(|x| + 0.5)` rounded
+  0.49999997 to 1); `pow` has C's special values (a negative base with an integer exponent, +-1 to an infinite power,
+  `x^0`); a float narrowed to a half is exact. A vertex or fragment function that indexes a buffer holding an array
+  with a value read from memory or a texture takes the SPIR-V road, where that buffer stays a bounds-checked
+  descriptor (a read past its end gives 0 there; through its address it would fault the GPU).
+- **A GPU fault turns the road off in the process that had it** (`plugin/NVMTLAirNir.m` `nvmtl_air_nir_gpu_fault`):
+  when a channel rebuild drops a command buffer, or the device is lost, in a process that made a pipeline on the road,
+  new pipelines and variants take the SPIR-V road, the road's render pipelines draw as their SPIR-V twins from their
+  next bind and its compute pipelines dispatch as theirs, and the process name goes on a list in the plugin's
+  shader-cache folder (`airnir-off-<build>.txt`), so its next launches start on the SPIR-V road while this driver
+  build is installed; a new build forgets the list. Said once in the system log (`AIR to NIR off in <process> from
+  now on`). `NVMTL_AIR_NIR=0` stays the one way out.
+- **WindowServer takes the road** (Isaac's choice of 2026-11-27, with automatic fallback): besides the per-process
+  fallback, its plugin sets a crash marker in its own cache folder before its first pipeline on the road and clears it
+  after a clean minute; a start that finds the marker puts WindowServer on the fallback list, so that start and the
+  rest of the driver build stay on the SPIR-V road.
+- Tests (`tools/air-nir`): `conv_edge`, `minmax_nan`, `round_edge`, `pow_edge`, `narrow_exact` (compute, both roads),
+  `r_rleblit`, `r_rleblit8`, `r_rleblit_nan`, `r_qcblit`, `r_qcblit8`, `r_qcblit8m` (the blit, QuartzCore's own AIR
+  with `PLUGIN_RUN_EXTRA_AIR`), `r_oob` (must take the SPIR-V road); `fallback` and `fallback_next` (a fault NVK's test
+  hook injects: `NVK_FAULT_INJECT=mmu:6:plugin_run`), `ws_marker`, `ws_marker_crash`, `ws_marker_next`
+  (`NVK_FAULT_INJECT=ws:2:plugin_run`, a development plugin only, runs WindowServer's marker logic in the harness).
+
+### AIR to NIR, round 6: the refusals real functions hit next
+
+- **NVK's AIR-to-NIR frontend takes more of what real processes make**: a buffer whose metadata names no address
+  space (the GL-to-Metal compiler's: the pointer type says it, as the translator reads it; 431 of the 475 such
+  functions of the AIR cache now translate, most of the rest sample through a phi of two texture handles), a stage input that
+  exists only under a function constant (the request's values say whether it does), a sample of an integer texture
+  (through a constexpr sampler, the translator's nearest fetch by address mode; through an argument sampler, the
+  hardware's), a multisampled texture read by sample with its size and sample count, `pack`/`unpack` of `unorm4x8`,
+  `snorm4x8`, `unorm2x16`, `snorm2x16` and `half2x16`, and `ldexp`.
+- A text module that defines a global twice with the same type and initializer (two linked modules'
+  `@__air_sampler_state`, 4 of the 3.0.22 boot's cached refusals) has the repeat dropped before LLVM parses it; one
+  defined twice differently is refused by name.
+- **Fixed**: a constexpr sampler whose state is one `i64` (an older module's) got the first word's low half as its
+  LOD bias in the frontend's reflection; its second word is 0, as the translator reads it.
+- The frontend gives no reflection for a function whose function-constant gate the static initializer computes where
+  the translator's text evaluation of it may differ (`is_function_constant_defined` of a given constant, a branch): the
+  plugin asks the translator for it.
+- Tests: `tex_intsample`, `pack`, `tex_ms`, `r_nospace` and `r_fcin` (`tools/air-nir`), on both roads. Over the AIR
+  cache the frontend translates 5,517 functions (5,001 in round 5), every reflection equal to the translator's.
+- WindowServer (its road stays off): of its 211 functions on disk (SkyLight's and QuartzCore's metallibs) run offline
+  in a normal process, 166 translate with reflections equal to the translator's; docs/AIR-TO-NIR.md has the refusals.
+
+### AIR to NIR, phase 4: functions made without the translator
+
+- **`newFunctionWithName:` (and its function-constant, completion-handler and descriptor variants) asks NVK's AIR-to-NIR
+  frontend first** (`plugin/NVMTLAirNir.m`, `nvmtl_air_nir_lazy`): a kernel, vertex or fragment function it translates
+  and reflects is made with the frontend's reflection and no SPIR-V, and the translator runs only the first time
+  something needs SPIR-V of it (a pipeline or variant that takes the SPIR-V road, a rewrite of that road's), then exactly
+  as `newFunctionWithName:` would have run it (`nvmtl_function_spirv`). Every other function is made as before, and so
+  is every function with `NVMTL_AIR_NIR=0`, in WindowServer, with an application profile and in the check run. Through
+  the plugin on the RTX 5050: a kernel's function and pipeline in 2.3 ms instead of 7.2 (median of 42), a render
+  pipeline's two functions and pipeline in 3.0 ms instead of 6.8 (median of 14); 75 of the tests' 80 functions skip the
+  translator, one is translated later. The count is logged once per process (`functions in <process>: ...`).
+- **The frontend gives the function's reflection** (request and result version 5, `NVMTL_AIR_NIR_REFLECT`): the
+  bindings, varyings, vertex attributes and default threadgroup size the plugin reads, in the translator's form, read
+  from the same metadata by the translator's rules. Every reader of the reflection (arguments, constexpr samplers,
+  embedded resources, the hazard model, the GL check, the varyings' link) takes the function's own. Kept in the shader
+  cache (stage `nrf1`). `NVMTL_AIR_NIR_REFL_CHECK=1` (development plugins only) makes every function as before and
+  compares the two reflections key by key in the log; equal for all 70 functions of the tests the frontend translates.
+  `tools/air-nir/airsweep.c --reflect` and `sweep.py --reflect` compare them over an AIR cache (vertex and fragment
+  functions too).
+- **Pixel-coordinate argument samplers stay on the road**: the state a dispatch or draw binds goes into the request
+  (`NVMTL_AIR_NIR_SAMPLER_STATES`), so their compute and render variants are the frontend's (`tex_argpixel`,
+  `r_argpixel`). NVK exports its frontend's version (`nvmtl_air_nir_version_v1`); with an older NVK the plugin keeps the
+  translator at `newFunctionWithName:` and those variants on the SPIR-V road, which an older NVK would sample wrongly.
+- **Fixed: the 3.0.21 render road crashed** (SIGSEGV in the frontend, inside `newRenderPipelineStateWithDescriptor:`)
+  on a fragment function that tests a texture for null through `ptrtoint` of its handle, as two SceneKit fragments of the
+  AIR cache do; a texture or sampler handle used as a plain value is refused now, and such a pipeline takes the SPIR-V
+  road.
+- The frontend now takes an output that exists only under a function constant (the request's values say whether it
+  does), a colour output whose index is an expression of function constants or has no index operand (`r_fcout`), and
+  the translator's linker no longer defines a global twice when a linked module defines it with the same line (LLVM,
+  which the frontend parses the text with, refused such a module; nothing the translator reads changes).
+
+- **Every render pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): both stages' AIR, their
+  function-constant values and their varyings' Locations go to the frontend, and the pipeline is made from the two NIR
+  shaders with the SPIR-V road's layout, render pass, vertex input and state (`nvmtl_vk_pipeline_create_nir`; the state
+  is now one function both roads call). The varyings take the Locations the translator's reflection gives them, a
+  fragment input's moved onto the vertex output of the same name by the remap the SPIR-V road applies to its module
+  (`nvmtl_varying_remap`, now shared). The SPIR-V road stays the fallback, exactly as before, for a pipeline with a
+  stage the frontend refuses, one with no fragment function or a stage without AIR, one that needs a SPIR-V rewrite of
+  its stages (A8 targets, vertex amplification, tessellation, the GL uniform buffer, framebuffer fetch, stencil
+  export, programmable sample positions, a stage-in rewrite, an application-profile edit, `NVMTL_BDA_PROBE_FILE`) and
+  one NVK will not make; the reason is logged once per pipeline, and the render roads are counted apart from compute.
+  Each stage is a `nir1` entry of the shader cache, keyed also by its stage, its varyings and the vertex descriptor.
+  `NVMTL_AIR_NIR=0` keeps render pipelines on the SPIR-V road too.
+- The frontend (request and result version 4) reads vertex and fragment functions: stage_in attributes at the vertex
+  descriptor's Locations, the vertex and instance builtins, position, point size, clip distances, layer and viewport
+  outputs, varyings by user semantic with their interpolation, the fragment builtins (position, front_facing,
+  point_coord, sample_id, sample mask), colour outputs of any type, depth with its qualifier, sample mask out,
+  `discard_fragment` (a demote), `[[early_fragment_tests]]`, sampling at the level the derivatives give, derivatives;
+  a fragment stage's resources in set 1. Post-tessellation, mesh and object functions, imageblocks, raster order
+  groups, framebuffer fetch inputs, stencil export, dual-source outputs, `[[primitive_id]]`, `[[barycentric_coord]]`
+  and vertex amplification are refused with a message.
+- **Proven through the plugin without installing it** (`tools/air-nir/metal-render`, `render_tests.h`, `plugin_run`):
+  14 vertex and fragment pairs drawn offscreen and checked per pixel on the RTX 5050. On the road 13 take it and pass
+  and the one the frontend must refuse (`[[primitive_id]]`) takes the SPIR-V road and passes; with `NVMTL_AIR_NIR=0`
+  all 14 pass; with corrupted read-backs all 14 fail. Pipeline creation median 2.7 ms on the road and 2.8 ms on the
+  SPIR-V road (whose translator runs when the functions are made, on either road), 1.9 ms from the shader cache; the
+  GPU time of a draw the same on both. The 46 compute tests give what they gave in round 3; the fault counters stayed
+  at 0. Details in `docs/AIR-TO-NIR.md`.
+- The align guard through the plugin (`align_misaligned`): with a kernel's float4 buffers at offsets 4 and 8 the road
+  runs the frontend's `ALIGN4` build and the result is exact. The SPIR-V road gives a wrong result for that dispatch,
+  as the plugin before round 3 did: its guard does not see that kernel's promise (not changed here). The constexpr
+  samplers' state words the frontend reads are the translator's reflection's for every test that has one; the plugin
+  logs the comparison once per function.
+- `tools/test_air_nir_plugin.py`: the render road's contract (asked first, after the multiview variants, the SPIR-V
+  road unchanged otherwise; no stage the SPIR-V road rewrites; robustness, `ALIGN4` and varyings in the requests and
+  the key; one remap for both roads; a fragment stage in set 1), each with a control; `.c`: the version-4 layout.
+
+### AIR to NIR, phase 2: the plugin makes compute pipelines from NIR
+
+- **Every compute pipeline is asked of NVK's AIR-to-NIR frontend first** (`plugin/NVMTLAirNir.m`): the kernel's AIR as
+  the plugin keeps it, its function-constant values, its default threadgroup size and the threadgroup-memory lengths
+  go to `nvmtl_air_to_nir_v1`, and the pipeline is made from the NIR with the layout every compute pipeline has and
+  the descriptor masks the result gives. The translator's SPIR-V stays the fallback, exactly as before, for a kernel
+  the frontend refuses (an incomplete function-constant set among them), one NVK will not make a pipeline of, one whose
+  constexpr samplers would not sit where the translator's reflection binds them, the translator's own rewrites (mesh,
+  object, tile and stage-in kernels), a dispatch with a pixel-coordinate argument sampler and a threadgroup size over
+  the per-dimension limit; the reason is logged once per function, and the count of pipelines on each road at every
+  power of two. Threadgroup-size variants are copies of the NIR, threadgroup-memory variants and the align guard's
+  build are translated again; the result and the serialized NIR are kept in the shader cache (stage `nir1`).
+- **`NVMTL_AIR_NIR=0`** (the environment or the settings file) keeps every compute pipeline on the SPIR-V road, as in
+  3.0.20 (`tools/switches.tsv`, `docs/SWITCHES.md`). The road is off in WindowServer for now, and with an NVK that
+  has no frontend or that the plugin reached through the loader.
+- The frontend (request version 3): text IR, the translator's default length for a threadgroup argument the request
+  leaves at 0, the robustness the plugin makes compute pipelines with, a build with no buffer access promising more
+  than 4 bytes, the largest promise in the result; exports to copy a shader for another threadgroup size and to
+  serialize and read one back. A refusal of a text module no longer frees its buffer twice.
+- **Proven through the plugin without installing it** (`tools/air-nir/plugin-run.sh`, `plugin_run.m`; the tests now in
+  `airrun_tests.h`, shared with `airrun.c`): a development build of the plugin, opened in a normal process with a build
+  of NVK, on the RTX 5050. All 42 tests that dispatch take the road and pass, the four the frontend must refuse take
+  the SPIR-V road; with `NVMTL_AIR_NIR=0` 38 pass, and the four that fail fail the same way with the plugin of the
+  commit before. Pipeline creation median 2.2 ms on the road and 6.9 ms on the SPIR-V road (translator included); the
+  dispatches' GPU time median 7.9 and 9.5 us; the fault counters stayed at 0. The function is still translated to
+  SPIR-V when it is made, so this phase does not yet save the translator's time. Details in `docs/AIR-TO-NIR.md`.
+- `tools/test_air_nir_plugin.py`, `.c` (new host tests): the switch, the masks, the sizes, the constexpr-sampler
+  check, the cache entry, the fallback and the exports, each with a control. `tools/switches.tsv` now also lists the
+  frontend's three diagnostics and `NVK_CRATE_CACHE`, which rounds 1 and 2 had left out.
+
+### AIR to NIR, phase 1: compute kernels without SPIR-V
+
+- **NVK reads Metal AIR itself** (`nvk/air/nvk_air_to_nir.c`, added to NVK's build by `nvk/nvk-air-nir.patch`, last
+  in the 3.0 chain). It exports `nvmtl_air_to_nir_v1`: given a compute kernel's bitcode, it opens the LLVM library the
+  request names (the plugin's `air-runtime`; NVK still links no LLVM), and builds the kernel's NIR directly, for the
+  plugin to pass to `vkCreateComputePipelines` in `VkPipelineShaderStageNirCreateInfoMESA`. The result binds its
+  buffers and grid as the translator's kernels do (`nvk/air/nvmtl_air_nir_abi.h`). What it translates and what it
+  refuses, and the later phases, are in `docs/AIR-TO-NIR.md`. The design follows Stela's; none of its code is used.
+- Nothing calls it yet: the plugin translates every kernel to SPIR-V as before, so the driver behaves as 3.0.20.
+- `tools/air-nir/run.sh` (new): the frontend and NAK on Linux, on Mesa's nouveau drm-shim as an RTX 5050. Of the 62
+  kernels it takes (its two fixtures and the translator's), 48 compile to shader model 120 code and 14 are refused
+  with a reason (ray tracing, a function pointer, a select between a constant table and a buffer); none fails.
+- **Run on the card** (`tools/air-nir/run-mac.sh`, `airrun.c`, kernels in `tools/air-nir/metal`): 29 tests of
+  Metal kernels compiled with Apple's compiler, translated by the frontend and dispatched on the RTX 5050 through a
+  build of NVK opened directly, each result compared with a reference computed on the CPU; all pass, and NVRM's fault
+  counters stayed at 0. It found two bugs the Linux test could not: `any()` of a bool vector was translated as
+  `all()`, and `hadd`/`rhadd` (and `isnormal`) reached NAK as operations it has no instruction for, a compiler panic.
+- The frontend now also translates SIMD-group and quad functions, structures and arrays held as values, calls
+  Apple's compiler left un-inlined (every callee is inlined), arguments guarded by a function constant, and the
+  second operand Apple's `air.clz`/`air.ctz` carry. `tools/air-nir/sweep.py` (`airsweep.c`) runs every compute kernel
+  of the plugin's AIR cache through it and NAK without dispatching: on this Mac 699 of 8273 give a
+  pipeline, none fails or crashes, the rest are refused with a reason (textures above all). It found that a kernel
+  reading a function constant was compiled as if the constant were 0 (the frontend took the placeholder global's
+  initializer for its value): such kernels are refused now, until the request carries the values.
+- **Function constants and textures** (round 2 on the card): the request (version 2) carries the function's
+  function-constant values as the plugin hands them to the translator, and the frontend folds them in, running the
+  module's static initializer itself; textures and samplers use the bands the translator's kernels bind (sampled
+  32 + n, storage 480 + n without a format, samplers 160 + n, constexpr samplers at the slots the translator's
+  reflection gives them, listed in the result with their state). 18 new tests (reads, writes, sampling with levels,
+  gradients, offsets, gathers, cube, array, 3D, texel buffers, depth compare, pixel-coordinate samplers, sizes,
+  fences; two value sets of one kernel) pass on the RTX 5050, 47 in all. Of the plugin's 8273 cached compute
+  kernels, 3481 now give a pipeline (699 after round 1); 4555 of the rest read function constants the cache holds no
+  values for, and the 13 sets the plugin recorded all compile.
+- `build/build_nvk.sh`: `NVK_CRATE_CACHE` names a folder of Rust crates an earlier build fetched, copied into the
+  fresh Mesa tree so meson downloads nothing (it still checks each against Mesa's wrap hashes).
+
 ## 3.0.20
 
 **Release 2 of this fork** (pre-release; release 1 was 3.0.2). On top of 3.0.19. In NVAccel, while a program reads a

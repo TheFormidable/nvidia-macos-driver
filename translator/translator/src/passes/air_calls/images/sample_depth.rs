@@ -155,7 +155,12 @@ pub(in crate::passes) fn lower_sample_depth(
                 &mut out,
             )?;
         }
-        push_image_sample(
+        // a minimum-LOD clamp, as a colour sample's (sample.rs lower_sample)
+        let (level, min_lod) = match sample_level_min_lod_clamp(ctx, arrayed, &sample_args) {
+            Some(clamp) => apply_sample_min_lod_clamp(ctx, level, false, clamp, &mut out),
+            None => (level, None),
+        };
+        push_image_sample_min_lod(
             ctx,
             &mut out,
             v4,
@@ -166,6 +171,7 @@ pub(in crate::passes) fn lower_sample_depth(
             false,
             const_offset,
             None,
+            min_lod,
         );
         color
     };
@@ -524,6 +530,69 @@ pub(in crate::passes) fn find_sample_lod(
     }
 }
 
+/// The minimum-LOD clamp of a sample that carries no gradient: AIR's float right after the level or bias (`..., bool
+/// is_level, float level_or_bias, float min_lod_clamp, ...`), when it is not the constant 0. Metal's
+/// `min_lod_clamp(c)` keeps the sample at level c or above (the specification's sample functions with `bias` and
+/// `min_lod_clamp`). None without the device's clamp (TransformOptions::min_lod_clamp).
+pub(in crate::passes) fn sample_level_min_lod_clamp(ctx: &Ctx, arrayed: bool, args: &[Word]) -> Option<Word> {
+    if !ctx.min_lod_clamp {
+        return None;
+    }
+    let start = if arrayed { 4 } else { 3 };
+    let rest = args.get(start..)?;
+    let (offset, _) = rest
+        .iter()
+        .enumerate()
+        .find(|(_, arg)| scalar_float_width(ctx, **arg).is_some())?;
+    sample_level_flag(ctx, args, start + offset)?;
+    let &clamp = args.get(start + offset + 1)?;
+    (scalar_float_width(ctx, clamp) == Some(32) && !float_operand_is_constant_zero(ctx, clamp)).then_some(clamp)
+}
+
+/// A non-gradient sample's level with its clamp: an explicit level (or the level 0 a sample outside a fragment
+/// function, or of an integer texture, takes) raised to the clamp, Some(clamp) the MinLod operand of an implicit one
+pub(in crate::passes) fn apply_sample_min_lod_clamp(
+    ctx: &mut Ctx,
+    level: Option<SampleLevel>,
+    force_lod0: bool,
+    clamp: Word,
+    out: &mut Vec<Instruction>,
+) -> (Option<SampleLevel>, Option<Word>) {
+    let explicit = match level {
+        Some(SampleLevel::Explicit(lod)) => Some(lod),
+        _ if force_lod0 || !matches!(ctx.stage, Stage::Fragment) => Some(ctx.const_float(0.0)),
+        _ => None,
+    };
+    let Some(lod) = explicit else {
+        add_min_lod_capability(ctx);
+        return (level, Some(clamp));
+    };
+    let float_ty = ctx.ty_float();
+    let glsl = ctx.glsl();
+    let raised = ctx.module.fresh_id();
+    out.push(Instruction::new(
+        Op::ExtInst,
+        Some(float_ty),
+        Some(raised),
+        vec![Operand::IdRef(glsl), Operand::LiteralExtInstInteger(40), Operand::IdRef(lod), Operand::IdRef(clamp)],
+    ));
+    (Some(SampleLevel::Explicit(raised)), None)
+}
+
+pub(in crate::passes) fn add_min_lod_capability(ctx: &mut Ctx) {
+    let has = ctx.module.capabilities.iter().any(|inst| {
+        matches!(inst.operands.first(), Some(Operand::Capability(spirv::Capability::MinLod)))
+    });
+    if !has {
+        ctx.module.capabilities.push(Instruction::new(
+            Op::Capability,
+            None,
+            None,
+            vec![Operand::Capability(spirv::Capability::MinLod)],
+        ));
+    }
+}
+
 pub(in crate::passes) fn float_operand_is_constant_zero(ctx: &Ctx, value: Word) -> bool {
     let Some(def) = value_def_instruction(ctx, value) else {
         return false;
@@ -759,4 +828,67 @@ pub(in crate::passes) fn sample_lod_as_f32(
         return Some(widened);
     }
     None
+}
+
+#[cfg(test)]
+mod min_lod_clamp_tests {
+    use super::*;
+    use crate::spirv_module::Module;
+
+    fn ctx(stage: Stage, clamp: bool) -> Ctx {
+        let options = TransformOptions { min_lod_clamp: clamp, ..TransformOptions::default() };
+        Ctx::with_options(Module::new(), stage, options)
+    }
+
+    /// AIR's sample arguments after the coordinate: bool is_level, float level_or_bias, float min_lod_clamp
+    fn sample_args(ctx: &mut Ctx, is_level: bool, level: f32, clamp: f32) -> Vec<Word> {
+        let bool_ty = ctx.ty_bool();
+        let flag = ctx.const_bool_of(bool_ty, is_level);
+        let level = ctx.const_float(level);
+        let clamp = ctx.const_float(clamp);
+        vec![1, 2, 3, flag, level, clamp]
+    }
+
+    #[test]
+    fn a_bias_samples_clamp_is_its_min_lod_with_the_devices_clamp() {
+        let mut ctx = ctx(Stage::Fragment, true);
+        let args = sample_args(&mut ctx, false, 0.5, 2.0);
+        let clamp = sample_level_min_lod_clamp(&ctx, false, &args).expect("a nonzero clamp after the bias");
+        assert_eq!(clamp, args[5]);
+        let level = find_sample_level(&mut ctx, false, &args, &mut Vec::new());
+        let mut out = Vec::new();
+        let (level, min_lod) = apply_sample_min_lod_clamp(&mut ctx, level, false, clamp, &mut out);
+        assert!(matches!(level, Some(SampleLevel::Bias(_))));
+        assert_eq!(min_lod, Some(clamp));
+        assert!(out.is_empty());
+        assert!(ctx.module.capabilities.iter().any(|inst| {
+            matches!(inst.operands.first(), Some(Operand::Capability(spirv::Capability::MinLod)))
+        }));
+    }
+
+    #[test]
+    fn an_explicit_level_is_raised_to_the_clamp() {
+        let mut ctx = ctx(Stage::Fragment, true);
+        let args = sample_args(&mut ctx, true, 1.0, 3.0);
+        let clamp = sample_level_min_lod_clamp(&ctx, false, &args).expect("a nonzero clamp after the level");
+        let level = find_sample_level(&mut ctx, false, &args, &mut Vec::new());
+        let mut out = Vec::new();
+        let (level, min_lod) = apply_sample_min_lod_clamp(&mut ctx, level, false, clamp, &mut out);
+        assert_eq!(min_lod, None);
+        let Some(SampleLevel::Explicit(raised)) = level else { panic!("an explicit level") };
+        let max = out.iter().find(|inst| inst.result_id == Some(raised)).expect("the raised level");
+        assert_eq!(max.class.opcode, Op::ExtInst);
+        assert_eq!(max.operands.get(1), Some(&Operand::LiteralExtInstInteger(40)));   // GLSL.std.450 FMax
+        assert_eq!(max.operands.get(3), Some(&Operand::IdRef(clamp)));
+    }
+
+    #[test]
+    fn no_clamp_without_the_device_or_with_a_zero() {
+        let mut off = ctx(Stage::Fragment, false);
+        let args = sample_args(&mut off, false, 0.0, 2.0);
+        assert_eq!(sample_level_min_lod_clamp(&off, false, &args), None);
+        let mut on = ctx(Stage::Fragment, true);
+        let zero = sample_args(&mut on, false, 0.0, 0.0);
+        assert_eq!(sample_level_min_lod_clamp(&on, false, &zero), None);
+    }
 }

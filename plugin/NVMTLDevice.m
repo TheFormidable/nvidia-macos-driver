@@ -1277,30 +1277,44 @@ static int nvmtl_varying_one_location(id v) {
     id t = [v isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)v)[@"type_name"] : nil;
     return ![t isKindOfClass:[NSString class]] || ([(NSString *)t rangeOfString:@"x"].location == NSNotFound && [(NSString *)t rangeOfString:@"["].location == NSNotFound);
 }
-static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {
+// The link of a pipeline's varyings: the fragment input at reflected Location L reads the vertex output of the same name
+// (user semantic, or field name), remap[L], and one no vertex output writes takes a Location no vertex output uses. 1 when
+// a Location moves, 0 when none does or the fragment reads none, -1 when the pipeline keeps its Locations (said once).
+// The SPIR-V road moves the fragment module's Input Locations by it (nvmtl_varying_link); the AIR-to-NIR road hands the
+// frontend the moved Locations (NVMTLAirNir.m). *unmatchedOut: fragment inputs no vertex output writes.
+static int nvmtl_varying_remap(NVMTLFunction *vf, NVMTLFunction *ff, uint32_t remap[128], uint8_t have[128], int *unmatchedOut) {
     NSDictionary *vr = nvmtl_function_reflection(vf), *fr = nvmtl_function_reflection(ff);
     NSArray *vv = [vr isKindOfClass:[NSDictionary class]] ? vr[@"varyings"] : nil, *fv = [fr isKindOfClass:[NSDictionary class]] ? fr[@"varyings"] : nil;
-    if (![fv isKindOfClass:[NSArray class]] || !fv.count) return nil;
-    if (![vv isKindOfClass:[NSArray class]]) { static int said; if (!said++) nvlog("varylink: %s has no reflected varyings - %s keeps its own Locations", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?"); return nil; }
     enum { NL = 128 };
-    uint8_t used[NL] = { 0 }, have[NL] = { 0 }; uint32_t remap[NL]; for (uint32_t i = 0; i < NL; i++) remap[i] = i;
+    for (uint32_t i = 0; i < NL; i++) { remap[i] = i; have[i] = 0; }
+    if (unmatchedOut) *unmatchedOut = 0;
+    if (![fv isKindOfClass:[NSArray class]] || !fv.count) return 0;
+    if (![vv isKindOfClass:[NSArray class]]) { static int said; if (!said++) nvlog("varylink: %s has no reflected varyings - %s keeps its own Locations", vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?"); return -1; }
+    uint8_t used[NL] = { 0 };
     NSMutableDictionary<NSString *, NSNumber *> *out = [NSMutableDictionary new];
     for (id v in vv) {
         NSNumber *l = [v isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)v)[@"location"] : nil;
-        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(v)) { static int said; if (!said++) nvlog("varylink: a vertex varying of %s is not one Location in 0..127 - pipeline keeps its Locations", vf->_fname.UTF8String ?: "?"); return nil; }
+        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(v)) { static int said; if (!said++) nvlog("varylink: a vertex varying of %s is not one Location in 0..127 - pipeline keeps its Locations", vf->_fname.UTF8String ?: "?"); return -1; }
         used[l.unsignedIntValue] = 1; NSString *k = nvmtl_varying_key(v); if (k) out[k] = l;
     }
     uint32_t next = 0; int change = 0, unmatched = 0;
     for (id f in fv) {
         NSNumber *l = [f isKindOfClass:[NSDictionary class]] ? ((NSDictionary *)f)[@"location"] : nil;
-        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(f)) { static int said; if (!said++) nvlog("varylink: a fragment varying of %s is not one Location in 0..127 - pipeline keeps its Locations", ff->_fname.UTF8String ?: "?"); return nil; }
+        if (![l isKindOfClass:[NSNumber class]] || l.unsignedIntValue >= NL || !nvmtl_varying_one_location(f)) { static int said; if (!said++) nvlog("varylink: a fragment varying of %s is not one Location in 0..127 - pipeline keeps its Locations", ff->_fname.UTF8String ?: "?"); return -1; }
         uint32_t L = l.unsignedIntValue, T; NSString *k = nvmtl_varying_key(f); NSNumber *to = k ? out[k] : nil;
         if (to) T = to.unsignedIntValue;
-        else { while (next < NL && used[next]) next++; if (next >= NL) return nil; T = next; used[next] = 1; unmatched++; }
-        if (have[L]) return nil;
+        else { while (next < NL && used[next]) next++; if (next >= NL) return -1; T = next; used[next] = 1; unmatched++; }
+        if (have[L]) return -1;
         have[L] = 1; remap[L] = T; if (T != L) change = 1;
     }
-    if (!change) return nil;
+    if (unmatchedOut) *unmatchedOut = unmatched;
+    return change;
+}
+static NSData *nvmtl_varying_link(NVMTLFunction *vf, NVMTLFunction *ff) {
+    enum { NL = 128 };
+    uint32_t remap[NL]; uint8_t have[NL]; int unmatched = 0;
+    const int change = nvmtl_varying_remap(vf, ff, remap, have, &unmatched);
+    if (change <= 0) return nil;
     const uint32_t *w = (const uint32_t *)ff->_spirv.bytes; size_t n = ff->_spirv.length / 4;
     if (n < 5 || w[0] != 0x07230203u) return nil;
     NSMutableData *md = [ff->_spirv mutableCopy]; uint32_t *m = (uint32_t *)md.mutableBytes;
@@ -2444,6 +2458,36 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     nvlog_every("pipeline key: %s %s spv-fnv %08x air %s%s%s pipe %p", stage, fn->_fname.UTF8String ?: "-", x, air,
           fn->_specName.length ? " fc " : "", fn->_specName.length ? fn->_specName.UTF8String : "", pipe);
 }
+// The AIR-to-NIR road for render pipelines (NVMTLAirNir.m, imported at the end of this file)
+BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFrag, uint32_t a8mask, BOOL amplified,
+                                 id samplePayload, BOOL tess, NSString **why);
+int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
+                                  uint32_t samples, NSString *vdesc, const nvk_tess_desc *td, nvk_pipeline *out, NSString **why);
+// A tessellation pipeline's description (nvk_tess_desc) for vertex function vf of patch type tpt, with tcps control
+// points read from its module (0: none known), as both roads make it: nil, or why the pipeline is refused
+static NSString *nvmtl_tess_desc_make(NVMTLFunction *vf, MTLRenderPipelineDescriptor *d, uint32_t tpt, uint32_t tcps, nvk_tess_desc *td)
+{
+    if (NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorFormat, MTLTessellationFactorFormatHalf) != MTLTessellationFactorFormatHalf)
+        return @"tess pipeline: REFUSED - tessellationFactorFormat is not Half";
+    NSDictionary *tr = nvmtl_function_reflection(vf)[@"tessellation"]; if (![tr isKindOfClass:[NSDictionary class]]) tr = nil;
+    NSNumber *rn = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
+    NSNumber *ra = [tr[@"amplification_count"] isKindOfClass:[NSNumber class]] ? tr[@"amplification_count"] : nil;
+    NSDictionary *ri = [tr[@"instance_id"] isKindOfClass:[NSDictionary class]] ? tr[@"instance_id"] : nil;
+    NSNumber *rl = [ri[@"location"] isKindOfClass:[NSNumber class]] ? ri[@"location"] : nil;
+    if (ra.unsignedIntValue > 1) return @"tess pipeline: REFUSED - vertex amplification with tessellation is not carried";
+    uint32_t n = rn.unsignedIntValue ? rn.unsignedIntValue : tcps;
+    if (rn.unsignedIntValue && tcps && rn.unsignedIntValue != tcps)
+        return [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ reflects %u control points and its module reads %u", vf->_fname, rn.unsignedIntValue, tcps];
+    if (!n || n > 32)
+        return [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ has no fixed control-point count in 1..32 (%u)", vf->_fname, n];
+    if (!tr) nvlog("tess pipeline: %s has no reflection - its instance_id Location is inferred from the interface", vf->_fname.UTF8String ?: "?");
+    float mf = (float)NVMTL_SINCE(10.12, NSUInteger, d.maxTessellationFactor, 16); if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
+    *td = (nvk_tess_desc){ tpt, n, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationPartitionMode, 0), (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationOutputWindingOrder, 0),
+        (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorStepFunction, 0), NVMTL_SINCE(10.12, BOOL, d.isTessellationFactorScaleEnabled, NO) ? 1u : 0u, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationControlPointIndexType, 0),
+        mf, rl ? rl.intValue : -1 };
+    return nil;
+}
+void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, NSString *why, uint64_t ns);
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
     // Work on a copy: some descriptor getters (vertexLinkedFunctions, ...) create their object on first read, and the
@@ -2495,13 +2539,17 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         }
         rt.cfmt[i] = svk; rt.ncol = i + 1;
     }
+    BOOL dualSrc = NO;
     for (uint32_t i = 0; i < rt.ncol; i++) {
         const nvk_blend_state *b = &rt.blend[i];
         int dual = b->enabled && ((b->src_rgb >= 15 && b->src_rgb <= 18) || (b->dst_rgb >= 15 && b->dst_rgb <= 18) ||
                                   (b->src_alpha >= 15 && b->src_alpha <= 18) || (b->dst_alpha >= 15 && b->dst_alpha <= 18));
         if (!dual) continue;
         if (i != 0) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u uses a dual-source factor; only attachment 0 may (Metal and Vulkan alike)", i]);
-        if (!nvmtl_spirv_has_index1(ff->_spirv.bytes, ff->_spirv.length))
+        // a fragment function newFunctionWithName: made without the translator has no SPIR-V yet: the road asks the
+        // frontend's result instead (NVMTL_AIR_NIR_FS_DUAL_SOURCE), and the SPIR-V road below checks the module it makes
+        dualSrc = YES;
+        if (!ff->_spirvLazy && !nvmtl_spirv_has_index1(ff->_spirv.bytes, ff->_spirv.length))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ uses a dual-source blend factor and its fragment SPIR-V has no Index 1 output (the translator predates dual-source)", ff->_fname]);
         static int said; if (said++ < 4) nvlog("pipeline: par2 dual-source blending on %s", ff->_fname.UTF8String);
     }
@@ -2534,15 +2582,18 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
         [vdesc appendFormat:@" a%lu=fmt%lu@buf%lu+%lu(stride %lu step %lu/%lu)", (unsigned long)a, (unsigned long)ad.format, (unsigned long)bi,
             (unsigned long)ad.offset, (unsigned long)ld.stride, (unsigned long)ld.stepFunction, (unsigned long)ld.stepRate];
     }
+    // _vfn/_ffn, what a draw binds the embedded arguments and constexpr samplers of: the stages the pipeline is built from,
+    // the linked ones (the same objects as the descriptor's when nothing is linked); a linked function's own constexpr
+    // samplers are in the linked stage's reflection only (the translator lists them since round 8, r_linksamp)
     ps->_vdesc = vdesc; ps->_descriptor = [d copy];
-    ps->_vfn = ps->_descriptor.vertexFunction; ps->_ffn = ps->_descriptor.fragmentFunction;
+    ps->_vfn = vf; ps->_ffn = noFrag ? ps->_descriptor.fragmentFunction : ff;
     /* _descriptor keeps the caller's (unlinked) functions; a pixel-sampler variant re-translates from these, the
      * stages the pipeline was actually built from (RenderBox's custom_fn fragments only translate once linked). */
     ps->_linkedVert = vf; ps->_linkedFrag = noFrag ? nil : ff;
-    if (!vf->_spirv.length || !ff->_spirv.length)
+    if (!nvmtl_function_has_spirv(vf) || !nvmtl_function_has_spirv(ff))
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"pipeline: REFUSED — %@ is a visible function, not an entry point (vertex %lu B, fragment %lu B)",
-            !vf->_spirv.length ? vf->_fname : ff->_fname,
+            !nvmtl_function_has_spirv(vf) ? vf->_fname : ff->_fname,
             (unsigned long)vf->_spirv.length, (unsigned long)ff->_spirv.length]);
     NVMTLFunction *ffx = ff;   // the fragment stage as built: an A8-target variant when a colour attachment is A8Unorm
     ps->_a8mask = a8mask;
@@ -2562,9 +2613,10 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     if (nvmtl_vk_multiview_views() && [d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1) {
         const uint32_t want = (uint32_t)d.maxVertexAmplificationCount, mask = nvmtl_mv_mask_for_count(want, nvmtl_vk_multiview_views());
         if (!mask) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - vertex amplification count %u is more views than this device can run in one pass (%u)", want, nvmtl_vk_multiview_views()]);
-        if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &(uint32_t){0}, &(uint32_t){0}))
+        NSData *vspa = nvmtl_function_spirv(vf, "vertex amplification");
+        if (nvmtl_spirv_tess_info(vspa.bytes, vspa.length, &(uint32_t){0}, &(uint32_t){0}))
             return nvmtl_fail(err, @"pipeline: REFUSED - vertex amplification with tessellation is not carried");
-        const char *mvwhy = nvmtl_mv_vertex_refusal(vf->_spirv.bytes, vf->_spirv.length / 4);
+        const char *mvwhy = nvmtl_mv_vertex_refusal(vspa.bytes, vspa.length / 4);
         if (mvwhy) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: REFUSED - %s (%@)", mvwhy, vf->_fname]);
         NSString *mw = nil;
         if (vf->_air) {
@@ -2582,27 +2634,45 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
     }
     // a descriptor without rasterSampleCount answers the older sampleCount message, sent by name since that property is deprecated
     uint32_t rsc = (uint32_t)([d respondsToSelector:@selector(rasterSampleCount)] ? d.rasterSampleCount : ((NSUInteger (*)(id, SEL))objc_msgSend)(d, @selector(sampleCount))); if (!rsc) rsc = 1;
+    // AIR to NIR first (NVMTLAirNir.m): NVK translates both stages' AIR itself. A pipeline either stage of which it refuses,
+    // one that needs a SPIR-V rewrite of its stages, or one NVK will not make, takes the SPIR-V road below, unchanged.
+    { NSString *nirWhy = nil; const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      const BOOL amplified = rt.view_mask != 0 || ([d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1);
+      // a post-tessellation vertex function, as its reflection says (the frontend's for one made without the translator,
+      // the translator's otherwise): the pipeline's tessellation as the SPIR-V road makes it below, or that road's refusal
+      NSDictionary *vtr = nvmtl_function_reflection(vf)[@"tessellation"];
+      const BOOL tess = [vtr isKindOfClass:[NSDictionary class]];
+      const uint32_t vpt = !tess ? 0 : [vtr[@"domain"] isEqual:@"Quad"] ? 2 : [vtr[@"domain"] isEqual:@"Triangle"] ? 1 : 0;
+      nvk_tess_desc rtd; memset(&rtd, 0, sizeof rtd);
+      NSString *tessNo = !tess ? nil : vpt ? nvmtl_tess_desc_make(vf, d, vpt, 0, &rtd) : @"a patch domain the plugin does not draw";
+      const BOOL onNir = nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, tess, &nirWhy) &&
+                         (!tessNo || (nirWhy = tessNo, NO)) &&
+                         !nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, tess ? &rtd : NULL, &ps->_p, &nirWhy);
+      nvmtl_air_nir_render_note(vf, noFrag ? nil : ff, onNir, onNir ? nil : nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+      if (onNir) {
+          ps->_road = 1;
+          nvlog("newRenderPipelineStateWithDescriptor: -> %p (VkPipeline from the AIR of %s and %s, AIR to NIR)",
+                (__bridge void *)ps, vf->_fname.UTF8String ?: "?", ff->_fname.UTF8String ?: "?");
+          nvmtl_render_keep_linked(ps, vf, ff);
+          if (NVMTL_SINCE(10.14, BOOL, d.supportIndirectCommandBuffers, NO)) nvmtl_icb_register_pipeline(ps, NO);
+          return ps;
+      }
+      // a pixel-sampler variant's stages made for the road only (NVMTLAirNir.m): the translator's variant is made instead
+      if (vf->_roadOnly || ff->_roadOnly)
+          return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: the AIR-to-NIR road does not make this sampler variant: %@", nirWhy ?: @"?"]); }
+    // The SPIR-V road: a stage newFunctionWithName: made without the translator (phase 4) is translated now
+    NSData *vsp = nvmtl_function_spirv(vf, "its render pipeline takes the SPIR-V road");
+    if (ffx == ff) (void)nvmtl_function_spirv(ff, "its render pipeline takes the SPIR-V road");
+    if (!vsp.length || !ffx->_spirv.length)
+        return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ does not translate to SPIR-V", !vsp.length ? vf->_fname : ff->_fname]);
+    if (dualSrc && !nvmtl_spirv_has_index1(ffx->_spirv.bytes, ffx->_spirv.length))
+        return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ uses a dual-source blend factor and its fragment SPIR-V has no Index 1 output (the translator predates dual-source)", ff->_fname]);
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
-        if (NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorFormat, MTLTessellationFactorFormatHalf) != MTLTessellationFactorFormatHalf)
-            return nvmtl_fail(err, @"tess pipeline: REFUSED - tessellationFactorFormat is not Half");
-        NSDictionary *tr = nvmtl_function_reflection(vf)[@"tessellation"]; if (![tr isKindOfClass:[NSDictionary class]]) tr = nil;
-        NSNumber *rn = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
-        NSNumber *ra = [tr[@"amplification_count"] isKindOfClass:[NSNumber class]] ? tr[@"amplification_count"] : nil;
-        NSDictionary *ri = [tr[@"instance_id"] isKindOfClass:[NSDictionary class]] ? tr[@"instance_id"] : nil;
-        NSNumber *rl = [ri[@"location"] isKindOfClass:[NSNumber class]] ? ri[@"location"] : nil;
-        if (ra.unsignedIntValue > 1) return nvmtl_fail(err, @"tess pipeline: REFUSED - vertex amplification with tessellation is not carried");
-        uint32_t n = rn.unsignedIntValue ? rn.unsignedIntValue : tcps;
-        if (rn.unsignedIntValue && tcps && rn.unsignedIntValue != tcps)
-            return nvmtl_fail(err, [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ reflects %u control points and its module reads %u", vf->_fname, rn.unsignedIntValue, tcps]);
-        if (!n || n > 32)
-            return nvmtl_fail(err, [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ has no fixed control-point count in 1..32 (%u)", vf->_fname, n]);
-        if (!tr) nvlog("tess pipeline: %s has no reflection - its instance_id Location is inferred from the interface", vf->_fname.UTF8String ?: "?");
-        float mf = (float)NVMTL_SINCE(10.12, NSUInteger, d.maxTessellationFactor, 16); if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
-        nvk_tess_desc td = { tpt, n, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationPartitionMode, 0), (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationOutputWindingOrder, 0),
-            (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorStepFunction, 0), NVMTL_SINCE(10.12, BOOL, d.isTessellationFactorScaleEnabled, NO) ? 1u : 0u, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationControlPointIndexType, 0),
-            mf, rl ? rl.intValue : -1 };
+        nvk_tess_desc td;
+        NSString *tno = nvmtl_tess_desc_make(vf, d, tpt, tcps, &td);
+        if (tno) return nvmtl_fail(err, tno);
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, &td, &ps->_p);
     } else {
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, NULL, &ps->_p);
@@ -2692,14 +2762,17 @@ id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32
         free(fidx); free(fsz); free(fpay);
         id<MTLComputePipelineState> cps = nil;
         if (spv) {
-            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel";
+            // the rewrite is a compute kernel's AIR (read_write textures at 120 + A, the threadgroup's position): it may
+            // take the AIR-to-NIR road as any kernel does (round 11), the translator's SPIR-V of it the fallback
+            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel"; v->_spirvOnly = NO;
             NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
             if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
         }
         if (!tp->_tileCps) tp->_tileCps = [NSMutableDictionary new];
         tp->_tileCps[key] = cps ?: (id)[NSNull null];
         if (!cps && why) *why = w ?: @"tile function translation failed";
-        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built", tp->_tileFn->_fname.UTF8String ?: "?", tw, th);
+        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built (%s)", tp->_tileFn->_fname.UTF8String ?: "?", tw, th,
+                       [(id)cps isKindOfClass:[NVMTLComputePipelineState class]] && ((NVMTLComputePipelineState *)cps)->_road ? "AIR to NIR" : "SPIR-V");
         return cps;
     }
 }
@@ -2954,6 +3027,10 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
           linear ? "linear" : "nearest", repeat ? "repeat" : "clamp");
     return s; }
 
+// The AIR-to-NIR road for compute pipelines (NVMTLAirNir.m, imported at the end of this file)
+BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why);
+NVMTLComputePipelineState *nvmtl_air_nir_pipeline(NVMTLFunction *f, NSDictionary *tgLen, NSString **why);
+void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why, uint64_t ns);
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)fn error:(NSError **)err {
     if (err) *err = nil;
     if (nvmtl_vk_init()) return nvmtl_fail(err, @"newComputePipelineState: Vulkan is not up in this process");
@@ -2985,12 +3062,13 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
               f->_fname.UTF8String, (__bridge void *)ps);
         return ps;
     }
-    if (!f || !f->_spirv) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
+    if (!f || !nvmtl_function_has_spirv(f)) return nvmtl_fail(err, @"newComputePipelineState: function has no SPIR-V");
     // A replacement module for one translated kernel, from a whole file (a developer override). The application profile's
     // kernel edit is applied later, where every compute pipeline is created (nvmtl_vk_compute_pipeline_create_g).
     const char *compatPath = getenv("NVMTL_BDA_PROBE_FILE");
     static char compatShaderKey;
     if (compatPath && !objc_getAssociatedObject(f, &compatShaderKey)) {
+        (void)nvmtl_function_spirv(f, "NVMTL_BDA_PROBE_FILE hashes it");
         uint32_t hash = 2166136261u;
         for (NSUInteger i = 0; i < f->_spirv.length; i++) { hash ^= ((const uint8_t *)f->_spirv.bytes)[i]; hash *= 16777619u; }
         const char *targetText = getenv("NVMTL_BDA_PROBE_HASH");
@@ -3012,12 +3090,27 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
                                         userInfo:@{ NSLocalizedDescriptionKey: @"function is not a kernel" }];
         return nil;
     }
-    NVMTLComputePipelineState *ps = [NVMTLComputePipelineState new];
+    // AIR to NIR first (NVMTLAirNir.m): NVK translates the kernel's AIR itself. A kernel it refuses, or one NVK will not
+    // make a pipeline of, takes the SPIR-V road below exactly as before; NVMTL_AIR_NIR=0 sends every kernel there.
+    NSString *nirWhy = nil;
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    NVMTLComputePipelineState *ps = nvmtl_air_nir_wanted(f, objc_getAssociatedObject(f, &compatShaderKey) != nil, &nirWhy)
+                                  ? nvmtl_air_nir_pipeline(f, nil, &nirWhy) : nil;
+    if (ps) {
+        nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
+        nvmtl_air_nir_note(f, 1, NO, nil, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
+        nvlog("newComputePipelineStateWithFunction: %s -> %p (AIR to NIR)", f->_fname.UTF8String, (__bridge void *)ps);
+    } else {
+    ps = [NVMTLComputePipelineState new];
     ps->_function = f;
     nvmtl_pipeline_key_log(f, "kernel", &ps->_p);
     ps->_attrT = nvmtl_air_max_tg(f);
+    // The SPIR-V road: a kernel newFunctionWithName: made without the translator (phase 4) is translated now
+    if (!nvmtl_function_spirv(f, nirWhy ? "its pipeline takes the SPIR-V road" : "its pipeline takes the SPIR-V road (the road is off)").length)
+        return nvmtl_fail(err, [NSString stringWithFormat:@"newComputePipelineState: %@ does not translate to SPIR-V", f->_fname]);
     if (nvmtl_vk_compute_pipeline_create(f->_spirv.bytes, f->_spirv.length, &ps->_p)) {
         return nvmtl_fail(err, @"newComputePipelineState: vkCreateComputePipelines FAILED"); }
+    nvmtl_air_nir_note(f, 0, NO, nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
     if (g_app_edit_last) {
         objc_setAssociatedObject(ps, &g_app_edit_ps_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         nvlog("profile: %s: edited kernel %s (module %08x -> %08x)", g_app_profile->exe, f->_fname.UTF8String,
@@ -3025,6 +3118,7 @@ static void nvmtl_log_compute_descriptor(MTLComputePipelineDescriptor *d) {
     }
     nvlog("newComputePipelineStateWithFunction: %s -> %p (%lu B of SPIR-V)",
           f->_fname.UTF8String, (__bridge void *)ps, (unsigned long)f->_spirv.length);
+    }
     nvmtl_vendor_attach_sass(self, ps, f);
     { id apple = nvmtl_vendor_apple_pipeline(self, f); if (apple) return apple; }
     return ps; }
@@ -3424,7 +3518,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
         NSData *ospv = nvmtl_mesh_translate_fc(oll, @"kernel", of->_fc, &w);
         if (!ospv) { *why = [NSString stringWithFormat:@"object \"%@\" lowered kernel did not translate: %@", of->_fname, w]; return nil; }
         NVMTLFunction *okf = [NVMTLFunction new];
-        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib;
+        okf->_spirv = ospv; okf->_fname = of->_fname; okf->_stage = @"kernel"; okf->_air = oll; okf->_lib = of->_lib; okf->_spirvOnly = YES;
         NVMTLComputePipelineState *op = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:okf error:&pe];
         if (!op) { *why = [NSString stringWithFormat:@"object \"%@\": no compute pipeline (%@)", of->_fname, pe.localizedDescription ?: @"?"]; return nil; }
         *oout = op;
@@ -3434,7 +3528,7 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
     NSData *vspv = nvmtl_mesh_translate(vll, @"vertex", &w);
     if (!vspv) { *why = [NSString stringWithFormat:@"\"%@\" generated vertex (mode %u) did not translate: %@", mf->_fname, mode, w]; return nil; }
     NVMTLFunction *kf = [NVMTLFunction new];
-    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib;
+    kf->_spirv = kspv; kf->_fname = mf->_fname; kf->_stage = @"kernel"; kf->_air = kll; kf->_lib = mf->_lib; kf->_spirvOnly = YES;
     NVMTLComputePipelineState *kp = (NVMTLComputePipelineState *)[self newComputePipelineStateWithFunction:kf error:&pe];
     if (!kp) { *why = [NSString stringWithFormat:@"\"%@\" lowered kernel: no compute pipeline (%@)", mf->_fname, pe.localizedDescription ?: @"?"]; return nil; }
     NVMTLFunction *vf = [NVMTLFunction new];
@@ -3536,3 +3630,4 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 #import "NVMTLVendorCompiler.m"
 #include "nvmtl_vk.c"
 #import "NVMTLSass.m"
+#import "NVMTLAirNir.m"

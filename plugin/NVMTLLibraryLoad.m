@@ -159,6 +159,9 @@ static int nvmtl_xlate_ready(void) {
         // SPIR-V never shares a cache entry with the other mode.
         { extern int nvmtl_typed_dummies_wanted(void);
           if (h && strcmp(gXlateTag, "untagged") && nvmtl_typed_dummies_wanted()) strlcat(gXlateTag, "-td1", sizeof gXlateTag); }
+        // So does a device that applies a minimum-LOD clamp (the translator's capability bit 4, set below)
+        { extern int nvmtl_vk_min_lod(void);
+          if (h && strcmp(gXlateTag, "untagged") && nvmtl_vk_min_lod()) strlcat(gXlateTag, "-ml1", sizeof gXlateTag); }
         // So does the translator's way back from the whole-object views of pull request 524 of the original project,
         // NVMTL_WHOLE_VIEWS=0: without its mark, a module cached with the views on would still be served after they
         // were turned off in the settings file.
@@ -208,8 +211,9 @@ static int nvmtl_xlate_ready(void) {
         void (*setcaps)(uint32_t) = (void (*)(uint32_t))dlsym(h, "nvmtl_translate_set_caps");
         // Bits 0/1: formatless storage images. Bit 2: this plugin has no rasterization rate maps.
         // Bit 3: heap slots 1..5 are reserved for typed dummies (nvmtl_vk.c), a null resource id may be redirected to them.
-        { extern int nvmtl_typed_dummies_wanted(void);
-          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u)); }
+        // Bit 4: the device applies a sample's minimum-LOD clamp (shaderResourceMinLod).
+        { extern int nvmtl_typed_dummies_wanted(void); extern int nvmtl_vk_min_lod(void);
+          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u) | (nvmtl_vk_min_lod() ? 16u : 0u)); }
         if (!setcaps) nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");
@@ -2676,20 +2680,18 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
             function->_embedded = @[];
             return function->_embedded;
         }
-        uint8_t *j = NULL; size_t jn = 0; char e[512] = { 0 };
-        if (!nvmtl_xlate_ready() || !xlate_refl) {
+        if (!function->_nrefl && (!nvmtl_xlate_ready() || !xlate_refl)) {
             nvlog("embedded: no reflection in this translator — %s's argument-buffer resources CANNOT be resolved", who);
             function->_embedded = @[];
             return function->_embedded;
         }
-        (void)j; (void)jn;
-        NSData *d = nvmtl_reflect_air_cached(function, ll, stage, e, sizeof e);
-        if (!d) {
-            nvlog("embedded: reflection for %s FAILED: %s — resources NOT resolved", who, e);
+        // the function's reflection: the frontend's for one newFunctionWithName: made without the translator (phase 4)
+        NSDictionary *refl = nvmtl_function_reflection(function);
+        if (!refl) {
+            nvlog("embedded: reflection for %s FAILED — resources NOT resolved", who);
             function->_embedded = @[];
             return function->_embedded;
         }
-        NSDictionary *refl = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
         NSArray *all = refl[@"bindings"];
         NSMutableArray *mine = [NSMutableArray new];
         if ([all isKindOfClass:[NSArray class]]) {
@@ -2709,7 +2711,7 @@ NSArray<NSDictionary *> *nvmtl_embedded_bindings(NVMTLFunction *function)
 }
 
 NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count && !g_translate_variant_forced) return fn->_spirv;
+    if (!states.count && !tgLen.count && !g_translate_variant_forced) return nvmtl_function_spirv(fn, "a variant without specialization");
     if (!fn->_air || !nvmtl_xlate_ready()) { if(err)*err=@"specialization has no AIR or translator";return nil; }
     if (states.count && !xlate_sampler) { if(err)*err=@"sampler specialization has no translator";return nil; }
     if (tgLen.count && !xlate_tglen) { if(err)*err=@"this translator cannot size threadgroup memory";return nil; }
@@ -2767,7 +2769,7 @@ NSData *nvmtl_translate_variant_uncached(NVMTLFunction *fn, NSDictionary *states
 }
 
 NSData *nvmtl_translate_variant(NVMTLFunction *fn, NSDictionary *states, NSDictionary *tgLen, NSString **err) {
-    if (!states.count && !tgLen.count) return fn->_spirv;
+    if (!states.count && !tgLen.count) return nvmtl_function_spirv(fn, "a variant without specialization");
     if (!fn->_air || !nvmtl_xlate_ready()) return nvmtl_translate_variant_uncached(fn,states,tgLen,err);
     NSDictionary *config=@{@"stage":fn->_stage ?: @"",@"entry":fn->_fname ?: @"",
         @"constants":fn->_fc ?: @{},@"samplers":states ?: @{},@"threadgroup":tgLen ?: @{}};
@@ -2802,7 +2804,7 @@ NSData *nvmtl_translate_samplers(NVMTLFunction *fn, NSDictionary *states, uint32
 // amp: the vertex amplification count of the pipeline (2 or more makes a multiview variant; 0 and 1 are the ordinary shader).
 NSData *nvmtl_translate_samplers_amp(NVMTLFunction *fn, NSDictionary *states, uint32_t a8, uint32_t amp, NSString **err) {
     if (amp < 2) amp = 0;
-    if (!states.count && !a8 && !amp) return fn->_spirv;
+    if (!states.count && !a8 && !amp) return nvmtl_function_spirv(fn, "a sampler variant of another stage");
     if (!fn->_air && !states.count && !amp) return fn->_spirv;   // already a specialised variant (no AIR kept): nothing more to apply
     if (!fn->_air || !nvmtl_xlate_ready() || !xlate_sampler) { if(err)*err=@"sampler specialization has no AIR or translator";return nil; }
     NSMutableDictionary *jd=[@{@"samplers":states ?: @{},@"constants":fn->_fc ?: @{},@"a8_targets":@(a8)} mutableCopy];
@@ -2979,6 +2981,7 @@ NVMTLFunction *nvmtl_kernel_with_stage_in(NVMTLFunction *fn, MTLStageInputOutput
     }
     NVMTLFunction *sf = [NVMTLFunction new];
     sf->_spirv = spirv; sf->_fname = fn->_fname; sf->_stage = fn->_stage; sf->_air = fn->_air; sf->_fc = fn->_fc;
+    sf->_spirvOnly = YES;   // its SPIR-V reads the stage-in layout the translator was given; its AIR does not
     sf->_lib = fn->_lib; sf->_fcv = fn->_fcv; sf->_specName = fn->_specName; sf->_needsLink = NO;
     return sf;
 }

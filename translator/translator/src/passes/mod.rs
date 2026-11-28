@@ -112,6 +112,10 @@ pub struct TransformOptions {
     /// The plugin reserved heap slots 1..5 for typed dummies: a null resource id reads the dummy of the declared
     /// image dimensionality instead of slot 0 (reflect::BINDLESS_DUMMY_SLOT_*).
     pub typed_dummy_slots: bool,
+    /// The device applies a sample's minimum-LOD clamp (Vulkan shaderResourceMinLod): an implicit-LOD sample's
+    /// `min_lod_clamp` is its MinLod operand, an explicit level is raised to it. Without it a non-gradient sample's
+    /// clamp is not applied (as before).
+    pub min_lod_clamp: bool,
     pub runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
     pub runtime_storage_image_states:
         [Option<RuntimeStorageImageState>; TEXTURE_ARGUMENT_COUNT_USIZE],
@@ -134,6 +138,7 @@ impl Default for TransformOptions {
             raster_sample_count: None,
             no_rasterization_rate_maps: false,
             typed_dummy_slots: false,
+            min_lod_clamp: false,
             vertex_amplification_count: 1,
             kernel_stage_in: KernelStageIn::default(),
             runtime_sampler_states: [None; SAMPLER_ARGUMENT_COUNT_USIZE],
@@ -400,6 +405,9 @@ struct Ctx {
     image_array_vars: HashMap<Word, (Word, (Dim, bool), ImageComp, bool)>,
     /// sampled texture-array entry parameters -> (Metal texture index of element 0, element count)
     image_array_base: HashMap<Word, (u32, u32)>,
+    /// a written texture array argument's variable, or a texture_buffer array's -> its first Metal texture index, its
+    /// element count and whether it is written (resources::split_storage_texture_arrays)
+    storage_image_arrays: HashMap<Word, (u32, u32, bool)>,
     sampler_array_vars: HashMap<Word, Vec<Word>>,
     bindless_heap_vars: HashMap<Word, Word>,
     address_table: Option<(Word, Word, Option<Word>)>,
@@ -416,6 +424,7 @@ struct Ctx {
     raster_sample_count: Option<u32>,
     no_rasterization_rate_maps: bool,
     typed_dummy_slots: bool,
+    min_lod_clamp: bool,
     vertex_amplification_count: u32,
     kernel_stage_in: KernelStageIn,
     runtime_sampler_states: [Option<RuntimeSamplerState>; SAMPLER_ARGUMENT_COUNT_USIZE],
@@ -493,6 +502,7 @@ impl Ctx {
             image_storage: HashSet::default(),
             image_array_vars: HashMap::default(),
             image_array_base: HashMap::default(),
+            storage_image_arrays: HashMap::default(),
             sampler_array_vars: HashMap::default(),
             bindless_heap_vars: HashMap::default(),
             address_table: None,
@@ -511,6 +521,7 @@ impl Ctx {
             raster_sample_count: options.raster_sample_count,
             no_rasterization_rate_maps: options.no_rasterization_rate_maps,
             typed_dummy_slots: options.typed_dummy_slots,
+            min_lod_clamp: options.min_lod_clamp,
             vertex_amplification_count: options.vertex_amplification_count,
             kernel_stage_in: options.kernel_stage_in,
             runtime_sampler_states: options.runtime_sampler_states,
@@ -3106,6 +3117,7 @@ pub(crate) fn transform_with_options_and_sidecar(
 
     resources::sink_loop_header_texture_array_loads(&mut ctx, entry_idx);
     resources::route_texture_array_elements_through_heap(&mut ctx, entry_idx);
+    resources::split_storage_texture_arrays(&mut ctx, entry_idx);
     ctx.emit_sidecar.local_pointer_field_stores.clear();
     ctx.emit_sidecar.aggregate_pointer_values.clear();
     finalize(&mut ctx, entry_idx, &stage, frag, vert)?;

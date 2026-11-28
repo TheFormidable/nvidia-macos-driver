@@ -96,6 +96,8 @@ fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pass
     o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
     // Bit 3: the plugin reserved heap slots 1..5 for typed dummies, so a null resource id may be redirected to them.
     o.typed_dummy_slots = CAPS.load(Ordering::Relaxed) & 8 != 0;
+    // Bit 4: the device applies a sample's minimum-LOD clamp (shaderResourceMinLod).
+    o.min_lod_clamp = CAPS.load(Ordering::Relaxed) & 16 != 0;
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,
@@ -1063,7 +1065,8 @@ pub unsafe extern "C" fn nvmtl_lower_buffer_addresses_ex(
     err: *mut c_char, err_len: usize,
 ) -> i32 {
     if data.is_null() || out.is_null() || out_len.is_null() { return -1; }
-    let r = buffer_addresses::lower(std::slice::from_raw_parts(data,len))
+    // flags: 1 the SAFE build (every promise clamped), 2 the table a Uniform block, 8 no buffer kept a descriptor
+    let r = buffer_addresses::lower_keeping(std::slice::from_raw_parts(data,len), flags & 8 == 0)
         .and_then(|v| if flags & 2 != 0 { table_ubo::convert(&v) } else { Ok(v) })
         .and_then(|v| align_guard::guard(&v, flags & 1 != 0));
     match r {

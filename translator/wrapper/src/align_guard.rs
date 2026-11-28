@@ -20,8 +20,11 @@ fn scalar_align(ty: u32, defs: &HashMap<u32, Instruction>, depth: usize) -> Opti
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report { pub mask: u32, pub req: u32, pub untraceable: bool, pub accesses: u32, pub clamped: u32 }
 
-fn root_binding(mut p: u32, local: &HashMap<u32, Instruction>, table: u32, consts: &HashMap<u32, u32>) -> Option<u32> {
+fn root_binding(mut p: u32, local: &HashMap<u32, Instruction>, table: u32, consts: &HashMap<u32, u32>,
+                kept: &HashMap<u32, u32>) -> Option<u32> {
     for _ in 0..64 {
+        // a buffer the lowering kept a storage-buffer descriptor (kept_roots): its binding
+        if let Some(&b) = kept.get(&p) { return Some(b); }
         let d = local.get(&p)?;
         let ops: Vec<u32> = d.operands.iter().filter_map(id).collect();
         match d.class.opcode {
@@ -64,9 +67,24 @@ pub fn guard(bytes: &[u8], safe: bool) -> Result<(Vec<u8>, Report), String> {
     }).unwrap_or(u32::MAX);
     let mut value_types = HashMap::new();
     for i in m.all_inst_iter() { if let (Some(n), Some(t)) = (i.result_id, i.result_type) { value_types.insert(n, t); } }
+    // the storage buffers of set 0 below binding 32 the lowering kept as descriptors (kept_roots): an access through
+    // one promises its alignment as a physical one does, and a misaligned binding of it is the same hazard
+    let (mut sets, mut binds) = (HashMap::new(), HashMap::new());
+    for a in &m.annotations {
+        match a.operands.as_slice() {
+            [Operand::IdRef(n), Operand::Decoration(Decoration::DescriptorSet), Operand::LiteralBit32(v)] => { sets.insert(*n, *v); }
+            [Operand::IdRef(n), Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(v)] => { binds.insert(*n, *v); }
+            _ => {}
+        }
+    }
+    let kept: HashMap<u32, u32> = m.types_global_values.iter()
+        .filter(|i| i.class.opcode == Op::Variable && i.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer)))
+        .filter_map(|i| { let n = i.result_id?; (sets.get(&n) == Some(&0)).then_some(())?; binds.get(&n).filter(|b| **b < 32).map(|b| (n, *b)) })
+        .collect();
     let psb_pointee = |ptr: u32| -> Option<u32> {
         let t = defs.get(value_types.get(&ptr)?)?;
-        (t.class.opcode == Op::TypePointer && t.operands.first() == Some(&Operand::StorageClass(StorageClass::PhysicalStorageBuffer)))
+        (t.class.opcode == Op::TypePointer && (t.operands.first() == Some(&Operand::StorageClass(StorageClass::PhysicalStorageBuffer))
+            || t.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer))))
             .then(|| id(t.operands.get(1)?)).flatten()
     };
     let mut r = Report::default();
@@ -83,7 +101,10 @@ pub fn guard(bytes: &[u8], safe: bool) -> Result<(Vec<u8>, Report), String> {
                 if scalar.is_some_and(|s| a <= s) { continue; }
                 r.accesses += 1;
                 r.req = r.req.max(a);
-                match root_binding(ptr, &local, table, &consts) {
+                let storage = defs.get(value_types.get(&ptr).unwrap_or(&0))
+                    .is_some_and(|t| t.operands.first() == Some(&Operand::StorageClass(StorageClass::StorageBuffer)));
+                if storage && root_binding(ptr, &local, table, &consts, &kept).is_none() { continue; }   // the table, or no buffer
+                match root_binding(ptr, &local, table, &consts, &kept) {
                     Some(bnd) => r.mask |= 1 << bnd,
                     None => r.untraceable = true,
                 }

@@ -390,29 +390,23 @@ pub(in crate::passes) fn lower_sample(
         _ => spatial.unwrap_or(0),
     };
     let grad3 = sample_gradient_pair(ctx, name, arrayed, args, gradient_lanes)?;
-    let min_lod = grad3.and_then(|(_, _, clamp)| clamp);
+    let mut min_lod = grad3.and_then(|(_, _, clamp)| clamp);
     let grad = grad3.map(|(dx, dy, _)| (dx, dy));
     if min_lod.is_some() {
-        let has = ctx.module.capabilities.iter().any(|inst| {
-            matches!(
-                inst.operands.first(),
-                Some(Operand::Capability(spirv::Capability::MinLod))
-            )
-        });
-        if !has {
-            ctx.module.capabilities.push(Instruction::new(
-                Op::Capability,
-                None,
-                None,
-                vec![Operand::Capability(spirv::Capability::MinLod)],
-            ));
-        }
+        add_min_lod_capability(ctx);
     }
-    let level = if grad.is_some() {
+    let mut level = if grad.is_some() {
         None
     } else {
         find_sample_level(ctx, arrayed, args, &mut out)
     };
+    // a sample with a bias or a level and min_lod_clamp(c): MinLod for an implicit level, the level raised to c for an
+    // explicit one (the clamp was dropped before: the sample read levels below c)
+    if grad.is_none() {
+        if let Some(clamp) = sample_level_min_lod_clamp(ctx, arrayed, args) {
+            (level, min_lod) = apply_sample_min_lod_clamp(ctx, level, is_int_tex, clamp, &mut out);
+        }
+    }
     let (const_offset, dynamic_offset) = if let Some(spatial) = spatial {
         let (const_offset, dynamic_offset) =
             sample_const_or_dynamic_offset(ctx, arrayed, args, spatial as u32)?;

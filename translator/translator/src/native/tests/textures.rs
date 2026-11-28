@@ -419,7 +419,9 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // element 0 of each written array, a known index: that texture's own storage binding, no descriptor array
+    // (resources::split_storage_texture_arrays)
+    assert!(!asm.contains("OpTypeArray"), "{asm}");
     assert!(asm.contains("R32f"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 2, "{asm}");
     assert!(asm.contains("Binding 480"), "{asm}");
@@ -465,10 +467,84 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // an element chosen at run time: the storage heap (set 2, binding 2) at the per-draw table's slot
+    // (resources::split_storage_texture_arrays)
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 2\n"), "{asm}");
+    assert!(asm.contains("OpTypeRuntimeArray"), "{asm}");
     assert!(asm.contains("OpAccessChain"), "{asm}");
     assert!(asm.contains("OpImageWrite"), "{asm}");
     assert!(asm.contains("BuiltIn LocalInvocationIndex"), "{asm}");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn native_dynamic_texture_buffer_arrays_use_the_heap_texel_buffers() {
+    // round 11: an element of an array of texture_buffers chosen at run time was left in the array binding (32 + n with
+    // N elements, 480 + n when written), which the plugin's layout holds with one descriptor: every element but the
+    // first read zeros. Now it is read through the heap's uniform texel buffers (set 2, binding 3) and written through
+    // its storage texel buffers (binding 4), at the slot the per-draw table holds for texture n + min(index, N - 1).
+    let ll = r#"
+%"struct.metal::texture_buffer" = type { ptr addrspace(1) }
+
+define void @tbArrays(ptr readonly byval([3 x ptr addrspace(1)]) %rt, ptr readonly byval([2 x ptr addrspace(1)]) %wt, ptr addrspace(1) noundef readonly %sel, i32 noundef %i) local_unnamed_addr #0 {
+  %wi = zext i32 %i to i64
+  %sp = getelementptr inbounds i32, ptr addrspace(1) %sel, i64 %wi
+  %k = load i32, ptr addrspace(1) %sp, align 4
+  %r3 = urem i32 %k, 3
+  %rw = zext i32 %r3 to i64
+  %rf = getelementptr inbounds [3 x %"struct.metal::texture_buffer"], ptr %rt, i64 0, i64 %rw, i32 0
+  %r = load ptr addrspace(1), ptr %rf, align 8
+  %smp = tail call ptr addrspace(2) @air.get_read_sampler() #2
+  %v = tail call { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1) %r, ptr addrspace(2) %smp, i32 %i, i32 1) #2
+  %c = extractvalue { <4 x float>, i8 } %v, 0
+  %w1 = and i32 %k, 1
+  %ww = zext i32 %w1 to i64
+  %wf = getelementptr inbounds [2 x %"struct.metal::texture_buffer"], ptr %wt, i64 0, i64 %ww, i32 0
+  %w = load ptr addrspace(1), ptr %wf, align 8
+  tail call void @air.write_texture_buffer_1d.v4f32(ptr addrspace(1) %w, i32 %i, <4 x float> %c, i32 2) #1
+  ret void
+}
+
+declare ptr addrspace(2) @air.get_read_sampler() local_unnamed_addr #2
+declare { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1), ptr addrspace(2), i32, i32) local_unnamed_addr #2
+declare void @air.write_texture_buffer_1d.v4f32(ptr addrspace(1), i32, <4 x float>, i32) local_unnamed_addr #1
+
+attributes #0 = { convergent nounwind }
+attributes #1 = { convergent nounwind memory(argmem: write) }
+attributes #2 = { nounwind willreturn memory(argmem: read) }
+
+!air.kernel = !{!0}
+!0 = !{ptr @tbArrays, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 3, !"air.read", !"air.arg_type_name", !"array<texture_buffer<float, read>, 3>", !"air.arg_name", !"tb"}
+!4 = !{i32 1, !"air.texture", !"air.location_index", i32 4, i32 2, !"air.write", !"air.arg_type_name", !"array<texture_buffer<float, write>, 2>", !"air.arg_name", !"wtb"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"sel"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_native_dynamic_texture_buffer_arrays_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 3\n"), "the read array's elements through the heap's uniform texel buffers: {asm}");
+    assert!(asm.contains("Binding 4\n"), "the written array's elements through the heap's storage texel buffers: {asm}");
+    assert!(!asm.contains("Binding 32\n"), "no array binding at texture 0 is left: {asm}");
+    assert!(!asm.contains("Binding 484\n"), "no array binding at written texture 4 is left: {asm}");
+    assert!(asm.contains("OpImageFetch") || asm.contains("OpImageRead"), "{asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
     if std::process::Command::new("spirv-val")
         .arg("--version")
         .output()
@@ -512,12 +588,14 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // the two known elements: textures 0 and 1 at their own storage bindings, as the host binds them (one descriptor
+    // per texture slot), no descriptor array (resources::split_storage_texture_arrays)
+    assert!(!asm.contains("OpTypeArray"), "{asm}");
     assert!(asm.contains("Rgba16f"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 2, "{asm}");
     assert!(
-        asm.contains("OpAccessChain"),
-        "expected fixed descriptor-array element accesses:\n{asm}"
+        asm.contains("Binding 480") && asm.contains("Binding 481"),
+        "expected each element at its own binding:\n{asm}"
     );
     if std::process::Command::new("spirv-val")
         .arg("--version")
@@ -779,8 +857,11 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
-    assert!(asm.contains("Binding 480"), "{asm}");
+    // a written array in an argument buffer, its element chosen at run time: the storage heap by the element's own
+    // handle (round 9: register_embedded_textures routes a written array there; the array binding at 480 lost
+    // every element but the first against the host's one descriptor per slot)
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 2\n"), "{asm}");
     assert!(asm.contains("Rgba16f"), "{asm}");
     assert!(asm.contains("OpAccessChain"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 1, "{asm}");
@@ -5712,6 +5793,54 @@ declare void @air.write_imageblock_slice_to_texture_2d.v4f16(ptr addrspace(1), p
     {
         tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
     }
+}
+
+#[test]
+fn native_multisampled_tile_function_reads_its_samples_in_a_loop() {
+    // Round 12: a tile function that loops over its samples (Apple's compiler gives the rate, then the sample index at
+    // run time) and asks the sample count makes a library function; before, it failed ("unrecognized AIR intrinsic
+    // family: air.get_imageblock_samples", then "requires a constant imageblock data rate")
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+
+define void @tile_ms(%"struct.metal::_imageblock_base" %block, <2 x i16> %tid) {
+entry:
+  %n = call i16 @air.get_imageblock_samples()
+  %none = icmp eq i16 %n, 0
+  br i1 %none, label %done, label %loop
+loop:
+  %s = phi i16 [ 0, %entry ], [ %next, %loop ]
+  %color = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %tid, i32 2, i16 %s)
+  call void @air.store.implicit_imageblock.v4f16(<4 x half> %color, i32 0, <2 x i16> %tid, i32 2, i16 %s)
+  %next = add nuw i16 %s, 1
+  %end = icmp eq i16 %next, %n
+  br i1 %end, label %done, label %loop
+done:
+  ret void
+}
+
+declare i16 @air.get_imageblock_samples()
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16)
+
+!air.kernel = !{!0}
+!0 = !{ptr @tile_ms, !1, !2}
+!1 = !{}
+!2 = !{!3, !5}
+!3 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !4, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Pm, layout_implicit>", !"air.arg_name", !"ib"}
+!4 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
+!5 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_tile_ms_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpImageRead"), "{asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
 }
 
 #[test]

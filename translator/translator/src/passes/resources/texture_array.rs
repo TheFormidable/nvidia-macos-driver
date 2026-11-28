@@ -1399,3 +1399,222 @@ mod tests {
         assert_eq!(body_insts[2].result_id, Some(query));
     }
 }
+
+/// A written texture array argument (array<texture2d<T, access::write>, N> at [[texture(n)]]), or an array of
+/// texture_buffers, is declared as one array binding, which would need N descriptors at one binding: the host's
+/// layout has one per texture slot (a robust driver clamps every element to the first), and element k is the texture
+/// the host binds at index n + k. An element chosen by a constant index becomes that texture's own binding (storage
+/// or sampled), as a single texture's; a written image's chosen at run time is read through the storage heap
+/// (descriptor set 2) at the slot the per-draw table holds for texture n + min(index, N - 1), as
+/// route_texture_array_elements_through_heap reads a sampled element (a texture_buffer's chosen at run time keeps
+/// the array binding). The array variable is dropped once nothing names it.
+pub(crate) fn split_storage_texture_arrays(ctx: &mut Ctx, entry_idx: usize) {
+    if ctx.storage_image_arrays.is_empty() {
+        return;
+    }
+    let const_index = |ctx: &Ctx, id: Word| -> Option<u64> {
+        let inst = ctx
+            .module
+            .types_global_values
+            .iter()
+            .chain(ctx.new_globals.iter())
+            .find(|inst| inst.result_id == Some(id))?;
+        match (inst.class.opcode, inst.operands.first()) {
+            (Op::Constant, Some(Operand::LiteralBit32(v))) => Some(u64::from(*v)),
+            (Op::Constant, Some(Operand::LiteralBit64(v))) => Some(*v),
+            (Op::ConstantNull, _) => Some(0),
+            _ => None,
+        }
+    };
+    let mut sites: Vec<(usize, usize, Word, Word, Word, Word)> = Vec::new();
+    for (block_idx, block) in ctx.module.functions[entry_idx].blocks.iter().enumerate() {
+        for (inst_idx, inst) in block.instructions.iter().enumerate() {
+            if !matches!(inst.class.opcode, Op::AccessChain | Op::InBoundsAccessChain) {
+                continue;
+            }
+            let [Operand::IdRef(var), Operand::IdRef(idx)] = inst.operands.as_slice() else {
+                continue;
+            };
+            let (Some(result), Some(result_ty)) = (inst.result_id, inst.result_type) else {
+                continue;
+            };
+            if ctx.storage_image_arrays.contains_key(var) {
+                sites.push((block_idx, inst_idx, result, result_ty, *var, *idx));
+            }
+        }
+    }
+    let local_types: HashMap<Word, Word> = ctx.module.functions[entry_idx]
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|inst| Some((inst.result_id?, inst.result_type?)))
+        .collect();
+    let mut elements: HashMap<(Word, u32), Word> = HashMap::default();
+    let mut renames: HashMap<Word, Word> = HashMap::default();
+    let mut replacements: HashMap<(usize, usize), Vec<Instruction>> = HashMap::default();
+    let mut kept: HashSet<Word> = HashSet::default();
+    for (block_idx, inst_idx, result, result_ty, var, idx) in sites {
+        let (base, count, written) = ctx.storage_image_arrays[&var];
+        let Some(&(elem_ty, dims, comp, _)) = ctx.image_array_vars.get(&var) else {
+            kept.insert(var);
+            continue;
+        };
+        if let Some(k) = const_index(ctx, idx) {
+            let k = k.min(u64::from(count.saturating_sub(1))) as u32;
+            let element = match elements.get(&(var, k)) {
+                Some(&e) => e,
+                None => {
+                    let binding = if written {
+                        super::bindings::storage_texture_resource_binding(ctx.descriptor_layout, base + k)
+                    } else {
+                        super::bindings::texture_resource_binding(ctx.descriptor_layout, base + k)
+                    };
+                    let Ok(binding) = binding else {
+                        kept.insert(var);
+                        continue;
+                    };
+                    let e = ctx.descriptor_variable(elem_ty, binding);
+                    elements.insert((var, k), e);
+                    e
+                }
+            };
+            renames.insert(result, element);
+            replacements.insert((block_idx, inst_idx), Vec::new());
+            continue;
+        }
+        // an element chosen at run time: through the heap at the slot the per-draw table holds for element
+        // min(index, N - 1), a written image's storage view, or a texture_buffer's texel view (uniform when it is read,
+        // storage when written: the plugin gives a bound texture buffer a heap slot with both)
+        if (!written && dims.0 != spirv::Dim::DimBuffer) || !super::bindless_all_on() || !super::address_table_usable(ctx) {
+            kept.insert(var);
+            continue;
+        }
+        let Ok((table, word_ptr_ty, wide)) = super::ensure_address_table(ctx) else {
+            kept.insert(var);
+            continue;
+        };
+        let uint_ty = ctx.ty_uint();
+        let mut out = Vec::new();
+        let index_ty = local_types.get(&idx).copied().or_else(|| value_result_type(ctx, idx));
+        let width = index_ty.and_then(|ty| type_def_of(ctx, ty)).and_then(|def| {
+            (def.class.opcode == Op::TypeInt).then(|| match def.operands.first() {
+                Some(Operand::LiteralBit32(width)) => Some(*width),
+                _ => None,
+            })?
+        });
+        let index = match (index_ty, width) {
+            (Some(ty), _) if ty == uint_ty => idx,
+            (Some(_), Some(32)) => {
+                let cast = ctx.module.fresh_id();
+                out.push(Instruction::new(Op::Bitcast, Some(uint_ty), Some(cast), vec![Operand::IdRef(idx)]));
+                cast
+            }
+            (Some(_), Some(64)) => {
+                let narrow = ctx.module.fresh_id();
+                out.push(Instruction::new(Op::UConvert, Some(uint_ty), Some(narrow), vec![Operand::IdRef(idx)]));
+                narrow
+            }
+            _ => {
+                kept.insert(var);
+                continue;
+            }
+        };
+        let c0 = ctx.const_uint(0);
+        let mask = ctx.const_uint(crate::reflect::BINDLESS_HEAP_SLOTS - 1);
+        let last = ctx.const_uint(count.saturating_sub(1));
+        let clamped = ctx.module.fresh_id();
+        let glsl = ctx.glsl();
+        out.push(Instruction::new(
+            Op::ExtInst,
+            Some(uint_ty),
+            Some(clamped),
+            vec![
+                Operand::IdRef(glsl),
+                Operand::LiteralExtInstInteger(spirv::GlslStd450Op::UMin as u32),
+                Operand::IdRef(index),
+                Operand::IdRef(last),
+            ],
+        ));
+        let first = ctx.const_uint(super::TEXTURE_INDEX_BASE + base);
+        let cel = ctx.module.fresh_id();
+        out.push(Instruction::new(Op::IAdd, Some(uint_ty), Some(cel), vec![Operand::IdRef(first), Operand::IdRef(clamped)]));
+        let wptr = ctx.module.fresh_id();
+        let word = ctx.module.fresh_id();
+        if let Some(u64_ty) = wide {
+            out.push(Instruction::new(
+                Op::AccessChain,
+                Some(word_ptr_ty),
+                Some(wptr),
+                vec![Operand::IdRef(table), Operand::IdRef(c0), Operand::IdRef(cel)],
+            ));
+            let wide_v = ctx.module.fresh_id();
+            out.push(Instruction::new(Op::Load, Some(u64_ty), Some(wide_v), vec![Operand::IdRef(wptr)]));
+            out.push(Instruction::new(Op::UConvert, Some(uint_ty), Some(word), vec![Operand::IdRef(wide_v)]));
+        } else {
+            out.push(Instruction::new(
+                Op::AccessChain,
+                Some(word_ptr_ty),
+                Some(wptr),
+                vec![Operand::IdRef(table), Operand::IdRef(c0), Operand::IdRef(cel), Operand::IdRef(c0)],
+            ));
+            out.push(Instruction::new(Op::Load, Some(uint_ty), Some(word), vec![Operand::IdRef(wptr)]));
+        }
+        let slot = ctx.module.fresh_id();
+        out.push(Instruction::new(Op::BitwiseAnd, Some(uint_ty), Some(slot), vec![Operand::IdRef(word), Operand::IdRef(mask)]));
+        let heap = if written {
+            crate::passes::stage_input::bindless_storage_heap_var(ctx, elem_ty, dims, comp)
+        } else {
+            crate::passes::stage_input::bindless_heap_var(ctx, elem_ty, dims, comp)
+        };
+        out.push(Instruction::new(Op::AccessChain, Some(result_ty), Some(result), vec![Operand::IdRef(heap), Operand::IdRef(slot)]));
+        replacements.insert((block_idx, inst_idx), out);
+    }
+    if replacements.is_empty() {
+        return;
+    }
+    let function = &mut ctx.module.functions[entry_idx];
+    for (block_idx, block) in function.blocks.iter_mut().enumerate() {
+        let mut rebuilt = Vec::with_capacity(block.instructions.len() + 8);
+        for (inst_idx, mut inst) in block.instructions.drain(..).enumerate() {
+            if let Some(seq) = replacements.remove(&(block_idx, inst_idx)) {
+                rebuilt.extend(seq);
+                continue;
+            }
+            for operand in inst.operands.iter_mut() {
+                if let Operand::IdRef(id) = operand {
+                    if let Some(&to) = renames.get(id) {
+                        *id = to;
+                    }
+                }
+            }
+            rebuilt.push(inst);
+        }
+        block.instructions = rebuilt;
+    }
+    // the array variables nothing names any more
+    let named: HashSet<Word> = ctx.module.functions[entry_idx]
+        .blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .flat_map(|inst| inst.operands.iter())
+        .filter_map(|operand| match operand {
+            Operand::IdRef(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let dropped: Vec<Word> = ctx
+        .storage_image_arrays
+        .keys()
+        .copied()
+        .filter(|var| !kept.contains(var) && !named.contains(var))
+        .collect();
+    for var in dropped {
+        ctx.new_globals.retain(|inst| inst.result_id != Some(var));
+        ctx.module.types_global_values.retain(|inst| inst.result_id != Some(var));
+        ctx.module.annotations.retain(|inst| inst.operands.first() != Some(&Operand::IdRef(var)));
+        ctx.module.debug_names.retain(|inst| inst.operands.first() != Some(&Operand::IdRef(var)));
+        ctx.interface.retain(|&id| id != var);
+        ctx.image_array_vars.remove(&var);
+        ctx.storage_image_arrays.remove(&var);
+    }
+}

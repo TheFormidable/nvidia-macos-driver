@@ -21,12 +21,12 @@ what each of those is: `python3 tools/switch_registry.py doctor`.
 
 | kind | install | setting | hardware | recovery | escape | test | diag | dev | internal | retired | all |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| env |  | 6 |  |  | 47 | 1 | 58 | 405 | 12 |  | 529 |
+| env |  | 6 |  |  | 48 | 1 | 62 | 405 | 12 |  | 534 |
 | bootarg | 4 | 13 | 30 | 21 | 17 |  | 8 | 6 | 2 |  | 101 |
 | sysctl |  | 5 | 4 | 12 |  |  | 388 |  | 1 |  | 410 |
 | file | 2 | 1 |  | 1 |  |  | 25 |  | 1 |  | 30 |
 | procname |  |  |  |  |  |  |  |  | 15 |  | 15 |
-| build |  |  |  |  | 1 |  |  | 1 | 6 |  | 8 |
+| build |  |  |  |  | 1 |  |  | 1 | 7 |  | 9 |
 | pref |  |  |  |  |  |  |  |  |  |  | 0 |
 
 ## The ways back
@@ -44,6 +44,7 @@ Each of these turns one change that is on by default back off. None is needed on
 | env | `NVK_ZINK_PRESENT_NEWEST` | on (NVK_ZINK_PRESENT_NEWEST=0 in the settings file: every OpenGL swap on Zink waits for the frame before it and asks the window's layer for its drawable itself, as in 3.0.9) | 3.2 | An OpenGL swap on Zink with the swap interval at 0 leaves its frame parked in the context's scratch image and returns after waiting for the GPU alone; a sender thread asks the layer and hands over the frame that is parked when the layer answers, so an application is not held to the display and a frame that a newer one replaced first is never copied. It acts only while NVK_ZINK_PRESENT_AHEAD is on. |
 | env | `NVK_ZINK_SUBDATA_STAGE` | on (NVK_ZINK_SUBDATA_STAGE=0 in the settings file: a glBufferSubData, or a glBufferData of the same size, that the threaded context would write through a mapping of a buffer the GPU may still be using waits for the GPU on the application's thread, as in 3.0.14) | 3.2 | In OpenGL on Zink, a write of glBufferSubData (or of a glBufferData of the same size) that the threaded context would make through a synchronized mapping goes through a staging buffer instead, copied after every earlier call: a write of more than 320 bytes into a buffer the application has mapped and the GPU may still be using, and an unsynchronized write over the range of an earlier staging upload that is not executed yet. The application's thread no longer waits for the GPU there. A buffer of user memory, with CPU storage, in a client pointer heap, sparse or unmappable is never staged. |
 | env | `NVK_ZINK_SURFACE_KEEP` | on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6) | 3.2 | The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7. |
+| env | `NVMTL_AIR_NIR` | on, WindowServer included since 3.0.24 (NVMTL_AIR_NIR=0 in the settings file: every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20) | 3.2 | A compute pipeline is made from the NIR that NVK's own AIR-to-NIR frontend builds from the kernel's AIR, and a render pipeline from the NIR of both its stages (nvk/air, docs/AIR-TO-NIR.md), with the translator's SPIR-V as the fallback for a function the frontend refuses, a pipeline NVK will not make, a render pipeline that needs one of the SPIR-V road's rewrites of its stages, a dispatch with a pixel-coordinate sampler and a threadgroup size the road does not run; only with an NVK that has the frontend. A GPU fault in a process with pipelines on the road turns it off there, and in that process's next launches with the same driver build (the fallback list in the plugin's shader-cache folder); WindowServer is guarded besides by its crash marker. |
 | env | `NVMTL_ARGBUF_ARRAYS` | on (NVMTL_ARGBUF_ARRAYS=0: an argument-buffer member that is an array of textures, samplers or buffers gets one field, its first element, as in 3.0.5) | 3.2 | An argument-buffer struct member that is an array of resource handles gets one [[id]] per element when a shader library is loaded, so a shader that indexes the array past its first element is translated instead of refused or reading the wrong handle. |
 | env | `NVMTL_ASYNCUP_REAP` | on except in WindowServer (NVMTL_ASYNCUP_REAP=0: a finished asynchronous texture upload keeps its staging buffer and its place until its image is next written, read back or freed, as in 3.0.5) | 3.2 | The staging buffer, the submission and the place of an asynchronous texture upload (NVMTL_ASYNC_TEX_UPLOAD) are given back at the next upload once the GPU has finished the copy, at most 16 per upload and without waiting, so textures that are uploaded once and then only sampled do not fill the 256 places and push later uploads onto the path that waits; never in WindowServer. |
 | env | `NVMTL_ASYNC_TEX_UPLOAD` | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. |
@@ -107,7 +108,7 @@ Each of these does nothing unless it is set.
 
 | kind | name | default | review | purpose |
 |---|---|---|---|---|
-| env | `NVK_FAULT_INJECT` | off (unset: nothing is injected) | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. |
+| env | `NVK_FAULT_INJECT` | off (unset: nothing is injected) | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. Since 3.0.24 a development plugin also takes NVK_FAULT_INJECT=ws:\<seconds>:\<process>: that process runs WindowServer's crash-marker logic of the AIR-to-NIR road, its clean minute the seconds given (tools/air-nir/plugin-run.sh ws_marker); NVK has no mode ws and ignores it. |
 
 ## env
 
@@ -243,7 +244,7 @@ Each of these does nothing unless it is set.
 | `NVK_DIAG` | diag | unset | 2.9 | - | NVK_DIAG=1: NVK's diagnostic lines, and the process's standard error goes to /private/tmp/nvk-diag-\<pid>.log; a wait that times out dumps the state of every channel there | nvk/nvk-channel-recover.patch, nvk/nvk-macos.patch |
 | `NVK_DUMP_QMD` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_DUMP_SHADER_DIR` | diag | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
-| `NVK_FAULT_INJECT` | test | off (unset: nothing is injected) | 3.0 | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. | nvk/nvk-channel-recover.patch |
+| `NVK_FAULT_INJECT` | test | off (unset: nothing is injected) | 3.0 | - | Test hook for the channel recovery: NVK_FAULT_INJECT=\<mode>:\<n>[:\<process>] stalls or faults the n-th submission of a process once, so the rebuild can be watched. Set it in the settings file: a release plugin forgets it from the environment. Since 3.0.24 a development plugin also takes NVK_FAULT_INJECT=ws:\<seconds>:\<process>: that process runs WindowServer's crash-marker logic of the AIR-to-NIR road, its clean minute the seconds given (tools/air-nir/plugin-run.sh ws_marker); NVK has no mode ws and ignores it. | nvk/nvk-channel-recover.patch, plugin/NVMTLAirNir.m |
 | `NVK_HOST_IMPORT` | dev | unset | 2.9 | - | unreviewed | nvk/nvk-macos.patch |
 | `NVK_HWRT_QUERY` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/ttu-rq.patch, plugin/nvmtl_app_profile.h |
 | `NVK_HWRT_WIDE` | dev | unset | 2.9 | - | unreviewed | nvk/hwrt/wide.patch |
@@ -265,6 +266,11 @@ Each of these does nothing unless it is set.
 | `NVK_ZINK_SURFACE_KEEP` | escape | on (NVK_ZINK_SURFACE_KEEP=0 in the settings file: the drawable's video memory is imported again for every frame, as in 3.0.6) | 3.0.7 | 3.2 | The Zink frontend keeps its import of a drawable's video memory across frames (at most four surfaces per context) and names the block in every mark, which the kernel refuses when the surface has another block; it acts only while NVK_ZINK_PRESENT_AHEAD is on, and needs the kernel and the NVK of 3.0.7. | zink/nvk_present.c |
 | `NVMTL_AIRCACHE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/NVMTLObjects.m |
 | `NVMTL_AIR_DUMP` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
+| `NVMTL_AIR_NIR` | escape | on, WindowServer included since 3.0.24 (NVMTL_AIR_NIR=0 in the settings file: every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20) | 3.0.21 | 3.2 | A compute pipeline is made from the NIR that NVK's own AIR-to-NIR frontend builds from the kernel's AIR, and a render pipeline from the NIR of both its stages (nvk/air, docs/AIR-TO-NIR.md), with the translator's SPIR-V as the fallback for a function the frontend refuses, a pipeline NVK will not make, a render pipeline that needs one of the SPIR-V road's rewrites of its stages, a dispatch with a pixel-coordinate sampler and a threadgroup size the road does not run; only with an NVK that has the frontend. A GPU fault in a process with pipelines on the road turns it off there, and in that process's next launches with the same driver build (the fallback list in the plugin's shader-cache folder); WindowServer is guarded besides by its crash marker. | plugin/NVMTLAirNir.m |
+| `NVMTL_AIR_NIR_DEBUG` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend says on standard error where a module's static initializer could not be run, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
+| `NVMTL_AIR_NIR_DUMP` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend writes the module it read (after its passes) to the file named, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
+| `NVMTL_AIR_NIR_DUMP_FC` | diag | unset | 3.0.21 | 3.2 | NVK's AIR-to-NIR frontend writes the module once the function constants are in to the file named, for looking into a refusal | nvk/air/nvk_air_to_nir.c |
+| `NVMTL_AIR_NIR_REFL_CHECK` | diag | unset | 3.0.22 | 3.2 | development plugins only (a release plugin ignores it): every function is made with the translator, as with NVMTL_AIR_NIR=0, and the plugin log compares the AIR-to-NIR frontend's reflection of it with the translator's, key by key, and its default threadgroup size with the SPIR-V's (docs/AIR-TO-NIR.md phase 4) | plugin/NVMTLAirNir.m |
 | `NVMTL_ANGLE_METAL` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_APPLE_FAMILY` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m, plugin/nvmtl_app_profile.h |
 | `NVMTL_APPLE_PIPELINE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLVendorCompiler.m |
@@ -276,7 +282,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_ASYNC_SURFACE_UPLOAD` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_ASYNC_TEX_UPLOAD` | escape | on except in WindowServer (NVMTL_ASYNC_TEX_UPLOAD=0 in the settings file: replaceRegion waits for its copy, as in 3.0) | 2.9 | 3.2 | A texture region upload (replaceRegion) is submitted without waiting for the GPU, with its own staging buffer and command buffer, and is finished before the image is overwritten, read back or freed (nvmtl_tex_upload.h), in every process but WindowServer; =1 turns it on there too. | plugin/nvmtl_vk.c |
 | `NVMTL_B78_DEBUG` | diag | unset | 2.9 | - | unreviewed | translator/translator/src/b78_tcg.rs |
-| `NVMTL_BDA_PROBE_FILE` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
+| `NVMTL_BDA_PROBE_FILE` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLAirNir.m, plugin/NVMTLDevice.m |
 | `NVMTL_BDA_PROBE_HASH` | diag | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_BIND_CACHE` | escape | on except in WindowServer (NVMTL_BIND_CACHE=0: the index buffer, every vertex buffer, the topology and primitive restart are recorded before every draw, as in 3.0.5) | 3.0.6 | 3.2 | A draw does not record again the index buffer, the vertex buffer bindings, the primitive topology or primitive restart that its Vulkan command buffer already holds; a fresh command buffer records everything, and whoever records behind the cache (a patch draw, DLSS) clears it; never in WindowServer. | plugin/nvmtl_vk.c |
 | `NVMTL_BLIT_READONLY` | escape | on (NVMTL_BLIT_READONLY=0: a buffer with a caller copy that a command buffer used only as a blit copy's source is copied back to the caller's memory at completion, as in 3.0.3) | 3.0.4 | 3.2 | A buffer with a caller copy (newBufferWithBytesNoCopy pages the driver copies) that a command buffer used only as the source of copyFromBuffer:toBuffer: or copyFromBuffer:toTexture: is not copied back at completion; any other use in the command buffer still copies it back. From pull request 578 of the original project. | plugin/NVMTLObjects.m |
@@ -463,7 +469,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_NO_ORDER_BARRIER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_PARFAST` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_NO_PASS_TRANSITION` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
-| `NVMTL_NO_PIXEL_HW_FILTER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h, translator/translator/src/passes/air_calls/images/sample.rs |
+| `NVMTL_NO_PIXEL_HW_FILTER` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLAirNir.m, plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h and 1 more |
 | `NVMTL_NO_POOL_REUSE` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_NO_PSO_SKIP` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_NO_PTR_PHI_LOAD` | dev | unset (the path is on) | 2.9 | - | unreviewed | plugin/NVMTLLibraryLoad.m, plugin/nvmtl_app_profile.h, translator/translator/src/native/mod.rs |
@@ -572,7 +578,7 @@ Each of these does nothing unless it is set.
 | `NVMTL_SURF_IMPORT_CACHE_MAX_MB` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLDevice.m |
 | `NVMTL_TABLE_SHADOW` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
 | `NVMTL_TABLE_SSBO` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
-| `NVMTL_TESS_ORDER_FLIP` | dev | unset | 2.9 | - | unreviewed | plugin/nvmtl_vk.c |
+| `NVMTL_TESS_ORDER_FLIP` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLAirNir.m, plugin/nvmtl_vk.c |
 | `NVMTL_TEW` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
 | `NVMTL_TEX_RECYCLE` | escape | on except in WindowServer (NVMTL_TEX_RECYCLE=0: every dead texture is destroyed and every new one created and allocated, as in 3.0.5) | 3.0.6 | 3.2 | A dead ordinary colour texture of up to 32 MB keeps its Vulkan image and memory for at most a second, up to 32 images and 128 MB, and the next texture of the same format, size, mips, layers and usage takes them instead of four round trips to the kernel; they are given back first when video memory runs short; never in WindowServer, and never an image that was re-backed, migrated or sparse. | plugin/nvmtl_vk.c |
 | `NVMTL_TG_RESHAPE` | dev | unset | 2.9 | - | unreviewed | plugin/NVMTLObjects.m |
@@ -1213,7 +1219,7 @@ Each of these does nothing unless it is set.
 | `SimMetalHost` | internal | - | 3.0.5 | - | a branch on the process name; not a user switch | plugin/nvmtl_schedule_policy.h |
 | `SimRenderServer` | internal | - | 3.0.5 | - | a branch on the process name; not a user switch | plugin/nvmtl_schedule_policy.h |
 | `VTDecoderXPCService` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
-| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-evwait.patch, nvk/nvk-macos.patch and 6 more |
+| `WindowServer` | internal | - | 2.9 | - | a branch on the process name; not a user switch | kexts/NVRM/accel/nvrm-accel.cpp, nvk/nvk-evwait.patch, nvk/nvk-macos.patch and 7 more |
 | `mtlprobe` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtlrender` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
 | `nvmtltest` | internal | - | 2.9 | - | a branch on the process name; not a user switch | plugin/NVMTLDevice.m |
@@ -1223,6 +1229,7 @@ Each of these does nothing unless it is set.
 
 | name | tier | default | since | review | purpose | read in |
 |---|---|---|---|---|---|---|
+| `NVK_CRATE_CACHE` | internal | unset | 3.0.21 | - | a build host setting: a folder of the Rust crates an earlier NVK build fetched, copied into the Mesa tree so meson downloads nothing; nothing of it reaches the shipped driver | build/build_nvk.sh |
 | `NVK_EXTRA_PATCHES` | dev | unset | 2.9 | - | extra patch files from nvk/ applied after the chain when NVK is built; a library built with it says so at the end of the build summary line (the one in BUILD.txt): "PLUS \<names> (NVK_EXTRA_PATCHES)" | build/build_nvk.sh |
 | `NVK_FLOOR` | internal | unset (15.0: the release) | 3.0.18 | - | a build host setting: the macOS deployment floor NVK is built for; the original project's older-macOS test builds set it, nothing of it changes the shipped driver | build/build_nvk.sh |
 | `NVK_JOBS` | internal | unset | 2.9 | - | a build host setting (a path, a job count); nothing of it reaches the shipped driver | build/build_nvk.sh |

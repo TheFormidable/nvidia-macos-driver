@@ -1416,12 +1416,15 @@ uint64_t nvmtl_function_air_key(id f)
 static void nvmtl_heap_register(NVMTLHeap *heap, id resource);
 static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> heap);
 // `writes`: the shader declares a storage binding there. A texture made with MTLTextureUsageUnknown (0) may be used
-// any way Metal allows - ImageIO makes its HDR output IOSurface textures that way and writes them.
+// any way Metal allows - ImageIO makes its HDR output IOSurface textures that way and writes them. A colour attachment
+// a tile function reads and writes as its imageblock (cb->_tileAttach, for the dispatch dispatchThreadsPerTile makes)
+// needs only render-target usage in Metal: it gets its storage twin whatever its usage.
 static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOOL writes) {
     if (!t) return NULL;
     if (t->_stex) return [t nvview];
     const MTLTextureUsage usage = (MTLTextureUsage)t->_usage;   // not -usage, which answers ShaderRead for Unknown
-    if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite))) return NULL;
+    const BOOL tileAtt = cb && [cb->_tileAttach containsObject:t];
+    if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite) && !tileAtt)) return NULL;
     nvk_image *im = [t nvi];
     // a multisampled attachment gets a storage twin only for a tile function (NVMTL_TILE_SHADING=1, shaderStorageImageMultisample)
     const BOOL ms = im && (im->samples ? im->samples : 1) > 1;
@@ -2651,6 +2654,14 @@ id gNVMTLMainDevice = nil;
 extern NSData *nvmtl_translate_samplers(NVMTLFunction *, NSDictionary *, uint32_t, NSString **);
 extern NSData *nvmtl_translate_samplers_amp(NVMTLFunction *, NSDictionary *, uint32_t, uint32_t, NSString **);
 extern NSData *nvmtl_translate_variant(NVMTLFunction *, NSDictionary *, NSDictionary *, NSString **);
+// NVMTLAirNir.m: a threadgroup-memory variant of a kernel on the AIR-to-NIR road (nil: make it on the SPIR-V road), the
+// pipeline a dispatch of threadgroup size l runs (the kernel's SPIR-V twin for a size that road does not run), and the
+// per-process count of the roads
+NVMTLComputePipelineState *nvmtl_air_nir_variant(NVMTLComputePipelineState *ps, NSDictionary *samplers, NSDictionary *tgLen, NSString **why);
+NVMTLComputePipelineState *nvmtl_air_nir_for_size(NVMTLComputePipelineState *ps, const uint32_t l[3]);
+NVMTLRenderPipelineState *nvmtl_air_nir_render_bound(NVMTLRenderPipelineState *ps);
+int nvmtl_air_nir_fallen(void);
+void nvmtl_air_nir_note(NVMTLFunction *f, int road, BOOL variant, NSString *why, uint64_t ns);
 // facts about a module's text that newFunctionWithName asks for on every call; kept on the text (NVMTLLibraryLoad.m)
 enum { NVMTL_AIRF_KNOWN = 1, NVMTL_AIRF_DYLD_TABLE = 2, NVMTL_AIRF_ISECT_TABLE = 4 };
 uint32_t nvmtl_air_text_flags(NSString *ll);
@@ -2898,8 +2909,20 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
 }
 - (NSArray<MTLVertexAttribute *> *)vertexAttributes { return (NSArray<MTLVertexAttribute *> *)nvmtl_vertex_attributes_for(self); }
 - (NSArray<MTLAttribute *> *)stageInputAttributes { return (NSArray<MTLAttribute *> *)nvmtl_vertex_attributes_for(self); }
-- (MTLPatchType)patchType { uint32_t pt = 0, n = 0; return nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n) ? (MTLPatchType)pt : MTLPatchTypeNone; }
+// A function newFunctionWithName: made without the translator (phase 4) has no module to read: its reflection (the
+// frontend's, the translator's form) says the patch's domain and control points
+static MTLPatchType nvmtl_reflected_patch(NVMTLFunction *f, NSInteger *n) {
+    NSDictionary *tr = nvmtl_function_reflection(f)[@"tessellation"];
+    if (![tr isKindOfClass:[NSDictionary class]]) return MTLPatchTypeNone;
+    NSNumber *k = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
+    if (n) *n = k.integerValue > 0 ? k.integerValue : -1;
+    return [tr[@"domain"] isEqual:@"Quad"] ? MTLPatchTypeQuad : [tr[@"domain"] isEqual:@"Triangle"] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
+}
+- (MTLPatchType)patchType {
+    if (_spirvLazy) return nvmtl_reflected_patch(self, NULL);
+    uint32_t pt = 0, n = 0; return nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n) ? (MTLPatchType)pt : MTLPatchTypeNone; }
 - (NSInteger)patchControlPointCount {
+    if (_spirvLazy) { NSInteger k = -1; return nvmtl_reflected_patch(self, &k) != MTLPatchTypeNone ? k : -1; }
     uint32_t pt = 0, n = 0; if (!nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n)) return -1;
     NSDictionary *tr = nvmtl_function_reflection(self)[@"tessellation"];
     NSNumber *k = [tr isKindOfClass:[NSDictionary class]] && [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
@@ -3460,6 +3483,12 @@ static void nvmtl_air_dump(NSString *name, NSString *air)
         NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = nil; f->_fname = name; f->_stage = (_stages[name] ?: @"");
         f->_air = _airs[name]; f->_lib = self; f->_needsLink = YES; return f;
     }
+    // Phase 4 (NVMTLAirNir.m): a function the AIR-to-NIR frontend translates and reflects is made without the translator;
+    // its SPIR-V is made the first time something needs it
+    if (spv) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fname = name; lf->_stage = (_stages[name] ?: @""); lf->_air = _airs[name]; lf->_lib = self;
+        if (nvmtl_air_nir_lazy(lf)) return lf;
+    }
     if (spv) { NSError *te = nil; NSData *es = [self nvmtlEntrySpirv:name error:&te];
         if (!es && _airs[name] && nvmtl_needs_visible_link(_airs[name], te.localizedDescription)) {
             nvlog("library: \"%s\" calls a visible function (by reference or table) - DEFERRED to pipeline creation", name.UTF8String);
@@ -3472,7 +3501,9 @@ static void nvmtl_air_dump(NSString *name, NSString *air)
             f->_air = _airs[name]; f->_lib = self; return f;
         }
         spv = es; if (!spv) return nil; }
-    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; return f;
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spv; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self;
+    nvmtl_air_nir_refl_check(f);
+    return f;
 }
 static size_t nvmtl_fc_width(NSUInteger dataType)
 {
@@ -3548,11 +3579,17 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
     }
     if (vals.count == 0) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fname = name; lf->_stage = (_stages[name] ?: @""); lf->_air = _airs[name]; lf->_lib = self; lf->_fcv = cv;
+        if (nvmtl_air_nir_lazy(lf)) {
+            nvlog("newFunctionWithName:constantValues: \"%s\" - no constants, made without the translator", name.UTF8String);
+            return lf;
+        }
         spv = [self nvmtlEntrySpirv:name error:error]; if (!spv) return nil;
         NVMTLFunction *f0 = [NVMTLFunction new];
         f0->_spirv = spv; f0->_fname = name; f0->_stage = (_stages[name] ?: @""); f0->_air = _airs[name]; f0->_lib = self; f0->_fcv = cv;
         nvlog("newFunctionWithName:constantValues: \"%s\" - no constants, unspecialized module (%lu B)",
               name.UTF8String, (unsigned long)spv.length);
+        nvmtl_air_nir_refl_check(f0);
         return f0;
     }
     NSUInteger capacity = vals.count;
@@ -3595,6 +3632,14 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
     const BOOL linkFirst = !eagerProbe && _airs[name] && nvmtl_needs_visible_link(_airs[name], nil);
     NSData *spec = nil;
     if (!linkFirst) {
+        NVMTLFunction *lf = [NVMTLFunction new]; lf->_fc = [constants copy]; lf->_fname = name; lf->_stage = (_stages[name] ?: @"");
+        lf->_air = _airs[name]; lf->_lib = self; lf->_fcv = cv;
+        if (nvmtl_air_nir_lazy(lf)) {
+            nvlog("newFunctionWithName:constantValues: \"%s\" with %zu constant(s), made without the translator", name.UTF8String, n);
+            return lf;
+        }
+    }
+    if (!linkFirst) {
         nvmtl_fc_expect_link(1);
         spec = nvmtl_translate_with_fc_cached(_airs[name], _stages[name], name, constants, idx, sz, pay, n, &e);
         nvmtl_fc_expect_link(0);
@@ -3611,7 +3656,9 @@ static size_t nvmtl_fc_width(NSUInteger dataType)
         return nil;
     }
     nvlog("newFunctionWithName:constantValues: \"%s\" specialized with %zu constant(s)", name.UTF8String, n);
-    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spec; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; f->_fcv = cv; return f;
+    NVMTLFunction *f = [NVMTLFunction new]; f->_spirv = spec; f->_fc = [constants copy]; f->_fname = name; f->_stage = (_stages[name] ?: @""); f->_air = _airs[name]; f->_lib = self; f->_fcv = cv;
+    nvmtl_air_nir_refl_check(f);
+    return f;
 }
 - (void)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)cv
           completionHandler:(void (^)(id<MTLFunction>, NSError *))handler {
@@ -4452,6 +4499,9 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     _pass.load |= keep; _load |= keep;
     NVMTLComputeCommandEncoder *ce = (NVMTLComputeCommandEncoder *)[_cb computeCommandEncoder];
     [ce setComputePipelineState:cps];
+    NSMutableSet *att = [NSMutableSet new];   // the attachments are the imageblock: storage twins whatever their usage
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_colTex[i]) [att addObject:_colTex[i]];
+    _cb->_tileAttach = att;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_colTex[i]) [ce setTexture:_colTex[i] atIndex:NVMTL_TILE_TEXTURE_BASE + i];
     for (NSNumber *k in _tileByt) { NSData *d = _tileByt[k]; [ce setBytes:d.bytes length:d.length atIndex:k.unsignedLongValue]; }
     for (NSNumber *k in _tileBuf) { NSArray *e = _tileBuf[k]; [ce setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:k.unsignedLongValue]; }
@@ -4463,6 +4513,7 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     for (NSNumber *k in _tileAs) [ce setAccelerationStructure:_tileAs[k] atBufferIndex:k.unsignedLongValue];
     [ce dispatchThreadgroups:MTLSizeMake((w + tw - 1) / tw, (h + th - 1) / th, 1) threadsPerThreadgroup:threadsPerTile];
     [ce endEncoding];
+    _cb->_tileAttach = nil;
     if (_ps) [self setRenderPipelineState:_ps];   // the pass resumes with the attachments loaded
     nvlog("dispatchThreadsPerTile: %ux%u area, %ux%u tiles, %lu threads per tile", w, h, tw, th, (unsigned long)(threadsPerTile.width * threadsPerTile.height));
 }
@@ -4571,6 +4622,17 @@ static BOOL nvmtl_pixel_sampler_update(NSMutableDictionary *states, NSString *in
                 NSString *why=nil;
                 NSString *gk=nvmtl_sampvar_key(_ps->_descriptor,vf,ff,key); selected=nvmtl_sampvar_get(gk);
                 const uint32_t amp=nvmtl_mv_popcount(_ps->_p.view_mask);   // an amplified pipeline's variants stay multiview shaders
+                // A pipeline on the AIR-to-NIR road: the variant's stages are translated by the frontend with the samplers'
+                // state (NVMTLAirNir.m); when it does not make them, the translator's variant below, as before
+                if(!selected && _ps->_road==1 && ff && vf==(id)_ps->_descriptor.vertexFunction && ff==(id)_ps->_descriptor.fragmentFunction) {
+                    NSArray *st=nvmtl_air_nir_sampler_stages(vf,ff,vS,fS,&why);
+                    if(st) {
+                        MTLRenderPipelineDescriptor *desc=[_ps->_descriptor copy];desc.vertexFunction=st[0];desc.fragmentFunction=st[1];
+                        NSError *error=nil;selected=(id)[(id<MTLDevice>)gNVMTLMainDevice newRenderPipelineStateWithDescriptor:desc error:&error];
+                        if(selected) { nvmtl_sampvar_put(gk,selected,vf,ff); nvlog("render pixel sampler variant built on the AIR-to-NIR road: %s / %s",vf->_fname.UTF8String?:"?",ff->_fname.UTF8String?:"?"); }
+                        else why=error.localizedDescription;
+                    }
+                }
                 NSData *v=selected?nil:nvmtl_translate_samplers_amp(vf,vS,0,amp,&why),*f=(selected||!v)?nil:(ff?nvmtl_translate_samplers_amp(ff,fS,_ps->_a8mask,amp,&why):[NSData data]);
                 if(v && f) {
                     NVMTLFunction *vs=[NVMTLFunction new],*fs=ff?[NVMTLFunction new]:nil;
@@ -4851,6 +4913,9 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
 }
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)ps {
     ps = (id<MTLRenderPipelineState>)[self nvmtlColourTwinPipeline:(NVMTLRenderPipelineState *)ps];
+    // after a GPU fault turned the AIR-to-NIR road off in the process, a road pipeline draws as its SPIR-V twin
+    if (nvmtl_air_nir_fallen() && [(id)ps isKindOfClass:[NVMTLRenderPipelineState class]])
+        ps = (id<MTLRenderPipelineState>)nvmtl_air_nir_render_bound((NVMTLRenderPipelineState *)ps);
     // The same pipeline again inside a begun pass changes nothing: Apple's OpenGL renderer sets it before every draw, so
     // GL games paid a full bind per draw (the GL-on-Metal per-draw overhead). Not inside an open pass-time pool.
     static int psoSkip = -1;   // NVMTL_NO_PSO_SKIP=1 (nvrm610.conf) sets the pipeline every time again, to A/B a glitch against the saving
@@ -7100,7 +7165,10 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
             selected = cached;
             if (!selected) {
                 NSString *why = nil;
-                NSData *spirv = nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
+                // A kernel on the AIR-to-NIR road whose threadgroup memory is sized here is translated again with the
+                // lengths; a pixel-coordinate sampler, or a refusal, makes the variant on the SPIR-V road as before.
+                if (_ps->_road == 1) selected = nvmtl_air_nir_variant(_ps, _samplers, _tgLen, &why);
+                NSData *spirv = selected ? nil : nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
                 if (spirv) {
                     selected = [NVMTLComputePipelineState new];
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
@@ -7118,8 +7186,9 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                     _ps->_samplerVariants[key] = [NSNull null];
                     return nil;
                 }
+                if (spirv) nvmtl_air_nir_note(_ps->_function, 0, YES, _ps->_road == 1 ? why : nil, 0);
                 _ps->_samplerVariants[key] = selected;
-                nvlog("compute pixel sampler variant built: %s", _ps->_function->_fname.UTF8String);
+                nvlog("compute pixel sampler variant built: %s (%s)", _ps->_function->_fname.UTF8String, selected->_road ? "AIR to NIR" : "SPIR-V");
             }
         }
         _e78VarFor = _ps; _e78VarSel = selected;
@@ -7376,6 +7445,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     uint32_t t[3] = { (uint32_t)(grid.width * tg.width), (uint32_t)(grid.height * tg.height), (uint32_t)(grid.depth * tg.depth) };
     if (nvmtl_vk_tg_reject(l, t, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     nvmtl_zprobe_dispatch(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, t, l);
@@ -7400,6 +7470,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     uint32_t t[3] = { (uint32_t)threads.width, (uint32_t)threads.height, (uint32_t)threads.depth };
     if (nvmtl_vk_tg_reject(l, t, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     nvmtl_zprobe_dispatch(_ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, t, l);
@@ -7576,6 +7647,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     NVMTLComputePipelineState *selected = [self nvmtlSamplerPipeline];
     if (!selected) { nvlog("indirect dispatch with no valid compute sampler pipeline"); return; }
     uint32_t l[3] = { (uint32_t)tg.width, (uint32_t)tg.height, (uint32_t)tg.depth };
+    selected = nvmtl_air_nir_for_size(selected, l);
     if (nvmtl_vk_tg_reject(l, NULL, _ps && _ps->_function ? _ps->_function->_fname.UTF8String : NULL, selected->_p.lin)) return;
     [self nvmtlE78Barrier:YES];
     if (![self nvmtlPrepareIndirectImages]) return;

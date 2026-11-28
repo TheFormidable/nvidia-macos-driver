@@ -1,0 +1,417 @@
+/*
+ * NullMoth NVIDIA driver for macOS
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ *
+ * The interface between the Metal plugin and NVK's AIR-to-NIR frontend (nvk_air_to_nir.c).
+ *
+ * The plugin hands NVK a function's AIR (the LLVM bitcode of a Metal function) and gets back a NIR shader built in
+ * NVK's own copy of the compiler. It then creates the compute pipeline with that shader in
+ * VkPipelineShaderStageNirCreateInfoMESA (module VK_NULL_HANDLE, pName "main", no specialization), with the layout it
+ * uses for translated kernels: set 0 holds the buffer-address table at binding 640, a uniform buffer with a dynamic
+ * offset (a storage buffer with NVMTL_AIR_NIR_TABLE_SSBO), and 48 bytes of push constants hold the dispatch grid as
+ * the SPIR-V translator's kernels read it:
+ *    words 0-2   threads_per_grid       (0x80000000 | threadgroup size: an indirect dispatch, read the group count)
+ *    words 3-5   thread_base            added to the global invocation id
+ *    words 6-8   threadgroup_base       added to the workgroup id
+ *    words 9-11  threadgroups_per_grid  (0x80000000: an indirect dispatch, read the group count)
+ * Every Metal buffer argument [[buffer(n)]] is read through entry n of the address table, a 64-bit GPU address, so the
+ * kernel binds no storage-buffer descriptor.
+ *
+ * Textures and samplers use the bands of set 0 the plugin's set layout has and the translator's kernels bind
+ * (translator/translator/docs/REFLECTION.md, plugin/nvmtl_vk.c binding_type):
+ *    32 + n   [[texture(n)]] read or sampled: a sampled image (a uniform texel buffer for texture_buffer)
+ *   480 + n   [[texture(n)]] with access::write or access::read_write: a storage image (a storage texel buffer for
+ *             texture_buffer), declared without a format (the plugin tells the translator the device reads and writes
+ *             storage images without one, nvmtl_translate_set_caps bits 0 and 1)
+ *   160 + n   [[sampler(n)]], and each constexpr sampler at the slot the translator's reflection gives it (the first
+ *             sampler slot no [[sampler(n)]] argument takes, in the order of their __air_sampler_state globals): the
+ *             result lists them with their AIR state words, which the plugin binds as it binds the translator's
+ *             StaticSampler entries
+ * The result's masks say which of them the kernel reads.
+ *
+ * No LLVM is linked into NVK: the frontend opens the LLVM library named in the request (the plugin's air-runtime)
+ * and finds its C API there.
+ *
+ * Since version 4 the function may also be a vertex or a fragment function (found in !air.vertex or !air.fragment), for
+ * a render pipeline the plugin creates with its render layout: set 0 is the vertex stage's (the same bands as above,
+ * the table at 640), set 1 the fragment stage's (the same bands), set 2 the heap; no push constants are read. Vertex
+ * inputs ([[attribute(n)]] of a stage_in) are read at Location n, as the vertex descriptor binds them (the plugin picks
+ * each attribute's VkFormat by the component kind the result names, as it reads a SPIR-V module's); the vertex outputs
+ * and fragment inputs (varyings) take the Locations the request gives by their user semantic, every varying as 32-bit
+ * components (a half as a float, an 8- or 16-bit integer or a bool as a 32-bit integer, flat), so the two stages agree
+ * because both come from this frontend. Builtins are Vulkan's (VertexIndex, InstanceIndex, BaseVertex, BaseInstance,
+ * Position, PointSize, ClipDistance, Layer, ViewportIndex, FragCoord, FrontFacing, PointCoord, SampleId, SampleMask,
+ * FragDepth), as the translator's stages read and write them.
+ *
+ * Both structs start with their own size, so the plugin and NVK can be built from different trees: a field added at
+ * the end is invisible to an older caller, and a shorter struct from one is read only as far as it goes.
+ */
+#ifndef NVMTL_AIR_NIR_ABI_H
+#define NVMTL_AIR_NIR_ABI_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#define NVMTL_AIR_NIR_TABLE_BINDING 640u
+#define NVMTL_AIR_NIR_PUSH_BYTES    48u
+#define NVMTL_AIR_NIR_MAX_BUFFERS   31u   /* binding 31 of the translator's band is reserved, so slots 0-30 */
+
+/* request.flags */
+#define NVMTL_AIR_NIR_TABLE_SSBO    (1u << 0)   /* binding 640 is a storage buffer, not a dynamic uniform buffer */
+#define NVMTL_AIR_NIR_NO_PASSES     (1u << 1)   /* do not run LLVM's inliner and SROA on the module first */
+#define NVMTL_AIR_NIR_FC_VALUES     (1u << 2)   /* fc_* hold the function's complete set of function-constant values */
+/* Since version 3 (an older NVK ignores them, and then refuses or translates as without them): */
+#define NVMTL_AIR_NIR_TEXT_IR       (1u << 3)   /* bitcode is LLVM text IR (as the plugin keeps AIR), bitcode_size bytes */
+#define NVMTL_AIR_NIR_TG_DEFAULT    (1u << 4)   /* a [[threadgroup(n)]] argument whose length is 0 gets the translator's
+                                                 * default: 512 elements of its type, at most 32768 bytes, at least one */
+#define NVMTL_AIR_NIR_UNCHECKED     (1u << 5)   /* the pipeline is created with buffer robustness off
+                                                 * (VkPipelineRobustnessCreateInfoEXT, storage and uniform buffers
+                                                 * DISABLED), so the table is addressed as such a pipeline lowers it */
+#define NVMTL_AIR_NIR_ALIGN4        (1u << 6)   /* no device or constant buffer access promises more than 4-byte
+                                                 * alignment: the build for a buffer bound at an address its kernel's
+                                                 * accesses are not aligned to (the plugin's align guard) */
+/* Since version 4: */
+#define NVMTL_AIR_NIR_VARYINGS      (1u << 7)   /* varying_* give the Location of every vertex output and fragment input
+                                                 * by its user semantic; a varying they do not name is refused. Without
+                                                 * it each takes the translator's own (fragment inputs in their order,
+                                                 * vertex outputs by air.location_index or their order). */
+/* Since version 5: */
+#define NVMTL_AIR_NIR_REFLECT       (1u << 8)   /* the result carries the function's reflection (result.reflection) */
+#define NVMTL_AIR_NIR_SAMPLER_STATES (1u << 9)  /* sampler_state_* give the state of argument samplers the dispatch or
+                                                 * draw binds (a pixel-coordinate one is sampled as the translator's
+                                                 * with_runtime_sampler variant samples it) */
+/* Since version 6: */
+#define NVMTL_AIR_NIR_COLOR_INPUTS  (1u << 10)  /* a fragment function's [[color(n)]] inputs (framebuffer fetch) are read
+                                                 * as the translator reads them: an input attachment at set
+                                                 * NVMTL_AIR_NIR_FETCH_SET, binding NVMTL_AIR_NIR_FETCH_BINDING + n,
+                                                 * input attachment index n (result.color_inputs names them). Without it
+                                                 * such a function is refused, as before. */
+#define NVMTL_AIR_NIR_TEXTURE_ARRAYS (1u << 11) /* an array<texture, N> argument at [[texture(n)]] is translated: its
+                                                 * element k is texture n + k, at binding 32 + n + k (480 + n + k when
+                                                 * written) when k is known; without it such a function is refused */
+#define NVMTL_AIR_NIR_HEAP          (1u << 12)  /* set NVMTL_AIR_NIR_HEAP_SET, binding NVMTL_AIR_NIR_HEAP_BINDING is the
+                                                 * plugin's bindless heap of sampled images, and entry
+                                                 * NVMTL_AIR_NIR_TABLE_TEXTURE0 + n of the table holds texture n's slot
+                                                 * in it: a sampled array element chosen at run time is read there, as
+                                                 * the translator reads it (result.resource_flags NVMTL_AIR_NIR_RES_HEAP).
+                                                 * Without it such a read is refused. */
+/* Since version 7: */
+#define NVMTL_AIR_NIR_ARGBUF        (1u << 13)  /* argument buffers (air.indirect_buffer) are translated as the translator
+                                                 * reads them: the argument is a buffer (its address from the table); a
+                                                 * texture or sampler handle loaded from memory is its gpuResourceID,
+                                                 * whose low 32 bits masked to the heap's slots pick the image, texel
+                                                 * buffer or sampler at that slot of the bindless heap (set
+                                                 * NVMTL_AIR_NIR_HEAP_SET: sampled images NVMTL_AIR_NIR_HEAP_BINDING,
+                                                 * samplers NVMTL_AIR_NIR_HEAP_SAMPLERS, storage images
+                                                 * NVMTL_AIR_NIR_HEAP_STORAGE, uniform and storage texel buffers
+                                                 * NVMTL_AIR_NIR_HEAP_UTEXEL and _STEXEL), read non-uniform; a written
+                                                 * texture or texel buffer that is one field (not an array) of an
+                                                 * argument buffer argument at an offset known here is the translator's
+                                                 * embedded binding 480 + its synthetic index (storage_mask), and a
+                                                 * sampler such a field 160 + its synthetic index (sampler_mask) when
+                                                 * every sampler read from memory is one, as the plugin's embedded plans
+                                                 * bind them per draw. Without it such a function is refused. */
+#define NVMTL_AIR_NIR_TYPED_DUMMIES (1u << 14)  /* heap slots 1 to 5 hold the typed dummies (the translator's capability
+                                                 * bit 8): a heap index of 0 reads the dummy of the image's shape instead
+                                                 * (2D, also 1D and multisampled: 1; 2D array: 2; 3D: 3; cube: 4; cube
+                                                 * array: 5; a texel buffer keeps 0), as every heap access of the
+                                                 * translator's does (passes/resources/dummy_slots.rs) */
+#define NVMTL_AIR_NIR_NO_PIXEL_HW   (1u << 16)  /* the translator keeps the fetch emulation for every pixel-coordinate
+                                                 * sample (NVMTL_NO_PIXEL_HW_FILTER, which the plugin reads), so does
+                                                 * the frontend: no linear one goes through the hardware filter */
+#define NVMTL_AIR_NIR_DESCRIPTORS   (1u << 15)  /* descriptor_buffers names the [[buffer(n)]] arguments the translator's
+                                                 * module keeps as storage-buffer descriptors after the plugin's address
+                                                 * lowering (wrapper/src/buffer_addresses.rs kept_roots: a buffer of an
+                                                 * array indexed with a value read from memory), each read here through
+                                                 * its descriptor at the stage's set, binding n, with the pipeline's
+                                                 * buffer robustness (bounds-checked in a render pipeline: a read past
+                                                 * its end gives 0), in accesses of 8, 16 or 32-bit components
+                                                 * (result.descriptor_mask). A function that indexes such a buffer is
+                                                 * refused without it (result.descriptor_wanted), and one that needs of a
+                                                 * descriptor buffer what the two access forms of the translator do not
+                                                 * agree on (a 64-bit component, a store, an access below its natural
+                                                 * alignment, the pointer as a value) is refused with it. */
+/* Since version 8: */
+#define NVMTL_AIR_NIR_TESS          (1u << 17)  /* a post-tessellation vertex function ([[patch(triangle|quad, n)]]) is
+                                                 * translated as the tessellation evaluation stage the plugin's
+                                                 * tessellation path makes of the translator's TessellationEvaluation
+                                                 * module (nvmtl_tess_patch_tese): its spacing and vertex order are
+                                                 * tess_spacing and tess_order, its control points arrays of n at the
+                                                 * Locations of their fields, its patch inputs per-patch inputs at theirs,
+                                                 * [[instance_id]] a per-patch input after them, [[position_in_patch]]
+                                                 * the tessellation coordinate, and [[patch_id]] a per-patch input at the
+                                                 * Location after every other (result.tess_*: what the plugin's
+                                                 * tessellation control stage writes). Without it such a function is
+                                                 * refused, as before. */
+#define NVMTL_AIR_NIR_MIN_LOD       (1u << 18)  /* the device applies a minimum-LOD clamp (shaderResourceMinLod, the
+                                                 * translator's capability bit 4): a sample's min_lod_clamp is applied
+                                                 * as the translator applies it, the MinLod of an implicit level and an
+                                                 * explicit level raised to it; without it, a clamp on a sample without
+                                                 * gradients is not applied (the translator's without its bit 4). A
+                                                 * gradient sample's clamp is always applied (MinLod). */
+/* Since version 9: */
+#define NVMTL_AIR_NIR_NULL_TEXTURES (1u << 19)  /* the translator reads every sampled texture argument through the
+                                                 * bindless heap (its bindless-all mode: NVMTL_NO_BINDLESS_ALL unset), so
+                                                 * a null texture (air.get_null_texture_*) is its placeholder image
+                                                 * (default_null_image_of): a float sampled image of the call's shape at
+                                                 * the first texture binding (32 + n) its module leaves free, after the
+                                                 * texture_buffer and texture-array arguments it declares there, one per
+                                                 * shape in the order the calls come; is_null_texture of it is true.
+                                                 * Reading it reads whatever is bound at texture n, as the translator's
+                                                 * does. Without it such a function is refused, as before. */
+
+/* Since version 10: */
+#define NVMTL_AIR_NIR_KEPT_SELF     (1u << 20)  /* without NVMTL_AIR_NIR_DESCRIPTORS, a function that indexes buffers with a
+                                                 * value read from memory (what descriptor_wanted names) is translated
+                                                 * with the buffers the translator's wrapper keeps as descriptors when
+                                                 * the frontend is sure of its answer on the module as the request gives
+                                                 * it (buffer_addresses.rs kept_roots and its module's forms): each such
+                                                 * buffer an unsized device buffer, its pointers reaching only GEPs of
+                                                 * the argument itself, casts, loads and stores as the address, nothing
+                                                 * stored through them, every load of 32-bit components; kept when the
+                                                 * first index of such a GEP (the runtime array's) is computed from a load
+                                                 * through a buffer and its elements are bytes or one type of 32-bit
+                                                 * scalars (read as with NVMTL_AIR_NIR_DESCRIPTORS, descriptor_elem_bits
+                                                 * 32, no guarded store), not kept when every access is a field of the
+                                                 * first element (result.descriptor_mask, resource_flags
+                                                 * NVMTL_AIR_NIR_RES_KEPT_SELF). Anything else is refused with
+                                                 * descriptor_wanted, as without the flag. */
+
+/* request.descriptor_elem_bits[n]: elements of more than one scalar width, typed member by member (round 11) */
+#define NVMTL_AIR_NIR_ELEM_MIXED     1u
+
+/* result.stage */
+#define NVMTL_AIR_NIR_STAGE_KERNEL   0u
+#define NVMTL_AIR_NIR_STAGE_VERTEX   1u
+#define NVMTL_AIR_NIR_STAGE_FRAGMENT 2u
+#define NVMTL_AIR_NIR_FRAGMENT_SET   1u          /* the descriptor set a fragment stage's resources are in */
+#define NVMTL_AIR_NIR_FETCH_SET      3u          /* [[color(n)]] inputs: the set the plugin binds the pass's colour views at */
+#define NVMTL_AIR_NIR_FETCH_BINDING  192u        /* ... at binding 192 + n, an input attachment (the translator's band) */
+#define NVMTL_AIR_NIR_HEAP_SET       2u          /* the bindless heap (reflect::BINDLESS_HEAP_SET) */
+#define NVMTL_AIR_NIR_HEAP_BINDING   0u          /* its sampled images (reflect::BINDLESS_HEAP_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_SAMPLERS  1u          /* its samplers (reflect::BINDLESS_SAMPLER_BINDING), since version 7 */
+#define NVMTL_AIR_NIR_HEAP_STORAGE   2u          /* its storage images (reflect::BINDLESS_STORAGE_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_UTEXEL    3u          /* its uniform texel buffers (reflect::BINDLESS_UTEXEL_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_STEXEL    4u          /* its storage texel buffers (reflect::BINDLESS_STEXEL_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_SLOTS     131072u     /* reflect::BINDLESS_HEAP_SLOTS: a table slot is masked to it */
+#define NVMTL_AIR_NIR_SAMPLER_SLOTS  2048u       /* reflect::BINDLESS_SAMPLER_SLOTS: a sampler handle is masked to it */
+#define NVMTL_AIR_NIR_TABLE_TEXTURE0 64u         /* the table's entry of texture 0's heap slot (TEXTURE_INDEX_BASE) */
+#define NVMTL_AIR_NIR_TABLE_ENTRIES  192u        /* 32 buffers, 32 of their entries' addresses, 128 textures */
+
+/* result.fragment_flags */
+#define NVMTL_AIR_NIR_FS_DEPTH        (1u << 0)  /* writes [[depth(any|greater|less)]] */
+#define NVMTL_AIR_NIR_FS_SAMPLE_MASK  (1u << 1)  /* writes [[sample_mask]] */
+#define NVMTL_AIR_NIR_FS_DISCARD      (1u << 2)  /* calls discard_fragment (a demote, as the translator's) */
+#define NVMTL_AIR_NIR_FS_EARLY_TESTS  (1u << 3)  /* [[early_fragment_tests]] */
+#define NVMTL_AIR_NIR_FS_PER_SAMPLE   (1u << 4)  /* reads [[sample_id]] or a sample-interpolated varying */
+#define NVMTL_AIR_NIR_FS_HELPERS_RETURN (1u << 5) /* since version 7: its helper invocations return at the entry, as the
+                                                 * SPIR-V road's invocation-independent physical-buffer modules'
+                                                 * (nvmtl_independent_helpers.h) */
+#define NVMTL_AIR_NIR_FS_DUAL_SOURCE (1u << 6)  /* since version 8: writes [[color(0), index(1)]], the second source of a
+                                                 * dual-source blend (Location 0, Index 1, as the translator's) */
+
+enum nvmtl_air_nir_status {
+   NVMTL_AIR_NIR_OK          = 0,
+   NVMTL_AIR_NIR_BAD_REQUEST = 1,   /* a field of the request is wrong, or the device is not NVK's */
+   NVMTL_AIR_NIR_NO_LLVM     = 2,   /* the LLVM library would not open or lacks a function this needs */
+   NVMTL_AIR_NIR_BAD_AIR     = 3,   /* the bitcode would not parse, or has no such kernel */
+   NVMTL_AIR_NIR_UNSUPPORTED = 4,   /* the kernel uses something this frontend does not translate yet */
+   NVMTL_AIR_NIR_NO_MEMORY   = 5,
+};
+
+struct nvmtl_air_nir_request {
+   uint32_t size;                    /* sizeof(struct nvmtl_air_nir_request) */
+   uint32_t flags;
+   const char *llvm_library;         /* path of the LLVM shared library to read the bitcode with */
+   const void *bitcode;              /* the function's AIR: an LLVM bitcode module, borrowed for the call */
+   size_t bitcode_size;
+   const char *entry;                /* the kernel's name; NULL takes the module's only kernel */
+   uint32_t local_size[3];           /* threadgroup size the pipeline is compiled for */
+   /* bytes of each [[threadgroup(n)]] argument, as setThreadgroupMemoryLength:atIndex: set them; a kernel with such an
+    * argument whose length is 0 here is refused */
+   uint32_t threadgroup_lengths[NVMTL_AIR_NIR_MAX_BUFFERS];
+
+   /* Since version 2, read only with NVMTL_AIR_NIR_FC_VALUES and a size that reaches them. The function constants the
+    * function was made with (newFunctionWithName:constantValues:), as the plugin hands them to the translator's
+    * nvmtl_translate_fc: [[function_constant(index)]] index, payload size in bytes and payload (a bool is one byte, 0
+    * or 1). A constant left out is not defined: air.is_function_constant_defined reads false, and a kernel that still
+    * reads its value once the others are folded is refused (the translator reads it as 0). Without the flag a kernel
+    * that reads any function constant is refused, as in version 1. */
+   uint32_t fc_count;
+   const uint32_t *fc_indices;
+   const uint32_t *fc_sizes;
+   const uint8_t *const *fc_payloads;
+
+   /* Since version 4, read only with NVMTL_AIR_NIR_VARYINGS and a size that reaches them: a vertex or fragment
+    * function's varyings. varying_keys[i] is a user semantic as the AIR names it (air.vertex_output or
+    * air.fragment_input: user(x) for [[user(x)]], the compiler's generated(...) name for the others; the name
+    * (air.arg_name) of one without a semantic), varying_locations[i] the Location it takes (0 to 31): the translator's
+    * reflection's for a vertex output, and for a fragment input the vertex output's Location of the same semantic, as
+    * the plugin links them (nvmtl_varying_link). */
+   uint32_t varying_count;
+   const char *const *varying_keys;
+   const uint32_t *varying_locations;
+
+   /* Since version 5, read only with NVMTL_AIR_NIR_SAMPLER_STATES and a size that reaches them: the state of the
+    * [[sampler(n)]] arguments the pipeline is bound with, as the plugin hands them to the translator's
+    * nvmtl_translate_sampler (the AIR constexpr-sampler word layout: filters, address modes, coordinates at bit 15,
+    * ...). An argument sampler given here with pixel coordinates is sampled as such; one not given is a normalized
+    * one, as before. */
+   uint32_t sampler_state_count;
+   const uint32_t *sampler_state_slots;     /* [[sampler(n)]] */
+   const uint64_t *sampler_state_words;     /* two words per sampler */
+
+   /* Since version 7, read only with NVMTL_AIR_NIR_DESCRIPTORS and a size that reaches it: bit n, [[buffer(n)]] is a
+    * storage-buffer descriptor in the translator's module as the plugin lowers it (NVMTL_AIR_NIR_DESCRIPTORS) */
+   uint32_t descriptor_buffers;
+   uint32_t reserved7;
+
+   /* Since version 8, read only with NVMTL_AIR_NIR_TESS and a size that reaches them: a post-tessellation vertex
+    * function's spacing and vertex order, the SPIR-V execution modes the plugin sets on the translator's module
+    * (SpacingEqual 1, SpacingFractionalEven 2, SpacingFractionalOdd 3; VertexOrderCw 4, VertexOrderCcw 5); 0 takes the
+    * translator's own (SpacingEqual, VertexOrderCcw) */
+   uint32_t tess_spacing;
+   uint32_t tess_order;
+
+   /* Since version 8, read with NVMTL_AIR_NIR_DESCRIPTORS and a size that reaches them: how the translator's module
+    * reads and writes each of descriptor_buffers (nvmtl_air_nir_kept_forms): descriptor_elem_bits[n], the width of
+    * every scalar of its runtime array's element (64: a ulong array, its 64-bit values one value each; 32: a word array,
+    * a 64-bit value two words, low first; 8 or 16 a byte or short array; NVMTL_AIR_NIR_ELEM_MIXED, since round 11, an
+    * element of integer and float scalars of more than one width, which the module types member by member: each value
+    * read and written as itself; 0 any other element, of pointers or of a type this does not read); bit n of
+    * descriptor_store_guarded, a store to it the module guards against a byte offset past 4 GiB (the translator's raw
+    * form, a word or byte array). A 64-bit access is taken with a width of 64, 32 or mixed; a store of components of the
+    * element's width (or 64 bits to a word array, any width to mixed elements), under the raw form's guard (round 11)
+    * when the module guards it and its offset has an index wider than 32 bits; anything else to such a buffer stays
+    * refused. An older frontend reads NVMTL_AIR_NIR_ELEM_MIXED as a width it does not take, and refuses as before. */
+   uint8_t descriptor_elem_bits[32];
+   uint32_t descriptor_store_guarded;
+   uint32_t reserved8;
+};
+#define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
+#define NVMTL_AIR_NIR_REQUEST_V3_SIZE 208u   /* the request without the varying_* fields */
+#define NVMTL_AIR_NIR_REQUEST_V4_SIZE 232u   /* the request without the sampler_state_* fields */
+#define NVMTL_AIR_NIR_REQUEST_V5_SIZE 256u   /* the request without descriptor_buffers */
+#define NVMTL_AIR_NIR_REQUEST_V7_SIZE 264u   /* the request without tess_spacing */
+#define NVMTL_AIR_NIR_REQUEST_V8_SIZE 312u   /* the whole version-8 request */
+#define NVMTL_AIR_NIR_TESS_INPUTS   40u      /* the inputs a tessellation evaluation stage lists (nvmtl_vk.c nvt_tese) */
+
+struct nvmtl_air_nir_result {
+   uint32_t size;                    /* sizeof(struct nvmtl_air_nir_result), set by the caller */
+   int32_t status;                   /* enum nvmtl_air_nir_status */
+   void *nir;                        /* nir_shader *, owned by the caller: nvmtl_air_nir_free_v1 */
+   uint32_t buffer_mask;             /* Metal buffer slots the kernel reads through the address table */
+   uint32_t shared_bytes;            /* threadgroup memory the kernel uses, static and arguments together */
+   uint32_t scratch_bytes;           /* thread-private memory LLVM could not keep in registers */
+   uint32_t instructions;            /* LLVM instructions translated */
+   char message[256];                /* why it was refused, or a one-line summary on success */
+
+   /* Since version 2, written when the caller's size reaches them. Bit n of word n / 32: */
+   uint32_t texture_mask[4];         /* [[texture(n)]] read through binding 32 + n */
+   uint32_t storage_mask[4];         /* [[texture(n)]] written or read-written through binding 480 + n */
+   uint32_t texbuf_mask[4];          /* the texture_mask bits that are texture_buffers (uniform texel buffers) */
+   uint32_t stexbuf_mask[4];         /* the storage_mask bits that are texture_buffers (storage texel buffers) */
+   uint32_t sampler_mask;            /* sampler slots read through binding 160 + n: arguments and constexpr samplers */
+   uint32_t static_sampler_count;
+   struct {
+      uint32_t slot;                 /* binding 160 + slot */
+      uint32_t pad;
+      uint64_t words[2];             /* the AIR state words of its __air_sampler_state global (filter, address, ...) */
+   } static_samplers[32];            /* every constexpr sampler of the module, in slot order */
+
+   /* Since version 3, written when the caller's size reaches it: */
+   uint32_t global_align;            /* the largest alignment a device or constant buffer access promises (bytes) */
+   uint32_t reserved;
+
+   /* Since version 4, written when the caller's size reaches them: */
+   uint32_t stage;                   /* NVMTL_AIR_NIR_STAGE_* */
+   uint32_t vertex_inputs;           /* vertex: bit n, [[attribute(n)]] is read at Location n */
+   uint8_t vertex_input_kind[32];    /* its components: 1 float, 2 signed integer, 3 unsigned integer (the plugin picks the
+                                      * attribute's VkFormat by it, as nvmtl_spv_input_kinds reads a module) */
+   uint32_t varyings;                /* the Locations the vertex writes or the fragment reads */
+   uint32_t color_outputs;           /* fragment: bit n, [[color(n)]] is written */
+   uint32_t fragment_flags;          /* NVMTL_AIR_NIR_FS_* */
+   uint32_t reserved4;
+
+   /* Since version 5, written with NVMTL_AIR_NIR_REFLECT when the caller's size reaches them and the function is
+    * translated: the function's reflection as the translator's nvmtl_reflect gives it (JSON, the keys and values the
+    * plugin reads: bindings, varyings, vertex_attributes, local_size, ...), malloc'd (the caller frees it with
+    * free()), reflection_size bytes without a terminating 0 (one follows); NULL and why in reflection_why when this
+    * frontend does not model what the function's reflection would hold. */
+   char *reflection;
+   size_t reflection_size;
+   char reflection_why[128];
+
+   /* Since version 6, written when the caller's size reaches them: */
+   uint32_t color_inputs;            /* fragment, with NVMTL_AIR_NIR_COLOR_INPUTS: bit n, a [[color(n)]] input is declared
+                                      * (read or not, as the translator declares every one): the plugin binds the open
+                                      * pass's colour view n at set 3, binding 192 + n, as for the SPIR-V road's module */
+   uint32_t resource_flags;          /* NVMTL_AIR_NIR_RES_*: what else the shader reads */
+
+   /* Since version 7, written when the caller's size reaches them: */
+   uint32_t descriptor_mask;         /* bit n, [[buffer(n)]] is read through its storage-buffer descriptor at binding n of
+                                      * the stage's set (NVMTL_AIR_NIR_DESCRIPTORS), not through the table */
+   uint32_t descriptor_wanted;       /* refused without NVMTL_AIR_NIR_DESCRIPTORS: the buffers it indexes with a value read
+                                      * from memory (the translator may keep any of them a descriptor); the plugin asks
+                                      * again with descriptor_buffers */
+
+   /* Since version 8, written when the caller's size reaches them: a post-tessellation vertex function (stage
+    * NVMTL_AIR_NIR_STAGE_VERTEX, a MESA_SHADER_TESS_EVAL shader, NVMTL_AIR_NIR_TESS), the interface the plugin's
+    * tessellation control stage writes, as nvt_scan_tese reads the translator's module: */
+   uint32_t tess_domain;             /* 0 not one; 1 triangle, 2 quad (MTLPatchType) */
+   uint32_t tess_control_points;     /* the n of [[patch(..., n)]] */
+   uint32_t tess_patch_id_location;  /* [[patch_id]]'s per-patch input (a 32-bit unsigned integer); ~0u: not read */
+   uint32_t tess_input_count;
+   struct {
+      uint32_t location;
+      uint32_t patch;                /* 1: per patch; 0: an array of array_length control points */
+      uint32_t kind;                 /* of its 32-bit components: 1 float, 2 signed, 3 unsigned integer */
+      uint32_t components;
+      uint32_t array_length;
+   } tess_inputs[NVMTL_AIR_NIR_TESS_INPUTS];   /* every input but the patch id, in the order they are declared */
+};
+#define NVMTL_AIR_NIR_RES_HEAP      (1u << 0)   /* the bindless heap (set 2) and the table's texture slots */
+#define NVMTL_AIR_NIR_RES_DESCRIPTORS (1u << 1) /* storage-buffer descriptors (descriptor_mask) */
+#define NVMTL_AIR_NIR_RES_KEPT_SELF (1u << 2)   /* since version 10: descriptor_mask (0 included) is the frontend's own
+                                                 * answer (NVMTL_AIR_NIR_KEPT_SELF), every one 32-bit words, read only */
+#define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
+#define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
+#define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */
+#define NVMTL_AIR_NIR_RESULT_V4_SIZE 1192u   /* the result up to reflection */
+#define NVMTL_AIR_NIR_RESULT_V5_SIZE 1336u   /* the result up to color_inputs */
+#define NVMTL_AIR_NIR_RESULT_V6_SIZE 1344u   /* the result up to descriptor_mask */
+#define NVMTL_AIR_NIR_RESULT_V7_SIZE 1352u   /* the result up to tess_domain */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* VkDevice is NVK's. Returns result->status. */
+typedef int (*nvmtl_air_to_nir_v1_fn)(void *device, const struct nvmtl_air_nir_request *request,
+                                      struct nvmtl_air_nir_result *result);
+typedef void (*nvmtl_air_nir_free_v1_fn)(void *nir);
+/* Since version 3. A copy of nir (a result's) for another threadgroup size: the frontend reads the size only through
+ * the shader's workgroup size, so the copy is the kernel translated for local_size. NULL when out of memory or the
+ * size is not 1 to 1024 invocations. Freed with nvmtl_air_nir_free_v1. */
+typedef void *(*nvmtl_air_nir_clone_v1_fn)(void *nir, const uint32_t local_size[3]);
+/* Since version 3. nir written as a blob (nir_serialize, names kept) into *data, malloc'd (the caller frees it with
+ * free()), and read back into a shader of the device's compiler. Only a blob this same NVK wrote may be read: the
+ * format is NVK's build's own. 0 / non-NULL on success. */
+typedef int (*nvmtl_air_nir_serialize_v1_fn)(void *nir, void **data, size_t *size);
+typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data, size_t size);
+/* Since version 5. The version of the request and result this NVK reads and writes (NVMTL_AIR_NIR_VERSION); an NVK
+ * without the export is version 4 or older, and ignores NVMTL_AIR_NIR_REFLECT and NVMTL_AIR_NIR_SAMPLER_STATES (the
+ * plugin then neither leaves the translator out nor hands it a sampler's state). A version-5 NVK ignores
+ * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs; one older than version 7 ignores NVMTL_AIR_NIR_ARGBUF,
+ * NVMTL_AIR_NIR_TYPED_DUMMIES and NVMTL_AIR_NIR_DESCRIPTORS, refuses argument buffers, and refuses a vertex or fragment
+ * function that indexes a buffer with a value read from memory without saying so in descriptor_wanted; one older than
+ * version 8 ignores NVMTL_AIR_NIR_TESS and refuses a post-tessellation vertex function; one older than version 9
+ * ignores NVMTL_AIR_NIR_NULL_TEXTURES and refuses a null texture; one older than version 10 ignores
+ * NVMTL_AIR_NIR_KEPT_SELF (it always refuses with descriptor_wanted) and reads a constant the request does not give as
+ * not known (it refuses what depends on it). */
+typedef int (*nvmtl_air_nir_version_v1_fn)(void);
+#define NVMTL_AIR_NIR_VERSION 10
+#ifdef __cplusplus
+}
+#endif
+
+#endif

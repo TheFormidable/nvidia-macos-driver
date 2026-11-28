@@ -63,6 +63,10 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint64_t gmask[2][4]; uint32_t gmask_ok;
     uint64_t gmask2[2][4], bmask2[4]; uint32_t gmask2_ok, bmask2_ok;   /* the same with the framebuffer-fetch set (3) left out like the heap (NVMTL_DESC_MASK) */
     uint32_t ag_mask, ag_req; void *ag_src; size_t ag_srcn; void *ag_safe;
+    /* the buffers of each stage's set its module keeps storage-buffer descriptors of 64-bit or mixed-width elements:
+       bound only at an offset that is a multiple of 8 as well (a 64-bit access there promises 8 bytes) */
+    uint32_t kept8[2];
+    uint32_t sb_unchecked;   /* a compute pipeline made without buffer bounds checks: no null storage-buffer descriptor */
     uint64_t shape_identity;
     uint32_t lin;
     uint64_t tbm[2][4]; uint32_t tbany;
@@ -75,8 +79,24 @@ typedef struct { void *rp; void *pipe; void *layout; int has_depth; uint32_t dfm
     uint32_t gl_uniform_layout, gl_uniform_slot[2], gl_uniform_range[2], gl_uniform_tracked;
     uint32_t db_dyn;   /* the depth bounds test and its range are dynamic state of this pipeline (depth attachment + depthBounds feature) */
     uint32_t view_mask;   /* multiview: the views this pipeline's render pass runs (vertex amplification), 0 for an ordinary pass */
+    /* a compute kernel on the AIR-to-NIR road (NVMTLAirNir.m): its NIR shader, owned (nvmtl_air_nir_free_v1), which each
+       threadgroup-size variant is a copy of; the size it was translated for; and what the align guard's build needs (a
+       retained object of NVMTLAirNir.m's, released with the pipeline). NULL on the SPIR-V road. */
+    void *air_nir; uint32_t nir_local[3]; void *nir_owner;
 } nvk_pipeline;
 void nvmtl_vk_pipeline_destroy(nvk_pipeline *p);
+struct nvmtl_air_nir_result;
+/* A compute pipeline from an AIR-to-NIR result (nvmtl_vk.c): the layout every compute pipeline has, the descriptor masks
+   from the result, compiled for local and kept as that size's variant. Takes nir on success (the caller frees it on a
+   failure). 0 on success. */
+int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_result *res, const uint32_t local[3], nvk_pipeline *out);
+/* 1 when NVK exports the AIR-to-NIR road (the plugin opened it directly), 0 otherwise */
+int nvmtl_vk_air_nir_exports(void);
+int nvmtl_vk_air_nir_version(void);
+int nvmtl_vk_bindless_heap(void);       /* set 2 of the pipeline layouts is the bindless heap */
+int nvmtl_vk_fetch_copy_active(void);   /* framebuffer fetch is emulated by copies in this process (NVMTL_FETCH_COPY) */
+/* 1 when a dispatch of threadgroup size l can run p, a kernel on the AIR-to-NIR road (always 1 on the SPIR-V road) */
+int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3]);
 typedef struct { void *pool; nvk_buffer stage; } nvk_queue;
 #include "nvmtl_sampler_desc.h"
 typedef struct { void *s; int linear, repeat; float lod_min, lod_max; nvmtl_sampler_desc desc; int full_state; } nvk_sampler;
@@ -414,6 +434,14 @@ int  nvmtl_vk_pipeline_create_rt(const void *vs, size_t vn, const void *fs, size
                                  const nvk_tess_desc *td, void *out);
 void nvmtl_vk_pipeline_try_gl_uniform(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vi, uint32_t fi,
                                      const nvk_rt *rt, const void *vin, uint32_t samples, nvk_pipeline *base);
+/* A render pipeline from two AIR-to-NIR results, a vertex and a fragment stage (nvmtl_vk.c): the SPIR-V road's layout,
+   render pass, vertex input and state, the descriptor masks from the results. vnir and fnir stay the caller's (NVK
+   clones them). With td, the vertex stage is a post-tessellation one (vres->tess_domain): the SPIR-V road's
+   tessellation control and vertex stages are made from what vres says it reads, as from the translator's module. 0 on
+   success. */
+int  nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *vres, void *fnir, const struct nvmtl_air_nir_result *fres,
+                                  const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, const nvk_tess_desc *td,
+                                  nvk_pipeline *out);
 int  nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p);
 int  nvmtl_vk_fetch_copy(nvk_cmdbuf *c, const nvk_pass *ps, uint32_t mask);   /* after the pass has ended: copy the colour attachments in mask */
 int  nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps);

@@ -255,13 +255,12 @@ pub(in crate::passes) fn dynamic_i32_offset_components(
             Some(raw),
             vec![Operand::IdRef(offset), Operand::LiteralBit32(idx as u32)],
         ));
+        // Metal's sample offset is an int2/int3 (signed) whatever the SPIR-V type its value came in: an offset loaded
+        // from a buffer the module reads as uint words is still -4, not 4294967292
+        let _ = signed;
         let converted = ctx.module.fresh_id();
         out.push(Instruction::new(
-            if signed {
-                Op::ConvertSToF
-            } else {
-                Op::ConvertUToF
-            },
+            Op::ConvertSToF,
             Some(ctx.ty_float()),
             Some(converted),
             vec![Operand::IdRef(raw)],

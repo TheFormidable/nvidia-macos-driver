@@ -2947,6 +2947,11 @@ fn llvm_arg_has_attribute(arg: &str, attribute: &str) -> bool {
         .any(|token| token == attribute)
 }
 
+#[cfg(test)]
+pub(crate) fn static_sampler_constants_for_test(ll: &str) -> Result<Vec<[u64; 2]>, String> {
+    parse_static_sampler_constants(ll)
+}
+
 fn parse_static_sampler_constants(ll: &str) -> Result<Vec<[u64; 2]>, String> {
     let mut globals = crate::fxhash::HashMap::<String, [u64; 2]>::default();
     let mut nodes = crate::fxhash::HashMap::<u32, String>::default();

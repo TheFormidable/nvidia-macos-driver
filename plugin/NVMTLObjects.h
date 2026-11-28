@@ -314,7 +314,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLLibrary () { @public NSString *_label; } @end
 @interface NVMTLCommandQueue () { @public NSString *_label; } @end
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
-@interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; } @end
+@interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; NSSet *_tileAttach; } @end
 @interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; BOOL _mipsWritten; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
@@ -322,7 +322,29 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLComputePipelineState () { @public uint64_t _resid; NSUInteger _attrT, _askT; } @end
 // _sassKernel: machine code that runs before the Vulkan pipeline; _sassOnly: there is no Vulkan pipeline
 @interface NVMTLComputePipelineState () { @public id _sassKernel; BOOL _sassOnly; } @end
+// The road the pipeline's kernel took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V. On the AIR-to-NIR
+// road, _nirTg is the threadgroup-memory lengths it was translated with (nil for none) and _spvTwin the same kernel on
+// the SPIR-V road, made the first time a dispatch asks for a threadgroup size the road does not run, or the first
+// dispatch after a GPU fault turned the road off in the process (nvmtl_air_nir_gpu_fault).
+@interface NVMTLComputePipelineState () { @public uint8_t _road; NSDictionary *_nirTg; id _spvTwin; } @end
+// A function whose AIR is the translator's own rewrite (a mesh or object stage's kernel, a tile function's, a kernel with
+// a stage-in layout): its compute pipeline takes the SPIR-V road only.
+@interface NVMTLFunction () { @public BOOL _spirvOnly; } @end
+// Phase 4 of AIR to NIR (NVMTLAirNir.m): _spirvLazy, newFunctionWithName: left the translator out because the frontend
+// translates the function and gave its reflection (_nrefl, also in _refl); its SPIR-V is made the first time something
+// needs it (nvmtl_function_spirv), exactly as newFunctionWithName: would have made it. _samplerStates: the AIR state words of
+// the pixel-coordinate argument samplers a sampler variant on the road is translated for (slot to [word0, word1]);
+// _roadOnly: such a variant's stage, which never takes the SPIR-V road (the variant falls back to the translator's then).
+@interface NVMTLFunction () { @public BOOL _spirvLazy, _roadOnly; NSDictionary *_nrefl, *_samplerStates; } @end
+NSData *nvmtl_function_spirv(NVMTLFunction *f, const char *why);
+static inline BOOL nvmtl_function_has_spirv(NVMTLFunction *f) { return f && (f->_spirv.length || f->_spirvLazy || f->_roadOnly); }
+BOOL nvmtl_air_nir_lazy(NVMTLFunction *f);
+void nvmtl_air_nir_refl_check(NVMTLFunction *f);
+NSArray *nvmtl_air_nir_sampler_stages(NVMTLFunction *vf, NVMTLFunction *ff, NSDictionary *vS, NSDictionary *fS, NSString **why);
 @interface NVMTLRenderPipelineState () { @public uint64_t _resid; } @end
+// The road the pipeline's stages took (NVMTLAirNir.m): _road 1 AIR to NIR, 0 the translator's SPIR-V. _spvTwin: a road
+// pipeline's SPIR-V twin, made at its first bind after a GPU fault turned the road off in the process.
+@interface NVMTLRenderPipelineState () { @public uint8_t _road; id _spvTwin; } @end
 // _descriptor's vertex and fragment functions, read once when the pipeline is made: the descriptor is a copy nothing
 // changes afterwards, and a draw read them through two getters
 @interface NVMTLRenderPipelineState () { @public id<MTLFunction> _vfn, _ffn; } @end

@@ -173,10 +173,8 @@ static NSArray<NSArray *> *nvmtl_static_samplers(NVMTLFunction *fn)
     @synchronized (fn) {
         cached = objc_getAssociatedObject(fn, NVMTL_SSAMP_KEY);
         if (cached) return cached;
-        char e[512] = { 0 };
-        NSData *d = (fn->_air && fn->_stage.length && nvmtl_xlate_ready() && xlate_refl)
-                  ? nvmtl_reflect_air_cached(fn, fn->_air, fn->_stage, e, sizeof e) : nil;
-        NSDictionary *refl = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
+        // the function's reflection: the frontend's for one newFunctionWithName: made without the translator (phase 4)
+        NSDictionary *refl = (fn->_air && fn->_stage.length) ? nvmtl_function_reflection(fn) : nil;
         NSArray *all = [refl isKindOfClass:[NSDictionary class]] ? refl[@"bindings"] : nil;
         for (NSDictionary *b in [all isKindOfClass:[NSArray class]] ? all : @[]) {
             if (![b isKindOfClass:[NSDictionary class]] || ![b[@"kind"] isEqual:@"StaticSampler"]) continue;
@@ -240,8 +238,18 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
         cached = objc_getAssociatedObject(fn, &nvmtl_embedded_plan_key);
         if (cached) return cached;
         NSMutableArray *plans = [NSMutableArray new];
-        uint64_t decl[2][8]; const BOOL haveDecl = nvmtl_spirv_declared(fn->_spirv, decl); unsigned heapRouted = 0;
-        for (NSDictionary *entry in nvmtl_embedded_bindings(fn)) {
+        // the SPIR-V's declared bindings, read only when there is an argument-buffer resource to route. A function made
+        // without the translator (its SPIR-V not made yet) is not translated for this: its pipelines on the road read
+        // every argument-buffer texture through the heap but a written one that is one field (not an array), which the
+        // frontend binds at the embedded binding as the translator does (nvk_air_to_nir.c air_handle_texture); a SPIR-V
+        // module made later for it binds the same, and leaves at their own bindings only textures it never reads.
+        NSArray *embedded = nvmtl_embedded_bindings(fn);
+        const BOOL road = fn->_spirvLazy;
+        // what the frontend's NIR binds per draw (its reflection's air_nir_per_draw, synthetic indices)
+        NSArray *perDraw = road && [fn->_nrefl[@"air_nir_per_draw"] isKindOfClass:[NSDictionary class]] ? fn->_nrefl[@"air_nir_per_draw"][@"textures"] : nil;
+        if (![perDraw isKindOfClass:[NSArray class]]) perDraw = @[];
+        uint64_t decl[2][8]; const BOOL haveDecl = embedded.count && !road && nvmtl_spirv_declared(nvmtl_function_spirv(fn, "argument-buffer routing"), decl); unsigned heapRouted = 0;
+        for (NSDictionary *entry in embedded) {
             NSDictionary *src = entry[@"embedded_source"];
             NSNumber *slotNum = entry[@"metal_index"];
             if (![src isKindOfClass:[NSDictionary class]] || !slotNum) continue;
@@ -258,6 +266,7 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
               plan->dbinding = [binding respondsToSelector:@selector(unsignedIntValue)] ? [binding unsignedIntValue] : UINT32_MAX; }
             if (haveDecl && !plan->wantSampler && plan->dset < 2 && plan->dbinding < 512 &&
                 !((decl[plan->dset][plan->dbinding >> 6] >> (plan->dbinding & 63)) & 1)) { heapRouted++; continue; }
+            if (road && !plan->wantSampler && ![perDraw containsObject:@(plan->slot)]) { heapRouted++; continue; }
             [plans addObject:plan];
         }
         { static _Atomic unsigned said; if (heapRouted && atomic_fetch_add(&said, 1) < 8)
@@ -380,6 +389,14 @@ void nvmtl_bind_embedded(NVMTLCommandBuffer *cb, uint32_t set, NVMTLFunction *fn
         } else {
             NVMTLTexture *t = resource;
             nvmtl_retain_resource(cb, t);
+            if (t->_tbView) {
+                // a texture_buffer: its buffer view in the texel band, as setTexture: binds one (it has no image view;
+                // WAS bound as an image, so a written one's writes were lost on both roads, test ab_encoder)
+                if (nvmtl_hz_bind_texel(&cb->_c, [t nvi], nvmtl_hz_untracked_tex(t), set, slot, t->_tbView, t->_tbStorage))
+                    nvlog("embedded texture buffer slot %u: bind FAILED", slot);
+                embSurf = YES;   // its view is rebound with the buffer each time
+                continue;
+            }
             nvmtl_surface_in_for_cb(cb, t);
             { NVMTLTexture *sr = t->_parent ? t->_parent : t; if (sr->_surf) embSurf = YES; }
             if (nvmtl_vk_bind_texture_view(&cb->_c, set, slot, [t nvsampleview]))
