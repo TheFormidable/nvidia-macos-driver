@@ -1272,6 +1272,123 @@ level 0 on the SPIR-V road. The tessellation tests' attachments are equal byte f
   64-bit values in kept buffers of mixed element widths; Metal's ordering of raster order groups and its reads of a kept
   buffer bound at a misaligned offset, on both roads.
 
+## Kept buffers where Metal binds them, unbound bindings, texture_buffer arrays and the raw form (round 11)
+
+Part A of round 11 (3.0.27, the desktop since its boot, read only): clean. The installed files are the signed 941c6185
+package's; WindowServer on the road (62 of 64 render pipelines, its compute ones too), the crash marker cleared after 60
+s; no Xid, channel recovery, device loss or "AIR to NIR off in", no fallback list, the four counters 0, no crash or
+hang report. Of 189 nir1 entries since the boot 52 are refusals, all the descriptor retry's first request.
+
+**A kept buffer bound at a 4-byte offset is read where Metal binds it, on both roads.** A buffer the translator keeps
+a bounds-checked storage-buffer descriptor (indexed with a value read from memory) could not be a descriptor at an
+offset below NVK's 16-byte `minStorageBufferOffsetAlignment`, and both roads bound the plugin's 256-byte dummy there
+(`r_oob_misaligned` read the dummy). NVK now gives the plugin's instance (engine `NVMTL`) 4-byte storage-buffer offsets
+(`nvk-air-nir.patch`: the drirc option `nvk_ssbo_align_4b`, which upstream sets for vkd3d), and the plugin binds such a
+buffer at its offset when it is a multiple of the device's alignment, and of 8 as well for a buffer whose module reads
+64-bit or mixed-width elements there (`kept8`, from the lowered module on the SPIR-V road and from the descriptor retry
+on the road: a 64-bit access promises 8 bytes). The base address is then only 4-byte aligned, so what an access through
+it promises is the align guard's, as a device buffer's: render modules are already built without promises above their
+scalars (the SPIR-V road's SAFE build, which clamps kept accesses too; the frontend's accesses to such a buffer now take
+`NVMTL_AIR_NIR_ALIGN4` as at most their components' size: a 64-bit value split in two would read its low half where the
+module's whole read gives 0), and a kernel's are guarded at dispatch (the road's compute guard now covers its
+descriptor buffers). An offset that is not a multiple of 4 (or of 8 for `kept8`) still cannot be matched: Metal itself
+requires the data type's alignment there.
+
+**Unbound bindings are not shared any more.** Every storage buffer, texel buffer and address-table entry with nothing
+bound read and wrote the same 256-byte dummy, so a draw that wrote through one changed what later draws read through
+another (round 10 found 0xff in it). Now a storage buffer of a bounds-checked pipeline with nothing usable bound is a
+null descriptor (`VK_EXT_robustness2`'s `nullDescriptor` only: it reads 0 and drops stores), the address table's unbound
+entries, written texel buffers and an unchecked kernel's storage buffers are a write dummy of their own (heap binding 4
+too), and the zero dummy is only ever read (sampled texel buffers, the GL uniform buffer).
+
+**Raster order groups stay unordered.** Metal orders the accesses of a raster order group between overlapping
+fragments; Vulkan's way is `fragmentShaderPixelInterlock` (`VK_EXT_fragment_shader_interlock`), which NVK does not
+expose on any GPU in this tree (its extension table has no entry, and NAK has no lowering of
+`begin/end_invocation_interlock`: only the SPH's interlock-ticket field). Both roads keep binding these groups as the
+translator does, without interlock; nothing changed.
+
+**Arrays of `texture_buffer`s indexed at run time, on both roads.** The translator kept such an array one array binding
+(32 + n with N elements, 480 + n when written), which the plugin's layout holds with one descriptor: every element but
+the first read zeros on the SPIR-V road, and the frontend refused. Both now read the element through the bindless heap's
+uniform texel buffers (set 2, binding 3) and write it through its storage texel buffers (binding 4), at the slot the
+per-draw table holds for texture n + min(index, N - 1) (`resources::split_storage_texture_arrays`,
+`air_texarray_load`), as written image arrays already were. The plugin gives a texture buffer bound per draw a heap slot
+(`nvmtl_bl_texel_slot`, its view at binding 3 and, when writable, 4), writes it into the table and drops it when the view
+is destroyed.
+
+**The translator's raw form and mixed-width elements of kept buffers, on the road.** A kept buffer the translator reads
+and writes as more than one type is a word array whose stores it guards against byte offsets past 4 GiB
+(`emit_raw_u32_addressable`: the store is made only when the offset, computed in 64 bits with each GEP index
+sign-extended, is at most `UINT32_MAX - (size - 1)`, when one of its indices is wider than 32 bits); the frontend now
+follows each kept pointer's offset in 64 bits the same way and guards the same stores. A kept array of structs of more
+than one scalar width the translator types member by member: the plugin's forms say so (`NVMTL_AIR_NIR_ELEM_MIXED`, a
+value an older frontend refuses as before), and the frontend reads and writes each value as itself, a 64-bit member as
+one value. (With the plugin's opaque-pointer AIR, a buffer stored to as floats and float2s is typed `float`, not raw:
+`r_kept_guarded` also reads half-words, which make it raw.)
+
+**Still refused: null textures and imageblocks.** `air.get_null_texture_*` is lowered by the translator to a
+placeholder sampled image at the first texture binding its module leaves free at that point
+(`default_null_image_of`), and `is_null_texture` of it to `true`, of an argument to `false`. With bindless textures the
+module often declares no binding for an argument read through the heap, so the placeholder can land on an argument's own
+binding: a kernel choosing between `texture(0)` and a null texture reads the placeholder at binding 32, which is
+`texture(0)` itself (measured offline). The reflection names it (`SynthesizedNullTexture`). The frontend would need that
+binding from the translator's module (a retry like the descriptor buffers'), which is not done yet; of the AIR cache's
+71 functions with null textures, 58 also link visible functions MPS supplies at pipeline creation (not in the cache)
+and the other 13 (VideoToolbox's composite, RenderBox's fixed fragments) need their function constants. Imageblocks:
+unchanged from round 10.
+
+### Tested (round 11)
+
+| test | what | tolerance |
+|---|---|---|
+| r_oob_misaligned | r_oob's palette bound at offset 4, read there (each component bounds-checked), after a kernel wrote through unbound bindings | exact |
+| r_dummy_rw | an unbound kept buffer and an unbound `texture_buffer` read 0 after a kernel wrote through unbound ones | exact |
+| tex_tbarray | `texture_buffer` arrays read and written at run-time indices (now `MUST_ROAD`) | exact |
+| r_kept_mixed | a kept array of structs of mixed widths: a ulong straddling the end reads 0, its store is dropped whole | exact |
+| r_kept_guarded | a kept word array (raw form) stored to as floats, uints and float2s: past 4 GiB dropped, past the end dropped, a straddling float2 split | exact |
+
+`r_oob_misaligned`, `r_dummy_rw` and `tex_tbarray` fail on both roads with 3.0.27's plugin, NVK and translator
+(`r11/oldbuild.sh`); `r_kept_mixed` and `r_kept_guarded` take the SPIR-V road there (refused). The translator's
+`native_dynamic_texture_buffer_arrays_use_the_heap_texel_buffers` checks the heap routing.
+
+- `sweep.py --reflect` over the AIR cache (`r11/sweeps.sh`, round 5's list): of 10,814 functions the frontend
+  translates 5,893 (as round 10: none of the cache's functions has a run-time `texture_buffer` array, a guarded store or
+  a mixed-width kept buffer), every reflection equal to the translator's (different 0, not reflected 0), the same
+  functions and the same refusal reasons as round 10: a function constant read without its value 4,026, an argument
+  index from one 572, a stage input under one 72, a texture argument under one 59, a `[[color(n)]]` input under one 27,
+  implicit imageblocks 26, an output under one 24, a kernel's `stage_in` 17, `amplification_id` 14, an instance
+  acceleration structure 13 (explicit imageblocks 7); the two MPS modules whose translator reflection does not finish
+  stay crashes. 437 asked again with descriptor buffers, 409 then translate.
+- WindowServer's functions on disk: 179 of 211 equal (as round 10; refused: implicit imageblocks 13, constants without
+  values 9, stage inputs under them 5, explicit imageblocks 3, outputs under them 2); with each module's constants all 0
+  and all 1, 12 equal and 14 not reflected (initializer-computed gates).
+- On the card (`r11/final-runs.sh`, the development plugin, this tree's NVK and translator, `MESA_SHADER_CACHE_DISABLE=true`;
+  the four fault counters 0 before and after every run, none new; WindowServer logged no GPU error): with
+  `NVMTL_AIR_NIR=1` 122 pass twice and once with the first run's caches (114 on the road; `fc_refuse`, `fc_kernel_c`,
+  `fc_kernel_none`, `fc_texture_none`, `r_primid` and `r_fcin_missing` take the SPIR-V road as they must; `ib_refuse`
+  and `tex_pixborder` are refused by both), `grid2d_base` and `oob_kernel` skipped. With `NVMTL_AIR_NIR=0` 121 pass
+  twice, `r_handlechoice` skipped as well. With `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails on
+  both roads (the six that pass are those refusals). Compute with `NVMTL_COMPUTE_ROBUST=1`: 68 pass on each road. The
+  fetch tests and `r_rog` with framebuffer fetch off pass on both roads and by copies; the pixel-coordinate tests and
+  `tex_bicubic` without the hardware filter pass on both roads; the three argument-buffer tests 50 times from their
+  setup pass 150 of 150 on each road; the attachments of the new and round-10 render tests are equal byte for byte on
+  both roads (19 of 19); the `ws_marker` trio passes.
+- The translator's tests (`r11/ttests.sh`, `--no-fail-fast`): 2,599 pass and 26 fail, exactly the 26 that 941c6185's
+  tree fails (fixtures the public tree does not ship, the heap's set 2, two image shapes, the wrapper's literal `$HOME`
+  path); the new one passes.
+- Host: `test_air_nir_plugin.py`, `test_embedded_fast.py`, `test_a8_framebuffer_fetch.py`, `test_graphics_bindings.py`,
+  `test_address_snapshot.py` and `test_opengl_perf.py` (their fixtures follow the write dummy, the texture-buffer table
+  slots and the reused set's kept8 and null-descriptor key), `test_switch_registry.py`, `test_refusal_reasons.py`,
+  `test_cgl_gld_guard.py`, `test_host_buffer_release.py`, `test_import_cache_limit.py`,
+  `test_mem_unmap_no_double_free.py`, `test_nocopy_once.py`, `test_nvk_local_map.py`, `test_readonly_copyback.py`,
+  `test_static_sampler_device.py`, `test_texrc.py`, `test_submission_copies.py`, `test_slot_handle_guard.py`,
+  `test_surfin_zero_plugin.py`, `test_zink_subdata_stage.py` pass; `test_fetch_copy.py` skips (no glslangValidator);
+  `test_nvk_nak_switch_key.py` fails as it fails at 941c6185 (the frontend's `NVMTL_AIR_NIR_DEBUG` and `_DUMP` reads
+  are in neither its key table nor its exempt list).
+- Left: null textures (the translator's placeholder binding, which needs the translator's module), imageblocks (its tile
+  rewrite and cell staging), raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a
+  multiple of 4 (or of 8 for 64-bit elements).
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).

@@ -2,6 +2,25 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 11: kept buffers where Metal binds them, unbound bindings, texture_buffer arrays, the raw form
+
+- **Fixed on both roads: a buffer the translator keeps bounds-checked, bound at an offset below 16 bytes, read the
+  plugin's shared dummy** instead of the buffer. NVK gives the plugin's instance 4-byte storage-buffer offsets
+  (`nvk_ssbo_align_4b`), the plugin binds such a buffer where Metal binds it, and what its accesses promise is checked by
+  the align guard as a device buffer's.
+- **Fixed on both roads: unbound bindings shared one dummy**, so a draw writing through one changed what another read.
+  An unbound storage buffer of a bounds-checked pipeline is now a null descriptor (reads 0, stores dropped:
+  `VK_EXT_robustness2`'s `nullDescriptor`); every other writable dummy has a buffer of its own.
+- **Fixed on both roads: arrays of `texture_buffer`s indexed at run time** read zeros on the SPIR-V road (and were
+  refused on the road). Both read and write the element through the bindless heap's texel buffers, at the slot the
+  per-draw table now holds for a bound texture buffer.
+- On the road: the translator's raw form of a kept buffer (stores guarded against offsets past 4 GiB, guarded the same
+  way) and kept arrays of structs of mixed scalar widths (each value as itself, 64-bit members whole).
+- Unchanged, with the reason: raster order groups stay unordered on both roads (NVK has no fragment shader interlock);
+  null textures and imageblocks stay refused.
+- Tests (`tools/air-nir`): `r_oob_misaligned` (Metal's data now), `r_dummy_rw`, `r_kept_mixed`, `r_kept_guarded`
+  (render), `tex_tbarray` (compute, on the road); `plugin_run` can dispatch a kernel before a draw.
+
 ### AIR to NIR, round 10: tessellation, raster order groups, dual-source blending, minimum-LOD clamps, kept buffers
 
 - **Post-tessellation vertex functions take the road** (NVK's AIR-to-NIR frontend, ABI version 8): the frontend makes
