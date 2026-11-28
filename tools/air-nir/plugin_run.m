@@ -850,6 +850,10 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
       rp.colorAttachments[i].storeAction = MTLStoreActionStore;
       rp.colorAttachments[i].clearColor = MTLClearColorMake(clear_col[0], clear_col[1], clear_col[2], clear_col[3]);
    }
+   if (r->tile_ps) {
+      rp.tileWidth = 16;
+      rp.tileHeight = 16;
+   }
    if (depth) {
       rp.depthAttachment.texture = depth;
       rp.depthAttachment.loadAction = MTLLoadActionClear;
@@ -908,6 +912,12 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
       else
          [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount];
    }
+   if (r->tile_ps) {
+      /* the tile function over the pass's tiles after the draws (r_tile) */
+      [re setRenderPipelineState:r->tile_ps];
+      [re setTileBytes:&r->tile_g length:sizeof r->tile_g atIndex:0];
+      [re dispatchThreadsPerTile:MTLSizeMake(16, 16, 1)];
+   }
    [re endEncoding];
 }
 
@@ -933,6 +943,11 @@ run_render_test(const struct rtest *t)
    char path[2048], why[256] = "";
    const char *name = t->name;
    snprintf(path, sizeof path, "%s/%s.metallib", air_dir, t->air);
+   if (t->needs_env && !(getenv(t->needs_env) && !strcmp(getenv(t->needs_env), "1"))) {   /* an opt-in of the plugin's (r_tile) */
+      printf("%-16s SKIPPED  needs %s=1\n", name, t->needs_env);
+      fprintf(rtsv, "%s\tnone\tSKIPPED\t\t\t\t\t0\tneeds %s=1\t%s\n", name, t->needs_env, t->tolerance);
+      return SKIPPED;
+   }
    if (!strcmp(t->air, "qc_blit") && access(path, R_OK) != 0) {   /* QuartzCore's functions: PLUGIN_RUN_EXTRA_AIR */
       printf("%-16s SKIPPED  no %s.metallib (PLUGIN_RUN_EXTRA_AIR)\n", name, t->air);
       fprintf(rtsv, "%s\tnone\tSKIPPED\t\t\t\t\t0\tno library\t%s\n", name, t->tolerance);
@@ -1165,6 +1180,7 @@ run_render_test(const struct rtest *t)
    [r.tfac_in release];
    [r.tfac_cps release];
    [r.pre_cps release];
+   [r.tile_ps release];
    for (unsigned i = 0; i < RMAXTEX; i++) {
       [r.ftex[i] release];
       [r.tstage[i] release];

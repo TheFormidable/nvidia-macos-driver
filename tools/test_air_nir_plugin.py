@@ -109,8 +109,23 @@ def variants(s):
 def rewrites_stay(s):
     dv, ll = strip_comments(s["plugin/NVMTLDevice.m"]), strip_comments(s["plugin/NVMTLLibraryLoad.m"])
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
-    return (dv.count('_spirvOnly = YES;') == 3 and 'sf->_spirvOnly = YES;' in ll and
+    return (dv.count('_spirvOnly = YES;') == 2 and 'sf->_spirvOnly = YES;' in ll and
             'if (f->_spirvOnly) {' in body(an, 'BOOL nvmtl_air_nir_wanted('))
+
+# round 11: a tile function's rewrite is a compute kernel's AIR, which may take the road; the attachments of the
+# dispatch dispatchThreadsPerTile makes get storage twins whatever their usage (Metal asks only for render-target usage)
+def tile_road(s):
+    dv = strip_comments(s["plugin/NVMTLDevice.m"])
+    f = body(dv, 'id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32_t th, NSString **why) {')
+    return 'v->_stage = @"kernel"; v->_spirvOnly = NO;' in f and '_spirvOnly = YES' not in f
+
+def tile_twins(s):
+    ob = strip_comments(s["plugin/NVMTLObjects.m"])
+    sv = body(ob, 'static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOOL writes) {')
+    dt = body(ob, '- (void)dispatchThreadsPerTile:(MTLSize)threadsPerTile {')
+    a, b, c = dt.find('_cb->_tileAttach = att;'), dt.find('[ce setTexture:_colTex[i] atIndex:NVMTL_TILE_TEXTURE_BASE + i]'), dt.find('_cb->_tileAttach = nil;')
+    return ('[cb->_tileAttach containsObject:t]' in sv and '!(usage & MTLTextureUsageShaderWrite) && !tileAtt)' in sv and
+            0 <= a < b < c and dt.find('[ce endEncoding];') < c)
 
 def text_ir_setjmp(s):
     fe = strip_comments(s["nvk/air/nvk_air_to_nir.c"])
@@ -314,8 +329,12 @@ CHECKS = [
      ("plugin/NVMTLAirNir.m", '@"threadgroup": tgLen ?: @{},', '')),
     ("a threadgroup-size variant on the road is a copy of its NIR, and destroy frees the NIR", variants,
      ("plugin/nvmtl_vk.c", 'if (ni.nir) pnvk_air_nir_free(ni.nir);', '')),
-    ("kernels whose AIR is the translator's rewrite (mesh, object, tile, stage-in) stay on SPIR-V", rewrites_stay,
+    ("kernels whose AIR is the translator's rewrite (mesh, object, stage-in) stay on SPIR-V", rewrites_stay,
      ("plugin/NVMTLLibraryLoad.m", '    sf->_spirvOnly = YES;', '')),
+    ("a tile function's rewrite (a compute kernel's AIR) may take the road", tile_road,
+     ("plugin/NVMTLDevice.m", 'v->_stage = @"kernel"; v->_spirvOnly = NO;', 'v->_stage = @"kernel"; v->_spirvOnly = YES;')),
+    ("a tile dispatch's colour attachments get storage twins whatever their usage", tile_twins,
+     ("plugin/NVMTLObjects.m", '!(usage & MTLTextureUsageShaderWrite) && !tileAtt)', '!(usage & MTLTextureUsageShaderWrite))')),
     ("a dispatch of a size the road does not run takes the kernel's SPIR-V twin (three dispatch paths)", size_twin,
      ("plugin/NVMTLObjects.m", '    selected = nvmtl_air_nir_for_size(selected, l);\n    if (nvmtl_vk_tg_reject(l, NULL,', '    if (nvmtl_vk_tg_reject(l, NULL,')),
     ("the frontend's text-IR parse changes nothing between setjmp and longjmp", text_ir_setjmp,

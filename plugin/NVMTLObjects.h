@@ -314,7 +314,7 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLLibrary () { @public NSString *_label; } @end
 @interface NVMTLCommandQueue () { @public NSString *_label; } @end
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
-@interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; } @end
+@interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; NSSet *_tileAttach; } @end
 @interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; BOOL _mipsWritten; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end

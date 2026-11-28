@@ -2762,14 +2762,17 @@ id nvmtl_tile_compute_pipeline(NVMTLRenderPipelineState *tp, uint32_t tw, uint32
         free(fidx); free(fsz); free(fpay);
         id<MTLComputePipelineState> cps = nil;
         if (spv) {
-            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel"; v->_spirvOnly = YES;
+            // the rewrite is a compute kernel's AIR (read_write textures at 120 + A, the threadgroup's position): it may
+            // take the AIR-to-NIR road as any kernel does (round 11), the translator's SPIR-V of it the fallback
+            NVMTLFunction *v = [NVMTLFunction new]; v->_air = text; v->_spirv = spv; v->_fc = tp->_tileFn->_fc; v->_fname = tp->_tileFn->_fname; v->_stage = @"kernel"; v->_spirvOnly = NO;
             NSError *e = nil; cps = [(id<MTLDevice>)gNVMTLMainDevice newComputePipelineStateWithFunction:v error:&e];
             if (!cps) w = e.localizedDescription ?: @"the compute pipeline for the tile function was refused";
         }
         if (!tp->_tileCps) tp->_tileCps = [NSMutableDictionary new];
         tp->_tileCps[key] = cps ?: (id)[NSNull null];
         if (!cps && why) *why = w ?: @"tile function translation failed";
-        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built", tp->_tileFn->_fname.UTF8String ?: "?", tw, th);
+        if (cps) nvlog("tile function %s: compute pipeline for %ux%u tiles built (%s)", tp->_tileFn->_fname.UTF8String ?: "?", tw, th,
+                       [(id)cps isKindOfClass:[NVMTLComputePipelineState class]] && ((NVMTLComputePipelineState *)cps)->_road ? "AIR to NIR" : "SPIR-V");
         return cps;
     }
 }

@@ -2928,9 +2928,10 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          struct air_val *v = air_set(t, a->param, NULL, AIR_SAMPLER, 1);
          v->res = air_bind_sampler(t, a, i);
       } else if (!strcmp(a->kind, "air.imageblock")) {
-         /* an imageblock (round 10, kept refused): an implicit one is a tile function's view of the colour attachments,
-          * which the plugin runs only through the translator's rewrite of its AIR (NVMTL_TILE_SHADING, tile_imageblock.rs),
-          * a module that stays on the SPIR-V road; an explicit one (imageblock_data, write_imageblock_slice_to_texture)
+         /* an imageblock (round 10, kept refused): an implicit one is a tile function's view of the colour attachments;
+          * the function itself is never a pipeline: the plugin runs the translator's rewrite of its AIR for a tile size
+          * (NVMTL_TILE_SHADING=1, tile_imageblock.rs: the attachments read_write textures at 120 + A), a compute kernel
+          * that takes this road as any other (round 11); an explicit one (imageblock_data, write_imageblock_slice_to_texture)
           * the translator stages in a workgroup array whose width, capacity and cell scale its IR analysis infers
           * (native/ir: the cross-coordinate cells, the APV extent, threads_per_threadgroup, the lane scales) and copies
           * through its slice writer, none of which this frontend has */
@@ -2938,7 +2939,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          const unsigned c = air_md_operands(a->node, &ops, t->mem);
          const char *layout = c > 2 ? air_md_string(ops[2]) : NULL;
          unsupported(t, "an %s imageblock (%s)", layout && !strcmp(layout, "implicit") ? "implicit" : "explicit",
-                     layout && !strcmp(layout, "implicit") ? "a tile function: the translator's rewrite of it stays on the SPIR-V road" :
+                     layout && !strcmp(layout, "implicit") ? "a tile function: the plugin runs the translator's rewrite of it, which takes the road" :
                      "the translator's cell staging and slice writer are not ported");
       } else if (!strcmp(a->kind, "air.threadgroup")) {
          if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)

@@ -604,7 +604,7 @@ BOOL nvmtl_air_nir_wanted(NVMTLFunction *f, BOOL replaced, NSString **why)
 {
     if (g_air_nir_force_spirv || !f || !nvmtl_air_nir_on()) return NO;
     if (!f->_air.length) { *why = @"the function has no AIR"; return NO; }
-    if (f->_spirvOnly) { *why = @"its AIR is the translator's rewrite (a mesh, object, tile or stage-in kernel)"; return NO; }
+    if (f->_spirvOnly) { *why = @"its AIR is the translator's rewrite (a mesh, object or stage-in kernel)"; return NO; }
     if (replaced || getenv("NVMTL_BDA_PROBE_FILE")) { *why = @"a replacement module is configured for it (NVMTL_BDA_PROBE_FILE)"; return NO; }
     NSData *sp = g_app_profile ? nvmtl_function_spirv(f, "the application profile reads it") : nil;
     if (g_app_profile && sp.length) {

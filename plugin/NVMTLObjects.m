@@ -1416,12 +1416,15 @@ uint64_t nvmtl_function_air_key(id f)
 static void nvmtl_heap_register(NVMTLHeap *heap, id resource);
 static void nvmtl_use_heap(NVMTLCommandBuffer *cb, id<MTLHeap> heap);
 // `writes`: the shader declares a storage binding there. A texture made with MTLTextureUsageUnknown (0) may be used
-// any way Metal allows - ImageIO makes its HDR output IOSurface textures that way and writes them.
+// any way Metal allows - ImageIO makes its HDR output IOSurface textures that way and writes them. A colour attachment
+// a tile function reads and writes as its imageblock (cb->_tileAttach, for the dispatch dispatchThreadsPerTile makes)
+// needs only render-target usage in Metal: it gets its storage twin whatever its usage.
 static void *nvmtl_storage_view_for(NVMTLCommandBuffer *cb, NVMTLTexture *t, BOOL writes) {
     if (!t) return NULL;
     if (t->_stex) return [t nvview];
     const MTLTextureUsage usage = (MTLTextureUsage)t->_usage;   // not -usage, which answers ShaderRead for Unknown
-    if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite))) return NULL;
+    const BOOL tileAtt = cb && [cb->_tileAttach containsObject:t];
+    if (!writes || !cb || cb->_c.in_rp || t->_parent || (usage && !(usage & MTLTextureUsageShaderWrite) && !tileAtt)) return NULL;
     nvk_image *im = [t nvi];
     // a multisampled attachment gets a storage twin only for a tile function (NVMTL_TILE_SHADING=1, shaderStorageImageMultisample)
     const BOOL ms = im && (im->samples ? im->samples : 1) > 1;
@@ -4496,6 +4499,9 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     _pass.load |= keep; _load |= keep;
     NVMTLComputeCommandEncoder *ce = (NVMTLComputeCommandEncoder *)[_cb computeCommandEncoder];
     [ce setComputePipelineState:cps];
+    NSMutableSet *att = [NSMutableSet new];   // the attachments are the imageblock: storage twins whatever their usage
+    for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_colTex[i]) [att addObject:_colTex[i]];
+    _cb->_tileAttach = att;
     for (uint32_t i = 0; i < NVMTL_NCOL; i++) if (_colTex[i]) [ce setTexture:_colTex[i] atIndex:NVMTL_TILE_TEXTURE_BASE + i];
     for (NSNumber *k in _tileByt) { NSData *d = _tileByt[k]; [ce setBytes:d.bytes length:d.length atIndex:k.unsignedLongValue]; }
     for (NSNumber *k in _tileBuf) { NSArray *e = _tileBuf[k]; [ce setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:k.unsignedLongValue]; }
@@ -4507,6 +4513,7 @@ static void nvmtl_tile_ignored(const char *what) { static _Atomic unsigned n; if
     for (NSNumber *k in _tileAs) [ce setAccelerationStructure:_tileAs[k] atBufferIndex:k.unsignedLongValue];
     [ce dispatchThreadgroups:MTLSizeMake((w + tw - 1) / tw, (h + th - 1) / th, 1) threadsPerThreadgroup:threadsPerTile];
     [ce endEncoding];
+    _cb->_tileAttach = nil;
     if (_ps) [self setRenderPipelineState:_ps];   // the pass resumes with the attachments loaded
     nvlog("dispatchThreadsPerTile: %ux%u area, %ux%u tiles, %lu threads per tile", w, h, tw, th, (unsigned long)(threadsPerTile.width * threadsPerTile.height));
 }

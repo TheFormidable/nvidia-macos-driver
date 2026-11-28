@@ -41,6 +41,8 @@ struct rrun {
    id<MTLBuffer> tfac_in;                         /* its buffer(1) */
    id<MTLComputePipelineState> pre_cps;           /* a kernel dispatched before each draw with nothing bound (round 11) */
    unsigned pre_threads;
+   id<MTLRenderPipelineState> tile_ps;            /* a tile pipeline dispatched over 16x16 tiles after the draws (r_tile) */
+   float tile_g;                                  /* ... its setTileBytes at index 0 */
    float tcp[9 * 8];                              /* r_tess_tri's control points */
    char why[256];
 };
@@ -74,6 +76,7 @@ struct rtest {
    bool road;                        /* with the road on, it must take it: the SPIR-V road's pipeline is a failure */
    const struct rtess *tess;         /* a tessellation pipeline */
    void (*pdesc)(MTLRenderPipelineDescriptor *);   /* more of the pipeline's state (blending, ...) */
+   const char *needs_env;            /* run only with this variable set to 1 in the environment (skipped otherwise) */
 };
 
 static id<MTLBuffer>
@@ -1919,6 +1922,74 @@ rdrw_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_tile (round 11): a tile function, its compute kernel on the road ------------------------------------------- */
+
+static void
+rtile_setup(struct rrun *r)
+{
+   setup_quad(r);
+   NSError *e = nil;
+   MTLTileRenderPipelineDescriptor *td = [MTLTileRenderPipelineDescriptor new];
+   id<MTLFunction> kf = [r->lib newFunctionWithName:@"rt_tile"];
+   td.tileFunction = kf;
+   td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
+   td.colorAttachments[1].pixelFormat = MTLPixelFormatR32Float;
+   td.threadgroupSizeMatchesTileSize = YES;
+   r->tile_ps = kf ? [dev newRenderPipelineStateWithTileDescriptor:td options:MTLPipelineOptionNone reflection:nil error:&e] : nil;
+   [kf release];
+   [td release];
+   r->tile_g = 2.0f;
+   if (!r->tile_ps)
+      snprintf(r->pre, sizeof r->pre, "no tile pipeline of rt_tile: %s", e.localizedDescription.UTF8String ?: "?");
+}
+
+/* the road each compute pipeline the plugin made of the tile function took (its pipelines by tile size, _tileCps):
+ * 1 when all took the road, 0 when one did not, -1 when there is none */
+static int
+rtile_road(struct rrun *r)
+{
+   Class c = objc_getClass("NVMTLRenderPipelineState");
+   Ivar iv = c ? class_getInstanceVariable(c, "_tileCps") : NULL;
+   NSDictionary *cps = iv && r->tile_ps ? object_getIvar(r->tile_ps, iv) : nil;
+   int road = -1;
+   for (id k in cps) {
+      id p = cps[k];
+      if (p == [NSNull null])
+         continue;
+      const int one = road_ivar ? *((const uint8_t *)(__bridge void *)p + ivar_getOffset(road_ivar)) : 0;
+      road = road < 0 ? one : (road && one);
+   }
+   return road;
+}
+
+/* every pixel: red doubled and the second attachment plus one, the rest as drawn, exactly; with the road on, every
+ * compute pipeline of the tile function took it */
+static bool
+rtile_check(struct rrun *r)
+{
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
+   const int road = rtile_road(r);
+   const bool road_on = !(getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0"));
+   if (road < 0)
+      return snprintf(r->why, sizeof r->why, "the tile pipeline holds no compute pipeline"), false;
+   if (road_on && road != 1)
+      return snprintf(r->why, sizeof r->why, "the tile function's compute kernel took the SPIR-V road, which it must not with the "
+                      "road on"), false;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float c[4] = { 2.0f * ((px + 0.5f) / 64.0f), (py + 0.5f) / 64.0f, 0.25f, 1.0f };
+         const float d = (float)(py * 64u + px) + 1.0f, got = ((const float *)r->back[1].contents)[py * RW + px];   /* R32Float */
+         if (!rwant(r, 0, px, py, c, 4, 0))
+            return false;
+         if (got != d)
+            return snprintf(r->why, sizeof r->why, "attachment 1 pixel (%u,%u): %.7g, want %.7g (exact)", px, py, got, d), false;
+      }
+   return true;
+}
+
 /* ---- r_kept_mixed, r_kept_guarded (round 11): the translator's other two forms of a kept buffer ------------------- */
 
 #define RKM_PAL 3000u   /* structs of 24 bytes, the last 12 bytes short: element 2999's ulong straddles the end */
@@ -2243,6 +2314,10 @@ static const struct rtest rtests[] = {
    { "r_dummy_rw", "r_dummy", "rd_vs", "rdr_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rdrw_setup,
      rdrw_check, "exact; an unbound kept buffer and an unbound texture_buffer read 0 after a kernel wrote through unbound ones",
      false, false, NULL, NULL, NULL, true },
+   { "r_tile", "r_tile", "rt_vs", "rt_fs", { F32, MTLPixelFormatR32Float }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL,
+     rtile_setup, rtile_check, "exact; a tile function over 16x16 tiles after the draw (red times setTileBytes' 2, the second "
+     "attachment plus one), its compute kernel on the road", false, false, NULL, NULL, NULL, true, NULL, NULL,
+     "NVMTL_TILE_SHADING" },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
      "value per level", false, false, NULL, NULL, NULL, true, NULL },
