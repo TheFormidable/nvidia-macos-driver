@@ -30,7 +30,7 @@ def compare(fe, tr, path, out):
             out.append(path or "(top)")
             return
         for k, v in fe.items():
-            if k == "reflection_source":
+            if k == "reflection_source" or k.startswith("air_nir_"):   # the frontend's own notes
                 continue
             compare(v, tr.get(k), path + "." + k if path else k, out)
         return

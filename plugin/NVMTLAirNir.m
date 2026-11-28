@@ -989,7 +989,7 @@ static void nvmtl_air_nir_refl_compare(id fe, id tr, NSString *path, NSMutableOr
     if ([fe isKindOfClass:[NSDictionary class]]) {
         if (![tr isKindOfClass:[NSDictionary class]]) { [out addObject:path.length ? path : @"(top)"]; return; }
         for (NSString *k in fe) {
-            if ([k isEqualToString:@"reflection_source"]) continue;
+            if ([k isEqualToString:@"reflection_source"] || [k hasPrefix:@"air_nir_"]) continue;   // the frontend's own notes
             nvmtl_air_nir_refl_compare(fe[k], tr[k], path.length ? [path stringByAppendingFormat:@".%@", k] : k, out);
         }
         return;

@@ -1977,6 +1977,118 @@ ab_kernel_check(struct run *r)
    return ok;
 }
 
+/* ab_encoder: argument buffers filled through MTLArgumentEncoder (metal/ab_encoder.metal). Textures: 0 rgba8 (sampled,
+ * sampler 0 nearest clamp), 1 and 2 rgba16f (the written array, element sel[i & 1]), 3 rgba16f read_write, 4 rgba16f
+ * (the nested buffer's written texture), 5 an r32f texture_buffer read, 6 one written, 7 and 8 rgba16f (the two Items'
+ * written textures, item (i + sel[2]) & 1). Slots: 0 the argument buffer, 1 the output, 2 sel, 3 the Items, 4 src,
+ * 5 the nested argument buffer, 6 its output buffer. */
+static const uint32_t abe_sel[3] = { 1, 0, 1 };
+static const uint32_t abe_consts[4] = { 3, 5, 7, 11 };
+static unsigned abe_len[3];   /* encodedLength of the encoders: EArgs, Inner2 (nested), WItem */
+
+static void
+ab_encoder_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   for (unsigned k = 1; k <= 4; k++)
+      tex_image(r, k, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 1, 1, true);
+   uint16_t *h = r->tex[3].stage.map;
+   for (unsigned k = 0; k < 64 * 4; k++)
+      h[k] = f2h((float)(rnd() % 64) * 0.125f);
+   memcpy(slot(r, 30, 64 * 4 * 2), h, 64 * 4 * 2);   /* rw's texels as uploaded (the readback overwrites them) */
+   float *tb = tex_buffer(r, 5, VK_FORMAT_R32_SFLOAT, 4, 64, false);
+   for (unsigned k = 0; k < 64; k++)
+      tb[k] = rndf(-100, 100);
+   tex_buffer(r, 6, VK_FORMAT_R32_SFLOAT, 4, 64, true);
+   for (unsigned k = 7; k <= 8; k++)
+      tex_image(r, k, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 1, 1, true);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *src = slot(r, 4, 64 * 16);
+   for (unsigned k = 0; k < 64 * 4; k++)
+      src[k] = rndf(-8, 8);
+   slot(r, 0, 256);
+   slot(r, 1, 64 * 3 * 16);
+   memcpy(slot(r, 2, sizeof abe_sel), abe_sel, sizeof abe_sel);
+   slot(r, 3, 64);
+   slot(r, 5, 64);
+   slot(r, 6, 64 * 4);
+   /* the argument buffer at [[buffer(0)]] */
+   abe_len[0] = ab_enc_begin(r, 0, -1, 0, 0);
+   ab_enc_tex(r, 0, 0);
+   ab_enc_samp(r, 1, 0);
+   ab_enc_buf(r, 2, 4, 0);
+   uint32_t *c = ab_enc_const(r, 3);
+   if (c)
+      memcpy(c, abe_consts, sizeof abe_consts);
+   ab_enc_tex(r, 4, 1);
+   ab_enc_tex(r, 5, 2);
+   ab_enc_tex(r, 6, 3);
+   ab_enc_buf(r, 7, 5, 0);
+   ab_enc_tex(r, 8, 5);
+   ab_enc_tex(r, 9, 6);
+   /* the one its [[id(7)]] points at, through the encoder that encoder gives for it */
+   abe_len[1] = ab_enc_begin(r, 0, 7, 5, 0);
+   ab_enc_buf(r, 0, 6, 0);
+   ab_enc_tex(r, 1, 4);
+   /* the two Items at [[buffer(3)]], one encoder's length apart */
+   abe_len[2] = ab_enc_begin(r, 3, -1, 3, 0);
+   ab_enc_tex(r, 0, 7);
+   ab_enc_begin(r, 3, -1, 3, abe_len[2]);
+   ab_enc_tex(r, 0, 8);
+}
+
+static bool
+ab_encoder_check(struct run *r)
+{
+   if (abe_len[0] != 96 || abe_len[1] != 16 || abe_len[2] != 8)
+      return FAILF(r, "encodedLength %u, nested %u, item %u: expected 96, 16, 8", abe_len[0], abe_len[1], abe_len[2]);
+   float *want = calloc(64 * 12, 4), *w[6];
+   for (unsigned k = 0; k < 6; k++)
+      w[k] = calloc(64 * 4, 4);   /* wts[0], wts[1], rw, inner wt, item 0, item 1 */
+   const float *src = S(r, 4), *tb = r->tex[5].stage.map;
+   const uint16_t *rw0 = S(r, 30);
+   for (unsigned q = 0; q < 64 * 4; q++)
+      w[2][q] = h2f(rw0[q]) * 2.0f + 0.25f;
+   for (uint32_t y = 0; y < 8; y++) {
+      for (uint32_t x = 0; x < 8; x++) {
+         const unsigned i = y * 8 + x;
+         float *o = want + i * 12;
+         for (unsigned c = 0; c < 4; c++)
+            o[c] = rgba8_at(r, 0, 0, x, y, 0, c) + src[i * 4 + c] + (float)abe_consts[c];
+         o[4] = tb[i], o[5] = 0, o[6] = 0, o[7] = 1;
+         o[8] = (float)abe_sel[i & 1], o[9] = o[10] = o[11] = 0;
+         const float wv[4] = { (float)i, 1, 2, 3 };
+         memcpy(w[abe_sel[i & 1]] + i * 4, wv, sizeof wv);
+         const float iv[4] = { 0.5f, (float)i * 0.25f, 0, 1 };
+         memcpy(w[3] + i * 4, iv, sizeof iv);
+         const float tv[4] = { (float)i * 0.5f, 0, 0, 1 };
+         memcpy(w[4 + ((i + abe_sel[2]) & 1)] + i * 4, tv, sizeof tv);
+      }
+   }
+   bool ok = check_f4(r, "out", S(r, 1), want, 64 * 12, 1e-6f);
+   static const unsigned texi[6] = { 1, 2, 3, 4, 7, 8 }, wi[6] = { 0, 1, 2, 3, 4, 5 };
+   static const char *const what[6] = { "wts[0]", "wts[1]", "rw", "inner wt", "item 0", "item 1" };
+   for (unsigned k = 0; ok && k < 6; k++) {
+      float *g = calloc(64 * 4, 4);
+      for (unsigned q = 0; q < 64 * 4; q++)
+         g[q] = h2f(((const uint16_t *)tex_at(r, texi[k], 0, 0, 0, 0))[q]);
+      ok = check_f4(r, what[k], g, w[wi[k]], 64 * 4, 0);
+      free(g);
+   }
+   const float *io = S(r, 6), *wtb = r->tex[6].stage.map;
+   for (unsigned i = 0; ok && i < 64; i++) {
+      if (io[i] != (float)i + 0.5f)
+         ok = FAILF(r, "inner out[%u] = %g, expected %g", i, io[i], (float)i + 0.5f);
+      else if (wtb[i] != (float)i * 2.0f)
+         ok = FAILF(r, "wtb[%u] = %g, expected %g", i, wtb[i], (float)i * 2.0f);
+   }
+   for (unsigned k = 0; k < 6; k++)
+      free(w[k]);
+   free(want);
+   return ok;
+}
+
 /* tex_cube: a cube sampled by direction (nearest), a 2D array by layer */
 static void
 tex_cube_setup(struct run *r)
@@ -2620,4 +2732,5 @@ static const struct test tests[] = {
    { "tex_ms", NULL, "tex_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_ms_setup, tex_ms_check },
    { "tex_arrays", NULL, "tex_arrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_arrays_setup, tex_arrays_check },
    { "ab_kernel", NULL, "ab_kernel", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_kernel_setup, ab_kernel_check },
+   { "ab_encoder", NULL, "ab_encoder", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_encoder_setup, ab_encoder_check },
 };

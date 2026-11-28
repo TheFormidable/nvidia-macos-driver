@@ -2697,8 +2697,21 @@ fn register_embedded_textures(
         // layout has one per texture slot (a robust driver clamps the index to element 0). The heap (descriptor set 2,
         // bindings 0 to 4) holds sampled images, samplers, storage images and texel buffers, so a single texture
         // buffer reads through it as well; only an array of texture buffers keeps its binding.
+        // A written texture is the embedded binding the host binds per draw from the buffer's first element's field,
+        // which holds one texture: an array of them, or a field read at an offset known only at run time (an element
+        // of an array of argument buffers), goes to the storage heap the same way, each element by its own handle.
+        let buffer_root_param = ctx.module.functions[entry_idx]
+            .parameters
+            .get(tex.buffer_param_index as usize)
+            .and_then(|parameter| parameter.result_id);
+        let dynamic_storage = tex.storage_format.is_some()
+            && buffer_root_param.is_some_and(|root| {
+                ctx.emit_sidecar.buffer_pointer_dynamic_field_loads.iter().any(|d| {
+                    d.root == root && d.byte_offset == u64::from(tex.field_offset)
+                })
+            });
         if crate::reflect::bindless_fixed_fields_on()
-            && tex.storage_format.is_none()
+            && (tex.storage_format.is_none() || tex.array_length.is_some() || dynamic_storage)
             && (tex.array_length.is_none() || tex.dim != Dim::DimBuffer)
         {
             let off = u64::from(tex.field_offset);
@@ -2718,7 +2731,11 @@ fn register_embedded_textures(
                     d.root == buffer_root && d.byte_offset == off && !heap_ids.contains(&d.id)
                 }));
             if !heap_ids.is_empty() && !unrouted {
-                let heap = bindless_heap_var(ctx, image_ty, (tex.dim, tex.arrayed), tex.comp);
+                let heap = if tex.storage_format.is_some() {
+                    bindless_storage_heap_var(ctx, image_ty, (tex.dim, tex.arrayed), tex.comp)
+                } else {
+                    bindless_heap_var(ctx, image_ty, (tex.dim, tex.arrayed), tex.comp)
+                };
                 let facts: Vec<crate::emit_sidecar::BufferPointerHeapLoad> = ctx
                     .emit_sidecar
                     .buffer_pointer_heap_loads

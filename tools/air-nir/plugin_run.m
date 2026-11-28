@@ -840,18 +840,26 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
    if (ds)
       [re setDepthStencilState:ds];
    [re setCullMode:MTLCullModeNone];
+   const MTLRenderStages both = MTLRenderStageVertex | MTLRenderStageFragment;
    for (unsigned i = 0; i < RMAXBUF; i++) {
-      if (r->vbuf[i])
+      if (r->vbuf[i] && (r->vbuf_ab >> i & 1))
+         [re useResource:r->vbuf[i] usage:MTLResourceUsageRead stages:both];
+      else if (r->vbuf[i])
          [re setVertexBuffer:r->vbuf[i] offset:0 atIndex:i];
-      if (r->fbuf[i])
+      if (r->fbuf[i] && (r->fbuf_ab >> i & 1))
+         [re useResource:r->fbuf[i] usage:MTLResourceUsageRead stages:both];
+      else if (r->fbuf[i])
          [re setFragmentBuffer:r->fbuf[i] offset:0 atIndex:i];
    }
-   for (unsigned i = 0; i < 4; i++) {
-      if (r->ftex[i])
+   for (unsigned i = 0; i < RMAXTEX; i++) {
+      if (r->ftex[i] && (r->ftex_ab >> i & 1))
+         [re useResource:r->ftex[i] usage:MTLResourceUsageRead stages:both];
+      else if (r->ftex[i])
          [re setFragmentTexture:r->ftex[i] atIndex:i];
-      if (r->fsamp[i])
-         [re setFragmentSamplerState:r->fsamp[i] atIndex:i];
    }
+   for (unsigned i = 0; i < RMAXSAMP; i++)
+      if (r->fsamp[i] && !(r->fsamp_ab >> i & 1))
+         [re setFragmentSamplerState:r->fsamp[i] atIndex:i];
    for (unsigned k = 0; k < n; k++) {
       if (t->instances > 1 || t->base_instance)
          [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount instanceCount:t->instances baseInstance:t->base_instance];
@@ -974,11 +982,11 @@ run_render_test(const struct rtest *t)
    }
    id<MTLCommandBuffer> cb = [queue commandBuffer];
    bool up = false;
-   for (unsigned i = 0; i < 4; i++)
+   for (unsigned i = 0; i < RMAXTEX; i++)
       up |= r.tstage[i] != nil;
    if (up) {
       id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-      for (unsigned i = 0; i < 4; i++)
+      for (unsigned i = 0; i < RMAXTEX; i++)
          if (r.tstage[i])
             [be copyFromBuffer:r.tstage[i] sourceOffset:0 sourceBytesPerRow:(NSUInteger)r.tw[i] * r.tbpp[i]
                sourceBytesPerImage:(NSUInteger)r.tw[i] * r.th[i] * r.tbpp[i] sourceSize:MTLSizeMake(r.tw[i], r.th[i], 1)
@@ -1046,11 +1054,12 @@ run_render_test(const struct rtest *t)
       [r.vbuf[i] release];
       [r.fbuf[i] release];
    }
-   for (unsigned i = 0; i < 4; i++) {
+   for (unsigned i = 0; i < RMAXTEX; i++) {
       [r.ftex[i] release];
       [r.tstage[i] release];
-      [r.fsamp[i] release];
    }
+   for (unsigned i = 0; i < RMAXSAMP; i++)
+      [r.fsamp[i] release];
    for (unsigned i = 0; i < RMAXCOL; i++) {
       [col[i] release];
       [r.back[i] release];

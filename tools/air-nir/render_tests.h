@@ -13,20 +13,26 @@
 #define RH 64u
 #define RMAXCOL 4u
 #define RMAXBUF 16u
+#define RMAXTEX 16u
+#define RMAXSAMP 8u
 static const float clear_col[4] = { 0.1f, 0.2f, 0.3f, 0.4f };
 
 struct rrun {
    const struct rtest *t;
    id<MTLBuffer> vbuf[RMAXBUF], fbuf[RMAXBUF];   /* vertex and fragment stage buffers, by index */
-   id<MTLTexture> ftex[4];
-   id<MTLBuffer> tstage[4];                       /* each fragment texture's texels, uploaded before the draw */
-   unsigned tw[4], th[4], tbpp[4];
-   id<MTLSamplerState> fsamp[4];
+   id<MTLTexture> ftex[RMAXTEX];
+   id<MTLBuffer> tstage[RMAXTEX];                 /* each fragment texture's texels, uploaded before the draw */
+   unsigned tw[RMAXTEX], th[RMAXTEX], tbpp[RMAXTEX];
+   id<MTLSamplerState> fsamp[RMAXSAMP];
+   /* argument buffers: the buffers, textures and samplers a test reaches only through one are made resident
+    * (useResource:usage:stages:) and not bound */
+   uint32_t vbuf_ab, fbuf_ab, ftex_ab, fsamp_ab;
    id<MTLBuffer> back[RMAXCOL], dback;            /* the attachments, read back */
    uint8_t tex[16 * 16 * 4];                      /* r_texture's texels */
    uint8_t texn[3][16 * 16 * 4];                  /* r_handlechoice's three textures */
    float pal[16][4];                              /* r_buffers' palette */
    uint32_t idx[1000];
+   uint8_t abt[12][16 * 16 * 4];                  /* r_argbuf's textures */
    char why[256];
 };
 
@@ -1041,6 +1047,141 @@ rhc_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_argbuf: argument buffers in the vertex and the fragment function ------------------------------------------ */
+
+/* metal-render/r_argbuf.metal, as Metal lays the argument buffers out in memory (tier 2). Textures (16x16 rgba8, all
+ * reached only through argument buffers): 0 and 1 vts, 2 the vertex Inner's, 3 and 4 the VItems', 5 tex, 6 to 8 texs,
+ * 9 the fragment Inner's, 10 and 11 the Items'. Samplers: 0 vs (nearest clamp), 1 smp (nearest clamp), 2 smps[0]
+ * (nearest repeat), 3 smps[1] (nearest clamp), 4 the fragment Inner's (nearest mirrored repeat). Vertex buffers: 0 VArgs,
+ * 1 the two VItems, 2 sel, then reached through addresses: 3 the positions, 4 the vertex Inner, 5 its data, 6 the
+ * VItems' vectors. Fragment buffers: 0 FArgs, 1 the two Items, 2 sel, then through addresses: 3 the fragment Inner,
+ * 4 its data, 5 the palette, 6 the Items' vectors. */
+struct rab_vargs { uint64_t pos; float scale; uint32_t pad; uint64_t vts[2], vs, inner; };
+struct rab_vinner { uint64_t t, data; };
+struct rab_vitem { uint64_t v, t; };
+struct rab_finner { uint64_t t, s, data; };
+struct rab_fargs { uint64_t tex, smp, texs[3], smps[2], inner, pal; };
+struct rab_fitem { uint64_t t, v; };
+static const uint32_t rab_vsel[2] = { 1, 1 }, rab_fsel[3] = { 2, 0, 1 };
+
+static uint64_t rab_tex(struct rrun *r, unsigned i) { r->ftex_ab |= 1u << i; return r->ftex[i].gpuResourceID._impl; }
+static uint64_t rab_samp(struct rrun *r, unsigned i) { r->fsamp_ab |= 1u << i; return r->fsamp[i].gpuResourceID._impl; }
+static uint64_t rab_vaddr(struct rrun *r, unsigned i, uint64_t off) { r->vbuf_ab |= 1u << i; return r->vbuf[i].gpuAddress + off; }
+static uint64_t rab_faddr(struct rrun *r, unsigned i, uint64_t off) { r->fbuf_ab |= 1u << i; return r->fbuf[i].gpuAddress + off; }
+
+static float *
+rab_floats(unsigned n)
+{
+   static float v[4][64];
+   static unsigned next;
+   float *f = v[next++ & 3];
+   for (unsigned i = 0; i < n; i++)
+      f[i] = rndf(-2, 2);
+   return f;
+}
+
+static void
+rab_setup(struct rrun *r)
+{
+   for (unsigned k = 0; k < 12; k++) {
+      for (unsigned i = 0; i < sizeof r->abt[k]; i++)
+         r->abt[k][i] = (uint8_t)(rnd() >> 24);
+      MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:16 height:16 mipmapped:NO];
+      td.usage = MTLTextureUsageShaderRead;
+      td.storageMode = MTLStorageModePrivate;
+      r->ftex[k] = [dev newTextureWithDescriptor:td];
+      r->tstage[k] = rbuf(r->abt[k], sizeof r->abt[k]);
+      r->tw[k] = r->th[k] = 16;
+      r->tbpp[k] = 4;
+   }
+   static const MTLSamplerAddressMode modes[5] = { MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeClampToEdge,
+      MTLSamplerAddressModeRepeat, MTLSamplerAddressModeClampToEdge, MTLSamplerAddressModeMirrorRepeat };
+   for (unsigned k = 0; k < 5; k++) {
+      MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+      sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterNearest;
+      sd.sAddressMode = sd.tAddressMode = modes[k];
+      sd.normalizedCoordinates = YES;
+      sd.supportArgumentBuffers = YES;
+      r->fsamp[k] = [dev newSamplerStateWithDescriptor:sd];
+      [sd release];
+   }
+   float pos[12];
+   for (unsigned i = 0; i < 12; i++)
+      pos[i] = quad[i] * 0.5f;
+   r->vbuf[3] = rbuf(pos, sizeof pos);
+   r->vbuf[5] = rbuf(rab_floats(8), 8 * 4);
+   r->vbuf[6] = rbuf(rab_floats(32), 32 * 4);
+   const struct rab_vinner vin = { rab_tex(r, 2), rab_vaddr(r, 5, 0) };
+   r->vbuf[4] = rbuf(&vin, sizeof vin);
+   const struct rab_vargs va = { rab_vaddr(r, 3, 0), 2.0f, 0, { rab_tex(r, 0), rab_tex(r, 1) }, rab_samp(r, 0), rab_vaddr(r, 4, 0) };
+   r->vbuf[0] = rbuf(&va, sizeof va);
+   const struct rab_vitem vit[2] = { { rab_vaddr(r, 6, 0), rab_tex(r, 3) }, { rab_vaddr(r, 6, 64), rab_tex(r, 4) } };
+   r->vbuf[1] = rbuf(vit, sizeof vit);
+   r->vbuf[2] = rbuf(rab_vsel, sizeof rab_vsel);
+   r->fbuf[4] = rbuf(rab_floats(32), 32 * 4);
+   r->fbuf[5] = rbuf(rab_floats(16), 16 * 4);
+   r->fbuf[6] = rbuf(rab_floats(32), 32 * 4);
+   const struct rab_finner fin = { rab_tex(r, 9), rab_samp(r, 4), rab_faddr(r, 4, 0) };
+   r->fbuf[3] = rbuf(&fin, sizeof fin);
+   const struct rab_fargs fa = { rab_tex(r, 5), rab_samp(r, 1), { rab_tex(r, 6), rab_tex(r, 7), rab_tex(r, 8) },
+                                 { rab_samp(r, 2), rab_samp(r, 3) }, rab_faddr(r, 3, 0), rab_faddr(r, 5, 0) };
+   r->fbuf[0] = rbuf(&fa, sizeof fa);
+   const struct rab_fitem fit[2] = { { rab_tex(r, 10), rab_faddr(r, 6, 0) }, { rab_tex(r, 11), rab_faddr(r, 6, 64) } };
+   r->fbuf[1] = rbuf(fit, sizeof fit);
+   r->fbuf[2] = rbuf(rab_fsel, sizeof rab_fsel);
+}
+
+static float
+rab_texel(const struct rrun *r, unsigned k, int x, int y, unsigned c)
+{
+   return r->abt[k][(y * 16 + x) * 4 + c] / 255.0f;
+}
+
+/* texture k sampled nearest at (u, v): 0 clamp to edge, 1 repeat, 2 mirrored repeat */
+static float
+rab_nearest(const struct rrun *r, unsigned k, float u, float v, unsigned mode, unsigned c)
+{
+   int xy[2] = { (int)floorf(u * 16), (int)floorf(v * 16) };
+   for (unsigned a = 0; a < 2; a++) {
+      int i = xy[a];
+      if (mode == 0)
+         i = i < 0 ? 0 : i > 15 ? 15 : i;
+      else if (mode == 1)
+         i = ((i % 16) + 16) % 16;
+      else {
+         i = ((i % 32) + 32) % 32;
+         i = i >= 16 ? 31 - i : i;
+      }
+      xy[a] = i;
+   }
+   return rab_texel(r, k, xy[0], xy[1], c);
+}
+
+static bool
+rab_check(struct rrun *r)
+{
+   const float *vdata = r->vbuf[5].contents, *vv = r->vbuf[6].contents;
+   const float *fdata = r->fbuf[4].contents, *pal = r->fbuf[5].contents, *fv = r->fbuf[6].contents;
+   float vc[4];
+   for (unsigned c = 0; c < 4; c++)
+      vc[c] = rab_texel(r, rab_vsel[0], 3, 5, c) + rab_nearest(r, 0, 0.3f, 0.7f, 0, c) + rab_texel(r, 2, 2, 1, c) +
+              vdata[rab_vsel[1] * 4 + c] + vv[rab_vsel[1] * 16 + c] + rab_texel(r, 3 + rab_vsel[1], 6, 6, c);
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float u = px_u(px), w = px_w(py);
+         const unsigned k = (px + py) & 1u, it = rab_fsel[2] ^ k;
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = rab_nearest(r, 5, u, w, 0, c) + rab_texel(r, 6 + rab_fsel[k], px / 4, py / 4, c) * 2 +
+                      rab_nearest(r, 7, u * 1.5f, w * 1.5f, k ? 0 : 1, c) + rab_nearest(r, 9, u * 2 - 0.5f, w * 2 - 0.5f, 2, c) * 0.5f +
+                      fdata[(px & 7u) * 4 + c] + pal[(py & 3u) * 4 + c] + rab_texel(r, 10 + it, px / 4, py / 4, c) +
+                      fv[it * 16 + (px & 3u) * 4 + c] + vc[c];
+         if (!rwant(r, 0, px, py, want, 4, 4e-5f))
+            return false;
+      }
+   return true;
+}
+
 /* ---- the table ---------------------------------------------------------------------------------------------------- */
 
 #define F32 MTLPixelFormatRGBA32Float
@@ -1120,6 +1261,9 @@ static const struct rtest rtests[] = {
    { "r_linksamp", "r_linksamp", "rls_vs", "rls_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rt_setup, rls_check,
      "exact; the fragment's constexpr sampler (nearest, clamp_to_zero) and a linked visible function's (nearest, repeat), "
      "both @__air_sampler_state in their modules", false, false, "r_linksamp_fx", "rls_fx" },
+   { "r_argbuf", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rab_setup, rab_check,
+     "4e-5 (sums of nearest samples and buffer values); argument buffers in both stages: fields, arrays of textures and "
+     "samplers indexed at run time, nested ones, arrays of them", false, false, NULL, NULL },
 };
 #undef F32
 #undef NOC

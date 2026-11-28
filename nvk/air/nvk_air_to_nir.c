@@ -340,7 +340,7 @@ struct air_ab_tex {
 };
 struct air_ab_samp {
    uint32_t param, buffer_index, field_offset, field_ordinal, argument_index, syn;
-   nir_variable *var, *shadow_var;
+   bool per_draw;                /* a sample reads it at its embedded binding (air_handle_sampler) */
 };
 struct air_ab_field {
    uint32_t param, buffer_index, field_offset, field_ordinal, argument_index;
@@ -3611,6 +3611,7 @@ air_handle_sampler(struct air_tr *t, struct air_val *h)
       if (e->syn >= 32)
          unsupported(t, "an embedded sampler with synthetic index %u", e->syn);
       s->slot = e->syn;
+      e->per_draw = true;   /* the reflection's air_nir_per_draw says so */
       return s;
    }
    s->heap_slot = nir_iand_imm(&t->b, h->hword, NVMTL_AIR_NIR_SAMPLER_SLOTS - 1);
@@ -7316,6 +7317,27 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    if (t->req->flags & NVMTL_AIR_NIR_REFLECT)
       air_reflect(t, args_node);
    air_emit_function(t);
+   if (t->rf_json && (util_dynarray_num_elements(&t->ab_texs, struct air_ab_tex) ||
+                      util_dynarray_num_elements(&t->ab_samps, struct air_ab_samp))) {
+      /* which embedded bindings this NIR binds per draw (the plugin's embedded plan binds those, and no texture of
+       * an argument buffer the heap reads): the synthetic indices */
+      char *pd = ralloc_strdup(t->mem, ",\"air_nir_per_draw\":{\"textures\":[");
+      unsigned k = 0;
+      util_dynarray_foreach(&t->ab_texs, struct air_ab_tex, e) {
+         if (e->var)
+            ralloc_asprintf_append(&pd, "%s%u", k++ ? "," : "", e->syn);
+      }
+      ralloc_strcat(&pd, "],\"samplers\":[");
+      k = 0;
+      util_dynarray_foreach(&t->ab_samps, struct air_ab_samp, e) {
+         if (e->per_draw)
+            ralloc_asprintf_append(&pd, "%s%u", k++ ? "," : "", e->syn);
+      }
+      ralloc_strcat(&pd, "]}}");
+      const size_t n = strlen(t->rf_json);
+      t->rf_json[n - 1] = 0;   /* the closing brace */
+      t->rf_json = ralloc_asprintf(t->mem, "%s%s", t->rf_json, pd);
+   }
 
    t->nir->info.shared_size = t->shared_size;
    t->nir->scratch_size = ALIGN_POT(t->scratch_size, 16);
