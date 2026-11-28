@@ -53,6 +53,7 @@ fixture = r'''
 #include <mach/mach.h>
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
+static uint32_t g_ssbo_align = 16;   /* the device's storage-buffer offset alignment (nvmtl_ssbo_offset_ok) */
 ''' + macros + r'''
 #define NVMTL_E78_HAS(m,i) (!(m) || (((m)[(i)>>6] >> ((i)&63)) & 1))
 #define NVMTL_TABLES_PER_PAGE 256
@@ -64,6 +65,7 @@ typedef struct {
     uint8_t dirty[2]; VkDescriptorSet last[2]; unsigned last_idx[2]; uint32_t last_hi[2];
     uint64_t lastw[2][4], chg[2][4], lasttb[2][4]; uint32_t lastdyn[2]; void *lasttab[2];
     uint32_t lastgl[2]; VkBuffer lastubuf[2]; VkDeviceSize lasturange[2];
+    uint32_t lastk8[2], lastsbn[2];
 } nvmtl_bindtable;
 typedef struct { nvk_buffer buffer; } nvmtl_address_page;
 static int enabled=1, dynamic=1, snapshots, allocations, copies;
@@ -80,7 +82,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
 }
 static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint32_t hi,
         const uint64_t *mask, const uint64_t *tb, VkDescriptorSet from, const uint64_t *cm,
-        const VkDescriptorBufferInfo *uniform) {
+        const VkDescriptorBufferInfo *uniform, uint32_t kept8, int sb_null) {
     allocations++; copies += from != VK_NULL_HANDLE;
     c->dyn_out[which]=0; c->tab_out[which]=NULL;
     if (NVMTL_E78_HAS(mask,NVMTL_ADDRESS_BINDING)) {
@@ -92,7 +94,7 @@ static VkDescriptorSet nvmtl_snapshot_set_md(nvk_cmdbuf *c, uint32_t which, uint
     return set;
 }
 static VkDescriptorSet nvmtl_snapshot_set_t(nvk_cmdbuf *c, uint32_t which, uint32_t hi, const uint64_t *tb) {
-    return nvmtl_snapshot_set_md(c,which,hi,NULL,tb,VK_NULL_HANDLE,NULL,NULL);
+    return nvmtl_snapshot_set_md(c,which,hi,NULL,tb,VK_NULL_HANDLE,NULL,NULL,0,1);
 }
 '''
 # The mask helpers start at nvmtl_spirv_bmask_x's forward declaration: nvmtl_spirv_bmask calls it, and it logs whether

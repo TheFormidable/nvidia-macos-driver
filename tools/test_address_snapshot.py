@@ -35,7 +35,7 @@ fixture=r"""
 #define NVMTL_NTEX 128
 #define NVMTL_TABLES_PER_PAGE 256
 #define NVMTL_TABLE_BYTES ((2*NVMTL_NBUF+NVMTL_NTEX)*sizeof(uint64_t))
-enum {NVMTL_SLOT_NONE,NVMTL_SLOT_BUF,NVMTL_SLOT_TEX,NVMTL_SLOT_SAMP};
+enum {NVMTL_SLOT_NONE,NVMTL_SLOT_BUF,NVMTL_SLOT_TEX,NVMTL_SLOT_SAMP,NVMTL_SLOT_TEXBUF};
 typedef struct {unsigned kind;void *h;size_t off,size;uint64_t address;} nvmtl_slot;
 typedef struct {nvmtl_slot s[2][NVMTL_NBUF+NVMTL_NTEX];} nvmtl_bindtable;
 typedef struct {void *map;VkBuffer buf;uint64_t address;} nvk_buffer;
