@@ -40,6 +40,14 @@ int main(void)
         nvmtl_air_nir_masks(&r, b, &hi, tb) == 0 && HAS(b, 32) && HAS(b, 159) && HAS(b, 160) && HAS(b, 191) && HAS(b, 192) &&
         !HAS(b, 31) && !HAS(b, 33) && hi == 71 && ((tb[1] >> 63) & 1) && !(tb[0] & 1) && ((tb[3] >> 6) & 1) && !((tb[2] >> 5) & 1));
     arm("no buffer binding of the band 0-31 is written (buffers go through the table)", (b[0] & 0xffffffffull) == 0);
+    r.descriptor_mask = (1u << 0) | (1u << 5) | (1u << 30);
+    arm("version 7: the buffers read through their storage-buffer descriptors are written at bindings 0-31",
+        nvmtl_air_nir_masks(&r, b, &hi, tb) == 0 && (b[0] & 0xffffffffull) == ((1ull << 0) | (1ull << 5) | (1ull << 30)) &&
+        HAS(b, 32) && HAS(b, NVMTL_AN_TABLE));
+    struct nvmtl_air_nir_result shortr = r; shortr.size = NVMTL_AIR_NIR_RESULT_V6_SIZE;
+    arm("a result too short for descriptor_mask writes none of them",
+        nvmtl_air_nir_masks(&shortr, b, &hi, tb) == 0 && (b[0] & 0xffffffffull) == 0);
+    r.descriptor_mask = 0;
     struct nvmtl_air_nir_result bad = r; SET(bad.texbuf_mask, 3);
     arm("a texel buffer that is not a texture is refused", nvmtl_air_nir_masks(&bad, b, &hi, tb) == -1);
     bad = r; SET(bad.stexbuf_mask, 9);
@@ -105,6 +113,36 @@ int main(void)
     SET(r.texture_mask, 0); r.sampler_mask = 1u << 1;
     arm("a fragment result's texture and sampler land in the bands a kernel's do",
         nvmtl_air_nir_masks(&r, b, &hi, tb) == 0 && HAS(b, 32) && HAS(b, 161) && HAS(b, NVMTL_AN_TABLE) && hi == 0);
+
+    /* the buffers a lowered module keeps as storage-buffer descriptors: StorageBuffer variables at set 0, binding < 32 */
+    {
+        /* header; OpDecorate %10 DescriptorSet 0, %10 Binding 3, %11 set 0 binding 640 (the table), %12 set 0 binding
+         * 31, %13 set 2 binding 0 (the heap); OpVariable %p %10 StorageBuffer, %11 StorageBuffer, %12 StorageBuffer,
+         * %13 UniformConstant */
+        uint32_t m[64] = { 0x07230203u, 0x00010400u, 0, 32, 0 };
+        size_t n = 5;
+#define DEC(id, d, v) do { m[n++] = (4u << 16) | 71u; m[n++] = (id); m[n++] = (d); m[n++] = (v); } while (0)
+#define VAR(id, sc) do { m[n++] = (4u << 16) | 59u; m[n++] = 20u; m[n++] = (id); m[n++] = (sc); } while (0)
+        DEC(10, 34, 0); DEC(10, 33, 3); DEC(11, 34, 0); DEC(11, 33, 640); DEC(12, 34, 0); DEC(12, 33, 31);
+        DEC(13, 34, 2); DEC(13, 33, 0);
+        VAR(10, 12); VAR(11, 12); VAR(12, 12); VAR(13, 0);
+        uint32_t km = 99;
+        arm("a lowered module's kept buffers: set 0 storage buffers below binding 32, not the table or the heap",
+            nvmtl_air_nir_kept_buffers(m, n, &km) == 0 && km == ((1u << 3) | (1u << 31)));
+        const size_t keep = n;
+        DEC(14, 34, 0); DEC(14, 33, 7); VAR(14, 2);
+        arm("a Uniform block in the buffer band is a form the road does not make", nvmtl_air_nir_kept_buffers(m, n, &km) == -1 && km == 0);
+        n = keep;
+        DEC(15, 34, 1); DEC(15, 33, 4); VAR(15, 12);
+        arm("a storage buffer of another set is not the stage's buffer", nvmtl_air_nir_kept_buffers(m, n, &km) == 0 &&
+            km == ((1u << 3) | (1u << 31)));
+        m[0] = 0x12345678u;
+        arm("a module that is not SPIR-V is refused", nvmtl_air_nir_kept_buffers(m, n, &km) == -1);
+        m[0] = 0x07230203u; m[keep] = 0;   /* an instruction of 0 words */
+        arm("a malformed module is refused", nvmtl_air_nir_kept_buffers(m, n, &km) == -1);
+#undef DEC
+#undef VAR
+    }
 
     /* the per-process fallback list and WindowServer's crash marker */
     char nm[128], line[256];

@@ -306,7 +306,7 @@ static void nvmtl_air_nir_local(NVMTLFunction *f, uint32_t local[3])
 // *res (with NVMTL_AIR_NIR_REFLECT, res->reflection is the caller's to free())
 static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32_t flags, const uint32_t local[3],
                                    NSDictionary<NSString *, NSNumber *> *varyings, NSDictionary *samplers,
-                                   struct nvmtl_air_nir_result *res)
+                                   uint32_t descriptors, struct nvmtl_air_nir_result *res)
 {
     memset(res, 0, sizeof *res); res->size = sizeof *res;
     const char *text = f->_air.UTF8String;
@@ -359,6 +359,7 @@ static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32
     }
     if (at) req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;
     req.sampler_state_count = (uint32_t)at; req.sampler_state_slots = ss.bytes; req.sampler_state_words = sw.bytes;
+    req.descriptor_buffers = descriptors;   /* read with NVMTL_AIR_NIR_DESCRIPTORS only */
     return pnvk_air_to_nir((void *)g_dev, &req, res);
 }
 
@@ -381,7 +382,7 @@ static void nvmtl_air_nir_store(NSString *path, NSString *memoKey, int32_t statu
 // A render stage (varyings non-nil) adds its stage, its varyings and what else keys it (stageKey) to the entry's key.
 // The shader-cache entry of f's NIR translated with these flags, size, lengths, varyings and sampler states
 static void nvmtl_air_nir_key(NVMTLFunction *f, NSDictionary *tgLen, uint32_t flags, const uint32_t local[3], NSDictionary *varyings,
-                              NSDictionary *stageKey, NSDictionary *samplers, NSString **path, NSString **memoKey)
+                              NSDictionary *stageKey, NSDictionary *samplers, uint32_t descriptors, NSString **path, NSString **memoKey)
 {
     *path = nil; *memoKey = nil;
     NVMTLAirDigest *ad = nvmtl_air_state(f->_air);
@@ -389,6 +390,7 @@ static void nvmtl_air_nir_key(NVMTLFunction *f, NSDictionary *tgLen, uint32_t fl
                          @"size": @[ @(local[0]), @(local[1]), @(local[2]) ], @"flags": @(flags), @"ids": g_air_nir_ids ?: @"" } mutableCopy];
     if (varyings) { k[@"varyings"] = varyings; [k addEntriesFromDictionary:stageKey ?: @{}]; }
     if (samplers.count) k[@"samplers"] = samplers;
+    if (flags & NVMTL_AIR_NIR_DESCRIPTORS) k[@"descriptors"] = @(descriptors);
     NSData *tail = [NSJSONSerialization dataWithJSONObject:k options:NSJSONWritingSortedKeys error:NULL];
     if (ad && tail) {
         *path = nvmtl_spvcache_path_air(ad, tail, @"nir1");
@@ -396,14 +398,13 @@ static void nvmtl_air_nir_key(NVMTLFunction *f, NSDictionary *tgLen, uint32_t fl
     }
 }
 
-static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t extra, const uint32_t local[3],
-                                NSDictionary *varyings, NSDictionary *stageKey, NSDictionary *samplers,
-                                struct nvmtl_air_nir_result *res, void **nir, NSString **why,
-                                NSString **path, NSString **memoKey, BOOL *hit)
+static int nvmtl_air_nir_shader_with(NVMTLFunction *f, NSDictionary *tgLen, uint32_t flags, const uint32_t local[3],
+                                     NSDictionary *varyings, NSDictionary *stageKey, NSDictionary *samplers, uint32_t descriptors,
+                                     struct nvmtl_air_nir_result *res, void **nir, NSString **why,
+                                     NSString **path, NSString **memoKey, BOOL *hit)
 {
     *nir = NULL; *path = nil; *memoKey = nil; *hit = NO;
-    const uint32_t flags = nvmtl_air_nir_flags(extra, varyings != nil);
-    nvmtl_air_nir_key(f, tgLen, flags, local, varyings, stageKey, samplers, path, memoKey);
+    nvmtl_air_nir_key(f, tgLen, flags, local, varyings, stageKey, samplers, descriptors, path, memoKey);
     NSData *e = *memoKey ? [nvmtl_memo() objectForKey:*memoKey] : nil;
     if (!e) e = nvmtl_cache_read(*path);
     int32_t status = 0; const uint8_t *blob = NULL; size_t bn = 0;
@@ -419,7 +420,7 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
         }
         nvlog("air-nir: a cached shader of %s does not read back - translated again", f->_fname.UTF8String ?: "?");
     }
-    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, varyings, samplers, res);
+    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, varyings, samplers, descriptors, res);
     if (st != NVMTL_AIR_NIR_OK) {
         *why = @(res->message[0] ? res->message : "the frontend said no");
         if (st == NVMTL_AIR_NIR_UNSUPPORTED || st == NVMTL_AIR_NIR_BAD_AIR) nvmtl_air_nir_store(*path, *memoKey, st, res, NULL, 0);
@@ -431,6 +432,39 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
     if (!pnvk_air_nir_serialize(*nir, &data, &n) && data && n) nvmtl_air_nir_store(*path, *memoKey, NVMTL_AIR_NIR_OK, res, data, n);
     free(data);
     return 0;
+}
+
+// The frontend's shader of f, through the shader cache. A function that indexes a buffer with a value read from memory
+// is refused at first with the buffers it so indexes (descriptor_wanted): the translator keeps some of them as
+// bounds-checked storage-buffer descriptors, and only its module says which. That module is made (nvmtl_function_spirv),
+// lowered as the SPIR-V road's pipeline lowers it (nvmtl_vk_descriptor_buffers), and the frontend asked again with the
+// buffers it keeps (NVMTL_AIR_NIR_DESCRIPTORS), which it then reads through those descriptors at the same bindings.
+static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t extra, const uint32_t local[3],
+                                NSDictionary *varyings, NSDictionary *stageKey, NSDictionary *samplers,
+                                struct nvmtl_air_nir_result *res, void **nir, NSString **why,
+                                NSString **path, NSString **memoKey, BOOL *hit)
+{
+    const uint32_t flags = nvmtl_air_nir_flags(extra, varyings != nil);
+    int rc = nvmtl_air_nir_shader_with(f, tgLen, flags, local, varyings, stageKey, samplers, 0, res, nir, why, path, memoKey, hit);
+    if (rc == 0 || !g_air_nir_v7 || res->size < offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted ||
+        !res->descriptor_wanted)
+        return rc;
+    const uint32_t wanted = res->descriptor_wanted;
+    extern int nvmtl_vk_descriptor_buffers(const void *spv, size_t n, int render, uint32_t *mask);
+    NSData *spv = nvmtl_function_spirv(f, "the AIR-to-NIR road reads the buffers the translator's module keeps as descriptors");
+    uint32_t kept = 0;
+    if (!spv || nvmtl_vk_descriptor_buffers(spv.bytes, spv.length, varyings != nil, &kept)) {
+        *why = [NSString stringWithFormat:@"%@; the translator's module, which says which of them it keeps as descriptors, %s",
+                *why ?: @"", spv ? "is not one the plugin's lowering takes" : "was not made"];
+        return -1;
+    }
+    rc = nvmtl_air_nir_shader_with(f, tgLen, flags | NVMTL_AIR_NIR_DESCRIPTORS, local, varyings, stageKey, samplers, kept, res, nir,
+                                   why, path, memoKey, hit);
+    static _Atomic unsigned said;
+    if (rc == 0 && !*hit && atomic_fetch_add(&said, 1) < 64)
+        nvlog("air-nir: %s indexes buffer(s) %#x with values read from memory; the translator's module keeps %#x as storage-buffer "
+              "descriptors, which it reads through them (bounds-checked in a render pipeline)", f->_fname.UTF8String ?: "?", wanted, kept);
+    return rc;
 }
 
 // The constexpr-sampler slots the translator's reflection gives the function (the ones the dispatch binds), or -1; and
@@ -929,9 +963,9 @@ static NSDictionary *nvmtl_air_nir_function_reflection(NVMTLFunction *f, NSStrin
     uint32_t local[3] = { 1, 1, 1 };
     if (kernel) { local[0] = 64; }
     struct nvmtl_air_nir_result res;
-    const int st = nvmtl_air_nir_translate(f, nil, flags | NVMTL_AIR_NIR_REFLECT, local, nil, nil, &res);
+    const int st = nvmtl_air_nir_translate(f, nil, flags | NVMTL_AIR_NIR_REFLECT, local, nil, nil, 0, &res);
     NSString *kpath = nil, *kmemo = nil;
-    if (kernel) nvmtl_air_nir_key(f, nil, flags, local, nil, nil, nil, &kpath, &kmemo);
+    if (kernel) nvmtl_air_nir_key(f, nil, flags, local, nil, nil, nil, 0, &kpath, &kmemo);
     NSDictionary *d = nil;
     NSString *no = nil;
     if (st == NVMTL_AIR_NIR_OK) {

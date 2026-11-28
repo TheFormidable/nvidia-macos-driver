@@ -14,6 +14,7 @@
 #define NVMTL_AIR_NIR_H
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include "nvmtl_air_nir_abi.h"
@@ -70,7 +71,44 @@ static inline int nvmtl_air_nir_masks(const struct nvmtl_air_nir_result *r, uint
     }
     for (uint32_t i = 0; i < 32; i++)
         if ((r->sampler_mask >> i) & 1u) { const uint32_t k = NVMTL_AN_SAMP0 + i; bmask[k >> 6] |= 1ull << (k & 63); }
+    /* version 7: the buffers read through their storage-buffer descriptors, at bindings 0-31 as the SPIR-V road's
+     * module declares them (nvmtl_air_nir_kept_buffers) */
+    if (r->size >= offsetof(struct nvmtl_air_nir_result, descriptor_mask) + sizeof r->descriptor_mask)
+        bmask[0] |= (uint64_t)r->descriptor_mask;
     return 0;
+}
+
+/* The [[buffer(n)]] arguments a module keeps as storage-buffer descriptors once the SPIR-V road's pipeline has lowered its
+ * buffer addresses (the translator's wrapper, buffer_addresses.rs kept_roots: every one, when it lowered nothing): bit
+ * n for each StorageBuffer variable at set 0, binding n below 32 (the buffer band; the table is at 640). The road hands
+ * them to the frontend (NVMTL_AIR_NIR_DESCRIPTORS), which reads each through its descriptor as that module does. -1 for
+ * a module this does not read, or one with a Uniform block in the band (a form of buffer the frontend does not make). */
+static inline int nvmtl_air_nir_kept_buffers(const uint32_t *w, size_t nw, uint32_t *mask)
+{
+    *mask = 0;
+    if (!w || nw < 5 || w[0] != 0x07230203u) return -1;
+    const uint32_t bound = w[3];
+    if (!bound || bound > (1u << 22)) return -1;
+    /* per id: its set + 1, its binding + 1, and for a variable its storage class + 1 */
+    uint32_t *set = (uint32_t *)calloc(bound, sizeof *set), *bind = (uint32_t *)calloc(bound, sizeof *bind);
+    uint32_t *sc = (uint32_t *)calloc(bound, sizeof *sc);
+    int rc = set && bind && sc ? 0 : -1;
+    for (size_t i = 5; rc == 0 && i < nw; ) {
+        const uint32_t n = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!n || i + n > nw) { rc = -1; break; }
+        if (op == 71 && n >= 4 && w[i + 1] < bound && w[i + 2] == 34) set[w[i + 1]] = w[i + 3] + 1;      /* DescriptorSet */
+        if (op == 71 && n >= 4 && w[i + 1] < bound && w[i + 2] == 33) bind[w[i + 1]] = w[i + 3] + 1;     /* Binding */
+        if (op == 59 && n >= 4 && w[i + 2] < bound) sc[w[i + 2]] = w[i + 3] + 1;                          /* OpVariable */
+        i += n;
+    }
+    for (uint32_t v = 0; rc == 0 && v < bound; v++) {
+        if (set[v] != 1 || !bind[v] || bind[v] > 32) continue;
+        if (sc[v] == 12 + 1) *mask |= 1u << (bind[v] - 1);        /* StorageBuffer */
+        else if (sc[v] == 2 + 1) rc = -1;                          /* Uniform */
+    }
+    free(set); free(bind); free(sc);
+    if (rc) *mask = 0;
+    return rc;
 }
 
 /* A threadgroup size the road compiles: every dimension from 1 to the device's per-dimension limit w and at most

@@ -506,6 +506,11 @@ run_test(const struct test *t)
       fprintf(tsv, "%s\tnone\tSKIPPED\t\t\t\t\t\t0\tMetal has no dispatch base\n", name);
       return SKIPPED;
    }
+   if ((t->flags & ROBUST_ONLY) && !(getenv("NVMTL_COMPUTE_ROBUST") && !strcmp(getenv("NVMTL_COMPUTE_ROBUST"), "1"))) {
+      printf("%-16s SKIPPED  reads past a buffer's end: only with NVMTL_COMPUTE_ROBUST=1\n", name);
+      fprintf(tsv, "%s\tnone\tSKIPPED\t\t\t\t\t\t0\tonly with NVMTL_COMPUTE_ROBUST=1\n", name);
+      return SKIPPED;
+   }
    snprintf(path, sizeof path, "%s/%s.metallib", air_dir, t->air ? t->air : t->name);
    NSError *e = nil;
    uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);

@@ -284,6 +284,7 @@ enum air_kind {
    AIR_TEXTURE,   /* a [[texture(n)]] argument: res is its struct air_texture, no def */
    AIR_SAMPLER,   /* a sampler: res is its struct air_sampler, no def */
    AIR_TEXARRAY,  /* a pointer into an array<texture, N> argument: res is its struct air_texarray, def the element */
+   AIR_SSBO,      /* 32-bit byte offset into a [[buffer(n)]] read through its storage-buffer descriptor (desc) */
 };
 
 struct air_val {
@@ -307,6 +308,9 @@ struct air_val {
     * from_off say where (an embedded binding of the translator's is found by them). */
    uint16_t ab_param, from_param;
    uint32_t ab_off, from_off;
+   /* AIR_SSBO: the buffer's index + 1, and whether the translator declares it NonWritable (air.read) */
+   uint8_t desc;
+   bool desc_ro;
 };
 
 #define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
@@ -323,6 +327,7 @@ struct air_phi {
    LLVMValueRef phi;
    nir_variable *var;
    uint8_t kind;
+   uint8_t desc;                   /* AIR_SSBO: the descriptor buffer's index + 1 */
    uint8_t depth;                  /* an element of an aggregate phi: the indices down to it */
    uint16_t path[AIR_MAX_DEPTH];
 };
@@ -387,6 +392,15 @@ struct air_tr {
    nir_variable_mode table_mode;
    nir_address_format table_format;
    const struct glsl_type *table_type;
+   /* the buffers the translator keeps as storage-buffer descriptors (NVMTL_AIR_NIR_DESCRIPTORS): given, read, wanted */
+   uint32_t desc_buffers, desc_mask, desc_wanted;
+   bool desc_given;
+   struct set *dd_sources;      /* parameters that count as read from memory (air_data_dependent) */
+   uint32_t pre_wanted;         /* the buffers air_dd_before_passes asks about */
+   uint32_t desc_ro_mask;       /* the descriptor buffers the translator declares NonWritable */
+   bool pre_done;
+   nir_address_format ssbo_format;
+   nir_def *ssbo_desc[NVMTL_AIR_NIR_MAX_BUFFERS];
 
    uint32_t shared_size, scratch_size, buffer_mask, instructions;
    uint32_t global_align;       /* the largest alignment a device or constant buffer access promises */
@@ -472,6 +486,10 @@ _Static_assert(offsetof(struct nvmtl_air_nir_result, reflection) == NVMTL_AIR_NI
                "version 4 of the result ends at reflection");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, color_inputs) == NVMTL_AIR_NIR_RESULT_V5_SIZE,
                "version 5 of the result ends at color_inputs");
+_Static_assert(offsetof(struct nvmtl_air_nir_request, descriptor_buffers) == NVMTL_AIR_NIR_REQUEST_V5_SIZE,
+               "the version-6 request ends where descriptor_buffers starts");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, descriptor_mask) == NVMTL_AIR_NIR_RESULT_V6_SIZE,
+               "version 6 of the result ends at descriptor_mask");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
@@ -626,6 +644,8 @@ static struct air_val *
 air_derive(struct air_val *r, const struct air_val *base, nir_def *off)
 {
    r->nbase = base->nbase;
+   r->desc = base->desc;
+   r->desc_ro = base->desc_ro;
    if (base->ab_param && (!off || nir_src_is_const(nir_src_for_ssa(off)))) {
       r->ab_param = base->ab_param;
       r->ab_off = base->ab_off + (off ? (uint32_t)nir_src_as_uint(nir_src_for_ssa(off)) : 0);
@@ -697,6 +717,9 @@ air_aggregate(struct air_tr *t, unsigned n)
 static nir_def *
 air_vdef(struct air_tr *t, const struct air_val *x)
 {
+   if (x->kind == AIR_SSBO)
+      unsupported(t, "a pointer into buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor, "
+                  "used as a value (a select, a phi, a compare, a store or a call of it)", x->desc - 1u);
    if (!x->def)
       unsupported(t, "a %s used as a value (a null-texture test, a select or a phi of handles, ...)",
                   x->kind == AIR_TEXTURE ? "texture handle" : x->kind == AIR_SAMPLER ? "sampler handle" : "value without one");
@@ -1006,7 +1029,7 @@ air_gep(struct air_tr *t, nir_builder *b, LLVMValueRef gep, LLVMValueRef result_
       return r;
    }
    uint32_t align = base->align;
-   unsigned bits = air_vdef(t, base)->bit_size;
+   unsigned bits = (base->kind == AIR_SSBO ? base->def : air_vdef(t, base))->bit_size;
    nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1,
                                  (unsigned)L.LLVMGetNumOperands(gep), bits, &align);
    nir_def *addr = off ? nir_iadd(b, base->def, off) : base->def;
@@ -1068,6 +1091,51 @@ air_guarded_load(struct air_tr *t, struct air_val *ptr, unsigned components, uns
    return nir_load_var(b, v);
 }
 
+/* buffer n's storage-buffer descriptor, loaded once at the entry (the stage's set, binding n), as the translator's module
+ * reads a buffer its lowering keeps (NVMTL_AIR_NIR_DESCRIPTORS) */
+static nir_def *
+air_ssbo_desc(struct air_tr *t, unsigned n)
+{
+   if (!t->ssbo_desc[n]) {
+      nir_builder *b = &t->top;
+      nir_def *index = nir_vulkan_resource_index(b, nir_address_format_num_components(t->ssbo_format),
+                                                 nir_address_format_bit_size(t->ssbo_format), nir_imm_int(b, 0),
+                                                 .desc_set = t->set, .binding = n,
+                                                 .desc_type = nir_descriptor_type_storage_buffer);
+      t->ssbo_desc[n] = nir_load_vulkan_descriptor(b, nir_address_format_num_components(t->ssbo_format),
+                                                   nir_address_format_bit_size(t->ssbo_format), index,
+                                                   .desc_type = nir_descriptor_type_storage_buffer);
+   }
+   return t->ssbo_desc[n];
+}
+
+/* A load through a descriptor buffer: components of 8, 16 or 32 bits at their natural alignment. NVK checks a
+ * bounds-checked access component by component against the descriptor's range rounded up to 4 bytes
+ * (nir_lower_explicit_io, NVK_SSBO_BOUNDS_CHECK_ALIGNMENT), so such a component is read, or reads 0, exactly as the
+ * translator's module reads it, whether that reads it as itself or within the aligned 32-bit word that holds it. A
+ * 64-bit component is not: the translator reads one as a 64-bit value in some modules and as two 32-bit words in
+ * others, which differ when the buffer ends between them. */
+static nir_def *
+air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
+{
+   if (bits > 32)
+      unsupported(t, "a %u-bit load from buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer "
+                  "descriptor: the translator reads a 64-bit value there as one value or as two 32-bit words, "
+                  "depending on the module, and the two differ when the buffer ends between them", bits, ptr->desc - 1u);
+   if (align < bits / 8)
+      unsupported(t, "a %u-bit load from buffer %u (a bounds-checked storage-buffer descriptor on the SPIR-V road) "
+                  "aligned to %u bytes", bits, ptr->desc - 1u, align);
+   nir_builder *b = &t->b;
+   nir_deref_instr *d = nir_build_deref_cast(b, air_ssbo_desc(t, ptr->desc - 1u), nir_var_mem_ssbo,
+                                             glsl_uint8_t_type(), 1);
+   d = nir_build_deref_ptr_as_array(b, d, ptr->def);
+   const enum glsl_base_type base = bits == 8 ? GLSL_TYPE_UINT8 : bits == 16 ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT;
+   d = nir_build_deref_cast(b, &d->def, nir_var_mem_ssbo, glsl_vector_type(base, components), 0);
+   d->cast.align_mul = align;
+   d->cast.align_offset = 0;
+   return nir_load_deref_with_access(b, d, ptr->desc_ro ? ACCESS_NON_WRITEABLE : 0);
+}
+
 static nir_def *
 air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
 {
@@ -1087,6 +1155,8 @@ air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigne
       return nir_load_shared(b, components, bits, ptr->def, .base = 0, .align_mul = align);
    case AIR_SCRATCH:
       return nir_load_scratch(b, components, bits, ptr->def, .align_mul = align);
+   case AIR_SSBO:
+      return air_ssbo_load(t, ptr, components, bits, align);
    default:
       unsupported(t, "a load through a value that is not a pointer");
    }
@@ -1112,6 +1182,11 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
       return;
    case AIR_CONSTANT:
       unsupported(t, "a store to constant memory");
+   case AIR_SSBO:
+      /* the translator guards a store against a byte offset past 4 GiB in one of its access forms and not in the
+       * other, and which one a module has is the translator's own choice */
+      unsupported(t, "a store to buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor",
+                  ptr->desc - 1u);
    default:
       unsupported(t, "a store through a value that is not a pointer");
    }
@@ -1237,6 +1312,8 @@ air_mem_copy(struct air_tr *t, LLVMValueRef call, bool set)
       unsigned bits = piece >= 4 ? 32 : piece * 8;
       unsigned comps = piece >= 4 ? piece / 4 : 1;
       struct air_val d = { nir_iadd_imm(b, dst->def, at), dst->kind, piece };
+      d.desc = dst->desc;
+      d.desc_ro = dst->desc_ro;
       nir_def *v;
       if (set) {
          nir_def *word = bits == 32 ? fill : nir_u2uN(b, fill, bits);
@@ -1245,6 +1322,8 @@ air_mem_copy(struct air_tr *t, LLVMValueRef call, bool set)
       } else {
          struct air_val s = { nir_iadd_imm(b, src->def, at), src->kind, piece };
          s.nbase = src->nbase;
+         s.desc = src->desc;
+         s.desc_ro = src->desc_ro;
          v = air_load_mem(t, &s, comps, bits, piece);
       }
       air_store_mem(t, &d, v, piece);
@@ -2025,6 +2104,8 @@ static bool air_starts(const char *s, const char *prefix);
 static bool
 air_data_dependent(struct air_tr *t, struct set *insts, struct set *seen, LLVMValueRef v, unsigned *budget)
 {
+   if (v && t->dd_sources && _mesa_set_search(t->dd_sources, v))
+      return true;   /* a kernel's grid position: the translator adds the dispatch's push constants to it */
    if (!v || !_mesa_set_search(insts, v) || _mesa_set_search(seen, v))
       return false;
    _mesa_set_add(seen, v);
@@ -2053,26 +2134,255 @@ air_data_dependent(struct air_tr *t, struct set *insts, struct set *seen, LLVMVa
    }
 }
 
-/* A vertex or fragment function that indexes a buffer argument holding an array (no air.buffer_size) with a value
- * read from memory is refused: the translator keeps such a buffer a descriptor (buffer_addresses.rs kept_roots), which
- * the device bounds-checks for graphics pipelines (robustBufferAccess), because the data may point past its end (a
- * light list, a froxel grid) and a read there through the buffer's address is an MMU fault that takes the device away.
- * The road reads every buffer through its address, so such a function takes the SPIR-V road. Compute pipelines are not
- * bounds-checked on either road. */
-static void
-air_refuse_unchecked_indexing(struct air_tr *t, const struct air_arg *args, unsigned n)
+/* ---- round 9: the buffers to ask the translator about, on the module as the request gives it ------------------------ */
+
+/* The translator reads the module as the request gives it: without LLVM's inliner and SROA, a value a GL program keeps
+ * in a local variable is a load in its module, an internal function's parameter the caller's value, and a pointer
+ * stored in a local variable the one stored (inline_and_forward_object_fields). Its wrapper keeps a buffer a
+ * storage-buffer descriptor when an access chain indexes it with a value that depends on a load from anything but an
+ * Input variable, an image read or a call (buffer_addresses.rs data_dependent, 96 values deep). So the buffers asked
+ * about (air_descriptor_candidates) are those a GEP anywhere in the module indexes with a value this counts as data, on
+ * that module: a load, a call other than an llvm intrinsic, a phi (the translator may carry it in a variable), a
+ * parameter of a function other than the entry, an entry argument the translator reads from memory (dd_sources), or
+ * anything more than 24 values deep. This asks about every buffer the translator keeps, and about some it does not. */
+struct air_pre {
+   struct air_tr *t;
+   struct set *insts;            /* every instruction of every function */
+   struct hash_table *params;    /* a parameter of a function other than the entry -> (void *)1 */
+   struct set *sources;          /* entry parameters the translator reads from memory */
+   struct hash_table *ptr;       /* a pointer value -> the buffers (by index) it may point into, a uint32_t mask */
+   struct hash_table *held;      /* an alloca -> the buffers of the pointers stored in it */
+};
+
+static uint32_t
+air_pre_mask(struct hash_table *h, LLVMValueRef v)
 {
-   if (t->stage == NVMTL_AIR_NIR_STAGE_KERNEL)
+   struct hash_entry *e = v ? _mesa_hash_table_search(h, v) : NULL;
+   return e ? (uint32_t)(uintptr_t)e->data : 0;
+}
+
+static bool
+air_pre_or(struct hash_table *h, LLVMValueRef v, uint32_t m)
+{
+   if (!v || !m)
+      return false;
+   const uint32_t old = air_pre_mask(h, v);
+   if ((old | m) == old)
+      return false;
+   _mesa_hash_table_insert(h, v, (void *)(uintptr_t)(old | m));
+   return true;
+}
+
+/* the alloca a pointer into thread memory is derived from, or NULL */
+static LLVMValueRef
+air_pre_alloca(struct air_pre *p, LLVMValueRef v)
+{
+   for (unsigned d = 0; d < 32 && v && _mesa_set_search(p->insts, v); d++) {
+      const int op = L.LLVMGetInstructionOpcode(v);
+      if (op == OP_ALLOCA)
+         return v;
+      if (op != OP_GEP && op != OP_BITCAST && op != OP_ADDRSPACECAST)
+         return NULL;
+      v = L.LLVMGetOperand(v, 0);
+   }
+   return NULL;
+}
+
+static bool
+air_pre_data(struct air_pre *p, LLVMValueRef v, unsigned *budget)
+{
+   if (!v)
+      return false;
+   if (!*budget)
+      return true;
+   (*budget)--;
+   if (_mesa_set_search(p->sources, v) || _mesa_hash_table_search(p->params, v))
+      return true;
+   if (!_mesa_set_search(p->insts, v))
+      return false;   /* a constant, or an entry argument */
+   switch (L.LLVMGetInstructionOpcode(v)) {
+   case OP_LOAD: case OP_PHI:
+      return true;
+   case OP_CALL: {
+      LLVMValueRef callee = L.LLVMGetCalledValue(v);
+      if (!callee || !L.LLVMIsAFunction(callee) || !air_starts(air_name(callee, NULL), "llvm."))
+         return true;
+      for (unsigned i = 0; i < L.LLVMGetNumArgOperands(v); i++)
+         if (air_pre_data(p, L.LLVMGetOperand(v, i), budget))
+            return true;
+      return false;
+   }
+   default:
+      for (int i = 0; i < L.LLVMGetNumOperands(v); i++)
+         if (air_pre_data(p, L.LLVMGetOperand(v, i), budget))
+            return true;
+      return false;
+   }
+}
+
+static void
+air_dd_before_passes(struct air_tr *t)
+{
+   static const char *const lists[] = { "air.kernel", "air.vertex", "air.fragment" };
+   LLVMValueRef f = NULL, args_node = NULL;
+   unsigned stage = 0;
+   for (unsigned l = 0; l < ARRAY_SIZE(lists) && !f; l++) {
+      unsigned n = L.LLVMGetNamedMetadataNumOperands(t->module, lists[l]);
+      LLVMValueRef *nodes = n ? rzalloc_array(t->mem, LLVMValueRef, n) : NULL;
+      if (n)
+         L.LLVMGetNamedMetadataOperands(t->module, lists[l], nodes);
+      for (unsigned i = 0; i < n; i++) {
+         LLVMValueRef *ops;
+         unsigned c = air_md_operands(nodes[i], &ops, t->mem);
+         if (c < 3 || !ops[0] || !L.LLVMIsAFunction(ops[0]))
+            continue;
+         if (t->req->entry && strcmp(air_name(ops[0], NULL), t->req->entry))
+            continue;
+         f = ops[0];
+         args_node = ops[2];
+         stage = l;
+         break;
+      }
+   }
+   t->pre_done = true;
+   if (!f || !args_node || !L.LLVMIsAMDNode(args_node))
       return;
-   struct set *roots = _mesa_pointer_set_create(t->mem), *insts = _mesa_pointer_set_create(t->mem);
+   struct air_pre p = { t, _mesa_pointer_set_create(t->mem), _mesa_pointer_hash_table_create(t->mem),
+                        _mesa_pointer_set_create(t->mem), _mesa_pointer_hash_table_create(t->mem),
+                        _mesa_pointer_hash_table_create(t->mem) };
+   for (LLVMValueRef g = L.LLVMGetFirstFunction(t->module); g; g = L.LLVMGetNextFunction(g)) {
+      if (L.LLVMIsDeclaration(g))
+         continue;
+      if (g != f)
+         for (unsigned k = 0; k < L.LLVMCountParams(g); k++)
+            _mesa_hash_table_insert(p.params, L.LLVMGetParam(g, k), (void *)1);
+      for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(g); bb; bb = L.LLVMGetNextBasicBlock(bb))
+         for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i))
+            _mesa_set_add(p.insts, i);
+   }
+   /* the entry's buffers, and what it reads that the translator's module loads */
+   LLVMValueRef *nodes;
+   unsigned na = air_md_operands(args_node, &nodes, t->mem);
+   const unsigned params = L.LLVMCountParams(f);
+   for (unsigned i = 0; i < na; i++) {
+      LLVMValueRef *ops;
+      unsigned c = air_md_operands(nodes[i], &ops, t->mem);
+      uint64_t index;
+      const char *kind = c >= 2 ? air_md_string(ops[1]) : NULL;
+      if (!kind || !air_md_int(ops[0], &index) || index >= params)
+         continue;
+      LLVMValueRef param = L.LLVMGetParam(f, (unsigned)index);
+      if (stage == 0 ? (!strcmp(kind, "air.thread_position_in_grid") || !strcmp(kind, "air.threadgroup_position_in_grid") ||
+                        !strcmp(kind, "air.threads_per_grid") || !strcmp(kind, "air.threadgroups_per_grid"))
+                     : !strcmp(kind, "air.render_target"))
+         _mesa_set_add(p.sources, param);
+      if (strcmp(kind, "air.buffer"))
+         continue;
+      for (unsigned k = 2; k + 1 < c; k++) {
+         const char *key = air_md_string(ops[k]);
+         uint64_t loc;
+         if (key && !strcmp(key, "air.location_index") && air_md_int(ops[k + 1], &loc) && loc < NVMTL_AIR_NIR_MAX_BUFFERS)
+            air_pre_or(p.ptr, param, 1u << loc);
+      }
+   }
+   /* where those pointers go: GEPs and casts, phis and selects, calls, and local variables they are stored in */
+   for (bool changed = true; changed; ) {
+      changed = false;
+      set_foreach(p.insts, e) {
+         LLVMValueRef i = (LLVMValueRef)e->key;
+         switch (L.LLVMGetInstructionOpcode(i)) {
+         case OP_GEP: case OP_BITCAST: case OP_ADDRSPACECAST: case OP_FREEZE:
+            changed |= air_pre_or(p.ptr, i, air_pre_mask(p.ptr, L.LLVMGetOperand(i, 0)));
+            break;
+         case OP_PHI:
+            for (unsigned k = 0; k < L.LLVMCountIncoming(i); k++)
+               changed |= air_pre_or(p.ptr, i, air_pre_mask(p.ptr, L.LLVMGetIncomingValue(i, k)));
+            break;
+         case OP_SELECT:
+            changed |= air_pre_or(p.ptr, i, air_pre_mask(p.ptr, L.LLVMGetOperand(i, 1)) | air_pre_mask(p.ptr, L.LLVMGetOperand(i, 2)));
+            break;
+         case OP_STORE: {
+            LLVMValueRef a = air_pre_alloca(&p, L.LLVMGetOperand(i, 1));
+            if (a)
+               changed |= air_pre_or(p.held, a, air_pre_mask(p.ptr, L.LLVMGetOperand(i, 0)));
+            break;
+         }
+         case OP_LOAD: {
+            LLVMValueRef a = air_pre_alloca(&p, L.LLVMGetOperand(i, 0));
+            if (a)
+               changed |= air_pre_or(p.ptr, i, air_pre_mask(p.held, a));
+            break;
+         }
+         case OP_CALL: {
+            LLVMValueRef callee = L.LLVMGetCalledValue(i);
+            if (!callee || !L.LLVMIsAFunction(callee) || L.LLVMIsDeclaration(callee))
+               break;
+            for (unsigned k = 0; k < L.LLVMGetNumArgOperands(i) && k < L.LLVMCountParams(callee); k++)
+               changed |= air_pre_or(p.ptr, L.LLVMGetParam(callee, k), air_pre_mask(p.ptr, L.LLVMGetOperand(i, k)));
+            break;
+         }
+         default:
+            break;
+         }
+      }
+   }
+   set_foreach(p.insts, e) {
+      LLVMValueRef gep = (LLVMValueRef)e->key;
+      if (L.LLVMGetInstructionOpcode(gep) != OP_GEP)
+         continue;
+      const uint32_t m = air_pre_mask(p.ptr, L.LLVMGetOperand(gep, 0));
+      if (!m || (t->pre_wanted & m) == m)
+         continue;
+      for (int k = 1; k < L.LLVMGetNumOperands(gep); k++) {
+         unsigned budget = 24;
+         if (air_pre_data(&p, L.LLVMGetOperand(gep, k), &budget)) {
+            t->pre_wanted |= m;
+            break;
+         }
+      }
+   }
+}
+
+/* The buffers the translator may keep as storage-buffer descriptors: a buffer argument that a GEP indexes with a value
+ * read from memory or a texture, whether it has an air.buffer_size or not (the translator types a GL program's sized
+ * byte buffer as an array of bytes): the translator's wrapper keeps a root whose block holds a runtime array that an
+ * access chain indexes with a data-dependent value, when its pointers reach only access chains, loads, stores and
+ * OpArrayLength (wrapper/src/buffer_addresses.rs kept_roots). The device
+ * bounds-checks a descriptor in a render pipeline (robustBufferAccess), because the data may point past the buffer's end
+ * (a light list, a froxel grid), and a read there through the buffer's address is an MMU fault that takes the device
+ * away. Which of these the translator keeps is its module's (as the plugin lowers it) and only the plugin has that
+ * module: without NVMTL_AIR_NIR_DESCRIPTORS such a function is refused and says which buffers it indexes so
+ * (descriptor_wanted), and the plugin asks again with the translator's answer. A kernel of a pipeline without buffer
+ * robustness (NVMTL_AIR_NIR_UNCHECKED) reads a kept buffer at the same address either way below 4 GiB, and is not asked
+ * about. */
+static uint32_t
+air_descriptor_candidates(struct air_tr *t, const struct air_arg *args, unsigned n)
+{
+   if (t->stage == NVMTL_AIR_NIR_STAGE_KERNEL && (t->req->flags & NVMTL_AIR_NIR_UNCHECKED))
+      return 0;
+   /* what the translator's module reads with an instruction it counts as data (buffer_addresses.rs data_dependent: a
+    * load from anything but an Input variable, an image read) where the AIR has an argument: a kernel's positions and
+    * sizes of the grid (the dispatch's push constants are added or read), a fragment's [[color(n)]] inputs (an
+    * input-attachment read) */
+   t->dd_sources = _mesa_pointer_set_create(t->mem);
    for (unsigned i = 0; i < n; i++)
-      if (args[i].kind && !strcmp(args[i].kind, "air.buffer") && !args[i].sized && args[i].param)
-         _mesa_set_add(roots, args[i].param);
+      if (args[i].kind && args[i].param &&
+          (t->stage == NVMTL_AIR_NIR_STAGE_KERNEL ?
+           (!strcmp(args[i].kind, "air.thread_position_in_grid") || !strcmp(args[i].kind, "air.threadgroup_position_in_grid") ||
+            !strcmp(args[i].kind, "air.threads_per_grid") || !strcmp(args[i].kind, "air.threadgroups_per_grid")) :
+           !strcmp(args[i].kind, "air.render_target")))
+         _mesa_set_add(t->dd_sources, args[i].param);
+   struct hash_table *roots = _mesa_pointer_hash_table_create(t->mem);
+   struct set *insts = _mesa_pointer_set_create(t->mem);
+   for (unsigned i = 0; i < n; i++)
+      if (args[i].kind && !strcmp(args[i].kind, "air.buffer") && args[i].param && args[i].location < NVMTL_AIR_NIR_MAX_BUFFERS)
+         _mesa_hash_table_insert(roots, args[i].param, (void *)(uintptr_t)(args[i].location + 1));
    if (!roots->entries)
-      return;
+      return t->pre_done ? t->pre_wanted : 0;
    for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(t->function); bb; bb = L.LLVMGetNextBasicBlock(bb))
       for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i))
          _mesa_set_add(insts, i);
+   uint32_t mask = t->pre_done ? t->pre_wanted : 0;
    set_foreach(insts, e) {
       LLVMValueRef gep = (LLVMValueRef)e->key;
       if (L.LLVMGetInstructionOpcode(gep) != OP_GEP)
@@ -2085,17 +2395,17 @@ air_refuse_unchecked_indexing(struct air_tr *t, const struct air_arg *args, unsi
             break;
          base = L.LLVMGetOperand(base, 0);
       }
-      if (!base || !_mesa_set_search(roots, base))
+      struct hash_entry *root = base ? _mesa_hash_table_search(roots, base) : NULL;
+      if (!root)
          continue;
       for (int k = 1; k < L.LLVMGetNumOperands(gep); k++) {
          unsigned budget = 512;
          struct set *seen = _mesa_pointer_set_create(t->mem);
          if (air_data_dependent(t, insts, seen, L.LLVMGetOperand(gep, k), &budget))
-            unsupported(t, "a buffer of the %s function is indexed with a value read from memory or a texture: the "
-                        "SPIR-V road keeps that buffer bounds-checked (robustBufferAccess), and a read past its end "
-                        "through its address is a GPU fault", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment");
+            mask |= 1u << ((unsigned)(uintptr_t)root->data - 1);
       }
    }
+   return mask;
 }
 
 /* Buffers read their address from the table, builtins from the system values; threadgroup arguments take the
@@ -2136,6 +2446,20 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
             unsupported(t, "buffer argument %u in address space %llu", i, (unsigned long long)a->space);
          if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
             unsupported(t, "buffer argument %u is not a pointer", i);
+         if (t->desc_given && (t->desc_buffers >> a->location & 1)) {
+            /* a buffer the translator's module keeps a storage-buffer descriptor: read through it, at binding n */
+            if (argbuf)
+               unsupported(t, "argument buffer %u is a storage-buffer descriptor in the translator's module",
+                           (unsigned)a->location);
+            struct air_val *v = air_set(t, a->param, nir_imm_int(&t->top, 0), AIR_SSBO,
+                                        a->align ? MIN2((uint32_t)a->align, 16) : 4);
+            v->desc = (uint8_t)(a->location + 1);
+            v->desc_ro = a->space == 2 || (a->access && !strcmp(a->access, "air.read"));
+            t->desc_mask |= 1u << a->location;
+            if (v->desc_ro)
+               t->desc_ro_mask |= 1u << a->location;
+            continue;
+         }
          struct air_val *v = air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
                                      a->align ? MIN2((uint32_t)a->align, 16) : 4);
          v->ab_param = (uint16_t)(a->index + 1);   /* its fields at known offsets: where embedded bindings are */
@@ -2205,7 +2529,15 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          unsupported(t, "parameter %u of the function has no description in its metadata", p);
    }
    air_assign_static_samplers(t);
-   air_refuse_unchecked_indexing(t, args, n);
+   const uint32_t want = air_descriptor_candidates(t, args, n);
+   if (want && !t->desc_given) {
+      t->desc_wanted = want;
+      unsupported(t, "buffer(s) %#x of the %s function are indexed with a value read from memory or a texture: the "
+                  "SPIR-V road may keep them bounds-checked storage-buffer descriptors, and the request does not say "
+                  "which it keeps (NVMTL_AIR_NIR_DESCRIPTORS)", want,
+                  t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ?
+                  "fragment" : "kernel");
+   }
    if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)
       air_bind_outputs(t);
 }
@@ -4425,6 +4757,13 @@ air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
 {
    if (x->kind != y->kind)
       unsupported(t, "a select between pointers of two kinds");
+   if (x->kind == AIR_SSBO && x->desc == y->desc) {
+      /* two places in one descriptor buffer: the offset chosen (the translator's module chooses the element) */
+      struct air_val *r = air_make(t, nir_bcsel(&t->b, c, x->def, y->def), AIR_SSBO, MIN2(x->align, y->align));
+      r->desc = x->desc;
+      r->desc_ro = x->desc_ro;
+      return r;
+   }
    if ((x->kind == AIR_TEXTURE || x->kind == AIR_SAMPLER) && x->res == y->res)
       return x;   /* the same handle either way */
    if (x->kind != AIR_AGGREGATE) {
@@ -4557,7 +4896,7 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_ADDRSPACECAST: {
       struct air_type to = air_type_of(t, lty);
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
-      if (air_kind_of_space(to.address_space) != x->kind)
+      if (air_kind_of_space(to.address_space) != (x->kind == AIR_SSBO ? AIR_GLOBAL : x->kind))
          unsupported(t, "a cast from one address space to another");
       struct air_val *r = air_set(t, inst, x->def, x->kind, x->align);
       r->res = x->res;
@@ -4714,6 +5053,53 @@ air_terminator(struct air_tr *t, struct air_block *blk, LLVMValueRef term, struc
 }
 
 /* A phi's variable, one per element of an aggregate phi (each with the indices down to it), read where the phi is. */
+/* The descriptor buffer (its index + 1) every pointer v may hold points into, through GEPs, casts, selects and phis: 0
+ * when nothing translated yet says, -1 when some may point elsewhere */
+static int
+air_ssbo_root(struct air_tr *t, LLVMValueRef v, struct set *seen, unsigned depth)
+{
+   if (!v || depth > 64)
+      return -1;
+   struct hash_entry *e = _mesa_hash_table_search(t->values, v);
+   if (e) {
+      const struct air_val *x = e->data;
+      return x->kind == AIR_SSBO ? x->desc : -1;
+   }
+   if (_mesa_set_search(seen, v))
+      return 0;
+   _mesa_set_add(seen, v);
+   if (!L.LLVMGetInstructionParent(v))
+      return -1;
+   int r = 0;
+   LLVMValueRef from[64];
+   unsigned n = 0;
+   switch (L.LLVMGetInstructionOpcode(v)) {
+   case OP_GEP: case OP_BITCAST: case OP_ADDRSPACECAST: case OP_FREEZE:
+      from[n++] = L.LLVMGetOperand(v, 0);
+      break;
+   case OP_SELECT:
+      from[n++] = L.LLVMGetOperand(v, 1);
+      from[n++] = L.LLVMGetOperand(v, 2);
+      break;
+   case OP_PHI:
+      if (L.LLVMCountIncoming(v) > ARRAY_SIZE(from))
+         return -1;
+      for (unsigned k = 0; k < L.LLVMCountIncoming(v); k++)
+         from[n++] = L.LLVMGetIncomingValue(v, k);
+      break;
+   default:
+      return -1;
+   }
+   for (unsigned k = 0; k < n; k++) {
+      const int q = air_ssbo_root(t, from[k], seen, depth + 1);
+      if (q < 0 || (q && r && q != r))
+         return -1;
+      if (q)
+         r = q;
+   }
+   return r;
+}
+
 static struct air_val *
 air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
 {
@@ -4730,6 +5116,18 @@ air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
       return r;
    }
    struct air_type ty = air_type_of(t, lty);
+   const int root = ty.is_pointer && !phi->depth && t->desc_mask ? air_ssbo_root(t, phi->phi, _mesa_pointer_set_create(t->mem), 0) : 0;
+   if (root > 0) {
+      /* a pointer into one descriptor buffer whichever way it comes (a binary search's bounds): its offset */
+      phi->var = nir_local_variable_create(t->impl, glsl_uint_type(), "phi");
+      phi->kind = AIR_SSBO;
+      phi->desc = (uint8_t)root;
+      util_dynarray_append(&t->phis, *phi);
+      struct air_val *r = air_make(t, nir_load_var(&t->b, phi->var), AIR_SSBO, 1);
+      r->desc = (uint8_t)root;
+      r->desc_ro = (t->desc_ro_mask >> (root - 1)) & 1;
+      return r;
+   }
    phi->var = nir_local_variable_create(t->impl, air_glsl_type(&ty), "phi");
    phi->kind = ty.is_pointer ? air_kind_of_space(ty.address_space) : AIR_VALUE;
    util_dynarray_append(&t->phis, *phi);
@@ -4784,6 +5182,14 @@ air_emit_function(struct air_tr *t)
                unsupported(t, "a phi of aggregates of two shapes");
             v = v->elems[phi->path[d]];
          }
+         if (phi->kind == AIR_SSBO) {
+            if (v->kind != AIR_SSBO || v->desc != phi->desc)
+               unsupported(t, "a phi joining a pointer into descriptor buffer %u with another pointer", phi->desc - 1u);
+            nir_store_var(&t->b, phi->var, v->def, 1);
+            continue;
+         }
+         if (v->kind == AIR_SSBO)
+            air_vdef(t, v);   /* refused: a descriptor buffer's pointer chosen by a phi with another pointer */
          if (v->kind != phi->kind)
             unsupported(t, "a phi joining pointers of two kinds");
          nir_store_var(&t->b, phi->var, air_vdef(t, v), BITFIELD_MASK(v->def->num_components));
@@ -7310,6 +7716,12 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
       t->table_format = nvk_ubo_addr_format(pdev, rs);
    }
    t->table_type = glsl_array_type(glsl_uint64_t_type(), NVMTL_AIR_NIR_MAX_BUFFERS, 8);
+   t->ssbo_format = nvk_ssbo_addr_format(pdev, rs);
+   if ((t->req->flags & NVMTL_AIR_NIR_DESCRIPTORS) &&
+       t->req->size >= offsetof(struct nvmtl_air_nir_request, descriptor_buffers) + sizeof t->req->descriptor_buffers) {
+      t->desc_given = true;
+      t->desc_buffers = t->req->descriptor_buffers;
+   }
 
    if (t->req->flags & NVMTL_AIR_NIR_ARGBUF)
       air_ab_detect(t, args_node);
@@ -7680,6 +8092,7 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
       bool fold = air_fc_specialize(t, ctx);
       if (req->flags & (NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_ARGBUF))
          air_rf_before_passes(t);
+      air_dd_before_passes(t);
       if (req->flags & NVMTL_AIR_NIR_ARGBUF)
          t->ab_texcalls = air_ab_texcalls(t);
       const char *dump_fc = getenv("NVMTL_AIR_NIR_DUMP_FC");   /* the module once the function constants are in */
@@ -7743,7 +8156,12 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, resource_flags) + sizeof res->resource_flags && t->out) {
       res->color_inputs = t->color_inputs;
-      res->resource_flags = t->heap_textures ? NVMTL_AIR_NIR_RES_HEAP : 0;
+      res->resource_flags = (t->heap_textures ? NVMTL_AIR_NIR_RES_HEAP : 0) |
+                            (t->desc_mask ? NVMTL_AIR_NIR_RES_DESCRIPTORS : 0);
+   }
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted) {
+      res->descriptor_mask = t->out ? t->desc_mask : 0;
+      res->descriptor_wanted = t->desc_wanted;   /* on a refusal too: the plugin asks again */
    }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, reflection_why) + sizeof res->reflection_why &&
        (req->flags & NVMTL_AIR_NIR_REFLECT) && t->out) {
@@ -7759,9 +8177,10 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          snprintf(res->reflection_why, sizeof res->reflection_why, "%s", t->rf_why ? t->rf_why : "not reflected");
    }
    if (t->out)
-      snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread%s",
+      snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread%s%s",
                t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size,
-               (t->fragment_flags & NVMTL_AIR_NIR_FS_HELPERS_RETURN) ? ", helper invocations return" : "");
+               (t->fragment_flags & NVMTL_AIR_NIR_FS_HELPERS_RETURN) ? ", helper invocations return" : "",
+               t->desc_mask ? ", descriptor buffers" : "");
    ralloc_free(t);
    return res->status;
 }

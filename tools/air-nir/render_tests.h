@@ -848,7 +848,18 @@ rob_setup(struct rrun *r)
    uint32_t idx[RW * RH];
    for (unsigned i = 0; i < RW * RH; i++)
       idx[i] = (i % 7) == 3 ? ROB_PAL + 256 + i % 100 : i % ROB_PAL;   /* every 7th pixel 4 KB and more past the end */
+   for (unsigned i = 5; i < RW * RH; i += 11)   /* byte offsets past 4 GiB: 32-bit, as the SPIR-V road's (k * 16 wraps) */
+      idx[i] = 0x10000000u * (1 + i % 15) + i % (ROB_PAL + 4);
    r->fbuf[3] = rbuf(idx, sizeof idx);
+}
+
+/* the palette entry index k reads, or -1 for 0: in range, past the end, or past 4 GiB with the 32-bit byte offset the
+ * SPIR-V road's descriptor access computes */
+static int
+rob_entry(uint32_t k)
+{
+   const uint32_t at = k * 16u;   /* mod 2^32 */
+   return at / 16u < ROB_PAL ? (int)(at / 16u) : -1;
 }
 
 /* in range: the palette entry; past the end: 0, as the SPIR-V road's bounds-checked descriptor reads it */
@@ -859,11 +870,126 @@ rob_check(struct rrun *r)
    const float *pal = r->fbuf[0].contents;
    for (unsigned py = 0; py < RH; py++)
       for (unsigned px = 0; px < RW; px++) {
-         const uint32_t k = idx[py * RW + px];
+         const int e = rob_entry(idx[py * RW + px]);
          const float zero[4] = { 0, 0, 0, 0 };
-         if (!rwant(r, 0, px, py, k < ROB_PAL ? pal + k * 4 : zero, 4, 0))
+         if (!rwant(r, 0, px, py, e >= 0 ? pal + e * 4 : zero, 4, 0))
             return false;
       }
+   return true;
+}
+
+/* ---- r_oob2: a vertex function's buffer past its end, 8- and 16-bit elements at a buffer's tail ------------------- */
+
+#define ROB2_B8 13u   /* bytes: 13 to 15 lie in the 4-byte rounding of the descriptor's range */
+#define ROB2_H 5u     /* halves (10 bytes): half 5 lies in the rounding */
+static const float rob2_quad[12] = { -1, -1, 1, -1, -1, 1, 1, -1, 1, 1, -1, 1 };
+
+static void
+rob2_setup(struct rrun *r)
+{
+   r->vbuf[0] = rbuf(rob2_quad, sizeof rob2_quad);
+   float vpal[8][4];
+   for (unsigned i = 0; i < 8; i++)
+      for (unsigned c = 0; c < 4; c++)
+         vpal[i][c] = (float)(i * 4 + c) * 0.125f;
+   r->vbuf[1] = rbuf(vpal, sizeof vpal);
+   const uint32_t vidx[6] = { 5, 5, 5, 1000, 1000, 1000 };   /* the first triangle in range, the second past the end */
+   r->vbuf[2] = rbuf(vidx, sizeof vidx);
+   float pal[ROB_PAL][4];
+   for (unsigned i = 0; i < ROB_PAL; i++)
+      for (unsigned c = 0; c < 4; c++)
+         pal[i][c] = (i + 1) * 0.0625f - c * 0.01f;
+   r->fbuf[0] = rbuf(pal, sizeof pal);
+   uint32_t idx[2 * RW * RH];
+   for (unsigned i = 0; i < RW * RH; i++) {
+      idx[i] = (i % 5) == 2 ? 0x10000000u * (1 + i % 15) + i % (ROB_PAL + 4) : (i % 9) == 4 ? ROB_PAL + i % 300 : i % ROB_PAL;
+      idx[RW * RH + i] = i % 23;   /* 0 to 22: past both buffers' ends from 16 and 6 on */
+   }
+   r->fbuf[3] = rbuf(idx, sizeof idx);
+   uint8_t b8[ROB2_B8];
+   for (unsigned i = 0; i < ROB2_B8; i++)
+      b8[i] = (uint8_t)(17 + 9 * i);
+   r->fbuf[4] = rbuf(b8, sizeof b8);
+   uint16_t h[ROB2_H];
+   for (unsigned i = 0; i < ROB2_H; i++)
+      h[i] = f2h(1.5f + (float)i * 0.25f);
+   r->fbuf[5] = rbuf(h, sizeof h);
+}
+
+static bool
+rob2_check(struct rrun *r)
+{
+   const float *vpal = r->vbuf[1].contents, *pal = r->fbuf[0].contents;
+   const uint32_t *idx = r->fbuf[3].contents;
+   const uint8_t *b8 = r->fbuf[4].contents;
+   const uint16_t *h = r->fbuf[5].contents;
+   unsigned checked = 0;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         /* the first triangle is where u < w (x + y < 0 in NDC); the diagonal is not compared */
+         if (px + 2 > py && py + 2 > px)
+            continue;
+         const bool first = px < py;
+         const unsigned i = py * RW + px;
+         const int e = rob_entry(idx[i]);
+         const unsigned k = idx[RW * RH + i];
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = first ? vpal[5 * 4 + c] : 0.0f;
+         /* within the rounding the bytes past the buffer's length are read as they are: not compared */
+         const bool b8_known = k < ROB2_B8 || k >= ((ROB2_B8 + 3) & ~3u), h_known = k < ROB2_H || k * 2 >= ((ROB2_H * 2 + 3) & ~3u);
+         float got_b8 = rcol(r, 0, px, py)[0] - want[0], got_h = rcol(r, 0, px, py)[1] - want[1];
+         want[0] += k < ROB2_B8 ? (float)b8[k] : b8_known ? 0.0f : got_b8;
+         want[1] += k < ROB2_H ? h2f(h[k]) : h_known ? 0.0f : got_h;
+         want[2] += e >= 0 ? pal[e * 4 + 1] : 0.0f;
+         want[3] += e >= 0 ? pal[e * 4 + 3] : 0.0f;
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return false;
+         checked++;
+      }
+   if (checked < 3000)
+      return snprintf(r->why, sizeof r->why, "only %u pixels compared", checked), false;
+   return true;
+}
+
+/* ---- r_bsearch: a binary search through pointers into a bounds-checked buffer ---------------------------------------- */
+
+#define RBS_N 37u
+static void
+rbs_setup(struct rrun *r)
+{
+   setup_quad(r);
+   float sorted[RBS_N];
+   for (unsigned i = 0; i < RBS_N; i++)
+      sorted[i] = (float)i * 1.5f + 0.25f;
+   r->fbuf[0] = rbuf(sorted, sizeof sorted);
+   const uint32_t n = RBS_N;
+   r->fbuf[1] = rbuf(&n, sizeof n);
+   float keys[RW * RH];
+   for (unsigned i = 0; i < RW * RH; i++)
+      keys[i] = (float)(rnd() % 1300) * 0.05f - 2.0f;   /* -2 to 63: past the last element (54.25) for some */
+   r->fbuf[2] = rbuf(keys, sizeof keys);
+}
+
+static bool
+rbs_check(struct rrun *r)
+{
+   const float *sorted = r->fbuf[0].contents, *keys = r->fbuf[2].contents;
+   unsigned past = 0;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float key = keys[py * RW + px];
+         unsigned first = 0;
+         while (first < RBS_N && !(key < sorted[first]))
+            first++;   /* the upper bound */
+         const float v = first < RBS_N ? sorted[first] : 0.0f;
+         past += first == RBS_N;
+         const float want[4] = { v, v * 2.0f, 0, 1 };
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return false;
+      }
+   if (!past)
+      return snprintf(r->why, sizeof r->why, "no key past the last element"), false;
    return true;
 }
 
@@ -1247,7 +1373,15 @@ static const struct rtest rtests[] = {
      MTLPrimitiveTypeTriangleStrip, 0, 4, 2, 0, NULL, NULL, rbh_setup, rbh_check,
      "r8 1 LSB; r_rleblit_helpers with QuartzCore's own two functions (Terminal's GPU fault on 3.0.25)" },
    { "r_oob", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup, rob_check,
-     "exact; a read past the end gives 0; must take the SPIR-V road (a data-dependent index into a buffer)", true },
+     "exact; a read past the end gives 0, one past 4 GiB wraps its 32-bit offset (the translator's bounds-checked "
+     "descriptor, on both roads)" },
+   { "r_oob_nospace", "r_oob_nospace", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup,
+     rob_check, "exact; r_oob without air.address_space in its metadata" },
+   { "r_bsearch", "r_bsearch", "rbs_vs", "rbs_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rbs_setup, rbs_check,
+     "exact; a phi and a select of pointers into a bounds-checked buffer, the bound past its end reading 0" },
+   { "r_oob2", "r_oob2", "ro2_vs", "ro2_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob2_setup, rob2_check,
+     "exact; a vertex function's buffer past its end, 8- and 16-bit elements at a buffer's tail (the 4-byte rounding "
+     "not compared), offsets past 4 GiB" },
    { "r_fetch", "r_fetch", "rff_vs", "rff_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, setup_quad, rff_check,
      "1e-6; [[color(0)]] read, two instances (the second reads the first's); NVMTL_NO_FBFETCH=1: zeros read" },
    { "r_fetch_mrt", "r_fetch", "rff_vs", "rfm_fs", { MTLPixelFormatRGBA8Unorm, MTLPixelFormatR32Float, MTLPixelFormatR32Uint }, NOC,

@@ -24,6 +24,15 @@
  * (nvmtl_reflect, or nvmtl_reflect_fc with the values), one line each:
  * "RFL<TAB>status<TAB>file<TAB>function<TAB>stage<TAB>message<TAB>frontend JSON or -<TAB>translator JSON or ERR:why",
  * status the frontend's (0 translated). sweep.py --reflect compares the two.
+ *
+ * Round 9: a function the frontend refuses for want of the buffers the translator keeps as storage-buffer descriptors
+ * (result.descriptor_wanted) is asked again as the plugin asks it (NVMTLAirNir.m nvmtl_air_nir_shader): the translator's
+ * module (nvmtl_translate or nvmtl_translate_fc, the plugin's capabilities), lowered by nvmtl_lower_buffer_addresses, and
+ * its set-0 storage buffers below 32 (nvmtl_air_nir_kept_buffers) handed over with NVMTL_AIR_NIR_DESCRIPTORS; a line
+ * "DSC<TAB>file<TAB>function<TAB>stage<TAB>wanted<TAB>kept or ERR<TAB>status" comes before its RFL line, which is then
+ * the second answer's. AIRSWEEP_KEPT_ALL=1 does the same for every vertex and fragment function the frontend
+ * translates without asking, so a function the translator keeps a buffer of that the frontend did not ask about shows
+ * (DSC with wanted 0 and kept not 0).
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
@@ -37,6 +46,7 @@
 #include <string.h>
 
 #include "nvmtl_air_nir_abi.h"
+#include "nvmtl_air_nir.h"   /* plugin/: nvmtl_air_nir_kept_buffers */
 
 #define STYPE_NIR ((VkStructureType)1000290001)
 typedef struct {
@@ -147,9 +157,39 @@ typedef int (*refl_fn)(const char *, const char *, uint8_t **, size_t *, char *,
 typedef int (*refl_fc_fn)(const char *, const char *, const uint32_t *, const uint32_t *, const uint8_t *const *, size_t,
                           uint8_t **, size_t *, char *, size_t);
 typedef void (*xfree_fn)(uint8_t *, size_t);
-static refl_fn xrefl;
-static refl_fc_fn xrefl_fc;
+typedef int (*lower_fn)(const uint8_t *, size_t, uint8_t **, size_t *, char *, size_t);
+static refl_fn xrefl, xtrans;
+static refl_fc_fn xrefl_fc, xtrans_fc;
+static lower_fn xlower;
 static xfree_fn xfree;
+
+/* the buffers the translator's module of the function keeps as storage-buffer descriptors once lowered, as the plugin
+ * finds them (nvmtl_vk_descriptor_buffers): 0, or -1 and why */
+static int
+kept_buffers(const char *text, const char *stage, const uint32_t *fi, const uint32_t *fs, const uint8_t *const *fp, size_t nfc,
+             uint32_t *mask, char *e, size_t en)
+{
+   uint8_t *spv = NULL, *low = NULL;
+   size_t n = 0, ln = 0;
+   *mask = 0;
+   if (!xtrans || !xtrans_fc || !xlower) {
+      snprintf(e, en, "the translator has no nvmtl_translate or nvmtl_lower_buffer_addresses");
+      return -1;
+   }
+   if (nfc ? xtrans_fc(text, stage, fi, fs, fp, nfc, &spv, &n, e, en) : xtrans(text, stage, &spv, &n, e, en))
+      return -1;
+   int rc = xlower(spv, n, &low, &ln, e, en) ? -1 : 0;
+   if (!rc && nvmtl_air_nir_kept_buffers((const uint32_t *)low, ln / 4, mask)) {
+      snprintf(e, en, "the lowered module has a buffer of another form");
+      rc = -1;
+   }
+   if (xfree) {
+      xfree(spv, n);
+      if (low)
+         xfree(low, ln);
+   }
+   return rc;
+}
 
 int
 main(int argc, char **argv)
@@ -160,6 +200,12 @@ main(int argc, char **argv)
       xrefl = x ? (refl_fn)dlsym(x, "nvmtl_reflect") : NULL;
       xrefl_fc = x ? (refl_fc_fn)dlsym(x, "nvmtl_reflect_fc") : NULL;
       xfree = x ? (xfree_fn)dlsym(x, "nvmtl_translate_free") : NULL;
+      xtrans = x ? (refl_fn)dlsym(x, "nvmtl_translate") : NULL;
+      xtrans_fc = x ? (refl_fc_fn)dlsym(x, "nvmtl_translate_fc") : NULL;
+      xlower = x ? (lower_fn)dlsym(x, "nvmtl_lower_buffer_addresses") : NULL;
+      void (*caps)(uint32_t) = x ? (void (*)(uint32_t))dlsym(x, "nvmtl_translate_set_caps") : NULL;
+      if (caps)
+         caps(3u | 4u | 8u);   /* as the plugin sets them (NVMTLLibraryLoad.m), typed dummies on */
       if (!xrefl || !xrefl_fc) {
          fprintf(stderr, "airsweep: %s has no nvmtl_reflect\n", argv[4]);
          return 2;
@@ -361,6 +407,32 @@ main(int argc, char **argv)
                int st = to_nir(dev, &req, &res);
                if (res.nir)
                   free_nir(res.nir);
+               const bool render = l > 0;
+               if ((st && res.descriptor_wanted) || (!st && render && getenv("AIRSWEEP_KEPT_ALL"))) {
+                  const uint32_t wanted = st ? res.descriptor_wanted : 0;
+                  uint32_t kept = 0;
+                  char ke[512] = { 0 };
+                  const int k = kept_buffers(data, lists[l][1], fc_idx, fc_sz, (const uint8_t *const *)fc_pay, fcs ? nfc : 0,
+                                             &kept, ke, sizeof ke);
+                  clean(name);
+                  clean(ke);
+                  printf("DSC\t%s\t%s\t%s\t%#x\t", path, name, lists[l][1], wanted);
+                  if (k)
+                     printf("ERR:%s\t%d\n", ke, st);
+                  else if (!st)
+                     printf("%#x\t%d\n", kept, st);
+                  else {
+                     free(res.reflection);
+                     req.flags |= NVMTL_AIR_NIR_DESCRIPTORS;
+                     req.descriptor_buffers = kept;
+                     memset(&res, 0, sizeof res);
+                     res.size = sizeof res;
+                     st = to_nir(dev, &req, &res);
+                     if (res.nir)
+                        free_nir(res.nir);
+                     printf("%#x\t%d\n", kept, st);
+                  }
+               }
                uint8_t *j = NULL;
                size_t jn = 0;
                char e[512] = { 0 };

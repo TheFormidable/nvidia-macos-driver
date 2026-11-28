@@ -5767,6 +5767,18 @@ static NSData *nvmtl_address_shader(const void *data, size_t len) {
     }
     return d;
 }
+// The buffers the SPIR-V road's pipeline of this module reads through storage-buffer descriptors: the module lowered as
+// that pipeline lowers it (nvmtl_address_shader for a render stage, nvmtl_address_shader_g for a kernel), its set-0
+// StorageBuffer bindings below 32 (nvmtl_air_nir_kept_buffers). The AIR-to-NIR road reads exactly these through their
+// descriptors (NVMTL_AIR_NIR_DESCRIPTORS). -1: that pipeline would not be made, or a buffer has another form.
+int nvmtl_vk_descriptor_buffers(const void *spv, size_t n, int render, uint32_t *mask)
+{
+    *mask = 0;
+    if (!spv || n < 20) return -1;
+    NSData *d = render ? nvmtl_address_shader(spv, n) : nvmtl_address_shader_g(spv, n, 0, NULL);
+    if (!d) return -1;
+    return nvmtl_air_nir_kept_buffers((const uint32_t *)d.bytes, d.length / 4, mask);
+}
 int nvmtl_vk_pipeline_create_ex2(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, nvk_pipeline *out)
 {
     return nvmtl_vk_pipeline_create_blend(vs, vn, fs, fn, vkfmt, depthfmt, NULL, out);

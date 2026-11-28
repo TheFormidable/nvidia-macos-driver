@@ -46,6 +46,13 @@ xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/r_nospace.ll" "$HERE/metal-re
   xcrun -sdk macosx metal -c -o "$OUT/air/r_nospace.air" "$OUT/air/r_nospace.ll" &&
   xcrun -sdk macosx metallib -o "$OUT/air/r_nospace.metallib" "$OUT/air/r_nospace.air" ||
   { echo "plugin-run.sh: r_nospace not made" >&2; exit 2; }
+# r_oob_nospace: r_oob so made (the bounds-checked descriptor with the address space taken from the pointer type)
+xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/r_oob_nospace.ll" "$HERE/metal-render/r_oob.metal" &&
+  sed -E -i '' '/air\.buffer/s/!"air\.address_space", i32 [0-9]+, //' "$OUT/air/r_oob_nospace.ll" &&
+  ! grep -q 'air\.address_space' "$OUT/air/r_oob_nospace.ll" &&
+  xcrun -sdk macosx metal -c -o "$OUT/air/r_oob_nospace.air" "$OUT/air/r_oob_nospace.ll" &&
+  xcrun -sdk macosx metallib -o "$OUT/air/r_oob_nospace.metallib" "$OUT/air/r_oob_nospace.air" ||
+  { echo "plugin-run.sh: r_oob_nospace not made" >&2; exit 2; }
 # PLUGIN_RUN_EXTRA_AIR: a folder of more .metallib files for the tests that name them (r_qcblit: qc_blit.metallib, made
 # from QuartzCore's own functions, which are not in this tree)
 if [ -n "${PLUGIN_RUN_EXTRA_AIR:-}" ]; then cp "$PLUGIN_RUN_EXTRA_AIR"/*.metallib "$OUT/air/" || exit 2; fi

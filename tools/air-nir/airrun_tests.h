@@ -18,6 +18,8 @@
 #define MUST_REFUSE   (1u << 2)   /* passes only if the frontend refuses the kernel (nothing is dispatched) */
 #define PLUGIN_ONLY   (1u << 3)   /* the dispatch binds what only the plugin hands the frontend (a pixel-coordinate
                                    * sampler's state): plugin_run.m runs it, airrun.c does not */
+#define ROBUST_ONLY   (1u << 4)   /* reads past a buffer's end: run only with compute pipelines bounds-checked
+                                   * (NVMTL_COMPUTE_ROBUST=1), skipped otherwise (the read would fault) */
 
 /* function-constant values a test's request carries (NVMTL_AIR_NIR_FC_VALUES) */
 struct fcval {
@@ -1875,6 +1877,47 @@ tex_sample_check(struct run *r)
    return true;
 }
 
+/* oob_kernel (metal/oob_kernel.metal, ROBUST_ONLY): a constant palette of 16 read at indices the data gives, some past
+ * its end, some with byte offsets past 4 GiB (32-bit, they wrap), and a buffer of 5 ushorts read at indices up to 255
+ * (the 4-byte rounding of its 10 bytes not compared) */
+#define OOBK_PAL 16u
+#define OOBK_H 5u
+static void
+oob_kernel_setup(struct run *r)
+{
+   float *pal = slot(r, 0, OOBK_PAL * 16);
+   for (unsigned i = 0; i < OOBK_PAL * 4; i++)
+      pal[i] = (float)(i + 1) * 0.25f;
+   uint32_t *idx = slot(r, 1, 256 * 4);
+   for (unsigned i = 0; i < 256; i++)
+      idx[i] = (i % 5) == 1 ? OOBK_PAL + i * 3 : (i % 7) == 2 ? 0x10000000u * (1 + i % 15) + i % (OOBK_PAL + 3) : i % OOBK_PAL;
+   slot(r, 2, 256 * 16);
+   uint16_t *h = slot(r, 3, OOBK_H * 2);
+   for (unsigned i = 0; i < OOBK_H; i++)
+      h[i] = (uint16_t)(100 + 7 * i);
+}
+
+static bool
+oob_kernel_check(struct run *r)
+{
+   const float *pal = S(r, 0), *out = S(r, 2);
+   const uint32_t *idx = S(r, 1);
+   const uint16_t *h = S(r, 3);
+   for (unsigned i = 0; i < 256; i++) {
+      const uint32_t at = idx[i] * 16u, e = at / 16u, k = idx[i] & 0xff;
+      float want[4];
+      for (unsigned c = 0; c < 4; c++)
+         want[c] = e < OOBK_PAL ? pal[e * 4 + c] : 0.0f;
+      if (k < OOBK_H)
+         want[0] += (float)h[k];
+      else if (k * 2 < ((OOBK_H * 2 + 3) & ~3u))
+         want[0] = out[i * 4];   /* within the rounding: read as the memory there is */
+      if (!check_f4(r, "out", out + i * 4, want, 4, 0))
+         return false;
+   }
+   return true;
+}
+
 /* ab_kernel: argument buffers the CPU writes as Metal lays them out (metal/ab_kernel.metal): a texture field holds the
  * texture's gpuResourceID, a sampler field the sampler's, a pointer field the buffer's GPU address. Textures 0 to 4 and
  * 6 to 9 rgba8, 5 rgba16f (written); sampler 0 linear clamp, 1 nearest repeat, 2 nearest clamp; slot 0 the argument
@@ -2733,4 +2776,6 @@ static const struct test tests[] = {
    { "tex_arrays", NULL, "tex_arrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_arrays_setup, tex_arrays_check },
    { "ab_kernel", NULL, "ab_kernel", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_kernel_setup, ab_kernel_check },
    { "ab_encoder", NULL, "ab_encoder", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_encoder_setup, ab_encoder_check },
+   { "oob_kernel", NULL, "oob_kernel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | ROBUST_ONLY, NULL, oob_kernel_setup,
+     oob_kernel_check },
 };
