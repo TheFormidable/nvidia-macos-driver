@@ -112,8 +112,9 @@ static inline int nvmtl_air_nir_kept_buffers(const uint32_t *w, size_t nw, uint3
 }
 
 /* How the module reads and writes each buffer nvmtl_air_nir_kept_buffers names (round 10, request descriptor_elem_bits and
- * descriptor_store_guarded): bits[n], the width every scalar of its runtime array's element has (0: widths mixed, or no
- * runtime array), and bit n of *guarded when a store through it sits under the branch of a 64-bit unsigned compare (the
+ * descriptor_store_guarded): bits[n], the width every scalar of its runtime array's element has (NVMTL_AIR_NIR_ELEM_MIXED:
+ * integer and float scalars of more than one width, round 11; 0: a member of another type, or no runtime array), and bit n
+ * of *guarded when a store through it sits under the branch of a 64-bit unsigned compare (the
  * translator's raw store, emit_raw_store: byte offset <= UINT32_MAX - (size - 1)). 0, or -1 for a module this does not
  * read. */
 static inline unsigned nvmtl_air_nir_leaf_bits(const uint32_t *op, const uint32_t *a0, const uint32_t *a1,
@@ -123,14 +124,17 @@ static inline unsigned nvmtl_air_nir_leaf_bits(const uint32_t *op, const uint32_
     switch (op[ty]) {
     case 21: case 22: return a0[ty];                                            /* OpTypeInt, OpTypeFloat: width */
     case 23: case 28: return nvmtl_air_nir_leaf_bits(op, a0, a1, nm, mem, bound, a0[ty], depth + 1);   /* vector, array */
-    case 30: {                                                                   /* OpTypeStruct: every member alike */
-        unsigned w = 0;
+    case 30: {                                                                   /* OpTypeStruct */
+        /* every member alike: their width; integer and float scalars of more than one width (round 11): mixed, which
+         * the translator's module types member by member (NVMTL_AIR_NIR_ELEM_MIXED); a member of any other type: 0 */
+        unsigned w = 0; int mixed = 0;
         for (uint32_t k = 0; k < nm[ty]; k++) {
             const unsigned m = nvmtl_air_nir_leaf_bits(op, a0, a1, nm, mem, bound, mem[a1[ty] + k], depth + 1);
-            if (!m || (w && m != w)) return 0;
-            w = m;
+            if (!m) return 0;
+            if (m == NVMTL_AIR_NIR_ELEM_MIXED || (w && m != w)) mixed = 1;
+            else w = m;
         }
-        return w;
+        return mixed ? NVMTL_AIR_NIR_ELEM_MIXED : w;
     }
     default: return 0;
     }

@@ -311,6 +311,12 @@ struct air_val {
    /* AIR_SSBO: the buffer's index + 1, and whether the translator declares it NonWritable (air.read) */
    uint8_t desc;
    bool desc_ro;
+   /* AIR_SSBO (round 11): the byte offset as the translator's raw form computes it, in 64 bits (each GEP index
+    * sign-extended, times its stride, plus the constant offset: native RawBufferOffset), and whether a term of it is an
+    * index wider than 32 bits (has_wide_term: such a store is guarded against offsets past 4 GiB). off64 NULL: a pointer
+    * whose offset this does not follow (a phi), which a guarded store through it refuses. */
+   nir_def *off64;
+   bool wide;
 };
 
 #define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
@@ -668,6 +674,9 @@ air_derive(struct air_val *r, const struct air_val *base, nir_def *off)
    r->nbase = base->nbase;
    r->desc = base->desc;
    r->desc_ro = base->desc_ro;
+   /* the raw form's 64-bit offset follows a cast (off NULL) as it is; a GEP or a constant step sets its own after */
+   r->off64 = off ? NULL : base->off64;
+   r->wide = base->wide;
    if (base->ab_param && (!off || nir_src_is_const(nir_src_for_ssa(off)))) {
       r->ab_param = base->ab_param;
       r->ab_off = base->ab_off + (off ? (uint32_t)nir_src_as_uint(nir_src_for_ssa(off)) : 0);
@@ -680,7 +689,10 @@ static struct air_val *
 air_ptr_at(struct air_tr *t, nir_builder *b, const struct air_val *ptr, uint64_t off, uint32_t align)
 {
    nir_def *d = off ? nir_iadd_imm(b, ptr->def, off) : ptr->def;
-   return air_derive(air_make(t, d, ptr->kind, align), ptr, off ? nir_imm_intN_t(b, off, ptr->def->bit_size) : NULL);
+   struct air_val *r = air_derive(air_make(t, d, ptr->kind, align), ptr, off ? nir_imm_intN_t(b, off, ptr->def->bit_size) : NULL);
+   if (ptr->kind == AIR_SSBO && ptr->off64)
+      r->off64 = off ? nir_iadd_imm(b, ptr->off64, (int64_t)off) : ptr->off64;
+   return r;
 }
 
 /* A NIR block of its own after the others (the CFG is unstructured until nir_lower_goto_ifs) */
@@ -1055,7 +1067,20 @@ air_gep(struct air_tr *t, nir_builder *b, LLVMValueRef gep, LLVMValueRef result_
    nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1,
                                  (unsigned)L.LLVMGetNumOperands(gep), bits, &align);
    nir_def *addr = off ? nir_iadd(b, base->def, off) : base->def;
-   return air_derive(air_set(t, result_key, addr, base->kind, align), base, off);
+   struct air_val *r = air_derive(air_set(t, result_key, addr, base->kind, align), base, off);
+   if (base->kind == AIR_SSBO && base->off64) {
+      /* the same offset in 64 bits, as the translator's raw form adds it up (each index sign-extended: SConvert) */
+      uint32_t a64 = base->align;
+      nir_def *o64 = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1, (unsigned)L.LLVMGetNumOperands(gep),
+                                    64, &a64);
+      r->off64 = o64 ? nir_iadd(b, base->off64, o64) : base->off64;
+      for (unsigned i = 1; i < (unsigned)L.LLVMGetNumOperands(gep); i++) {
+         LLVMValueRef index = L.LLVMGetOperand(gep, i);
+         if (!L.LLVMIsAConstantInt(index) && air_width_of(t, index) > 32)
+            r->wide = true;
+      }
+   }
+   return r;
 }
 
 static struct air_val *
@@ -1176,7 +1201,10 @@ static nir_def *
 air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
 {
    const unsigned eb = air_ssbo_elem_bits(t, ptr->desc - 1u);
-   if (bits > 32 && eb != 64 && eb != 32)
+   /* a 64-bit value: one value from an array of 64-bit elements, or of elements of mixed widths (round 11: a struct
+    * the translator types member by member, NVMTL_AIR_NIR_ELEM_MIXED, its 64-bit members read as such); two words
+    * from a word array */
+   if (bits > 32 && eb != 64 && eb != 32 && eb != NVMTL_AIR_NIR_ELEM_MIXED)
       unsupported(t, "a %u-bit load from buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer "
                   "descriptor: the translator reads a 64-bit value there as one value or as two 32-bit words, "
                   "depending on the module, and the two differ when the buffer ends between them", bits, ptr->desc - 1u);
@@ -1198,17 +1226,23 @@ air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsign
 }
 
 /* A store through a descriptor buffer (round 10), as the translator's module stores to it: of components of the width
- * of the buffer's elements (64 bits to a word array as two words, low first), each bounds-checked, at the offset it
- * computes (32 bits, as the typed access the translator makes there). A buffer whose stores the module guards against a
- * byte offset past 4 GiB (its raw form), and any other width, stay refused. */
+ * of the buffer's elements (64 bits to a word array as two words, low first; any width as itself to elements of mixed
+ * widths, which the translator types member by member), each bounds-checked, at the offset it computes (32 bits, as
+ * the typed access the translator makes there). Round 11: a buffer whose stores the module guards against a byte
+ * offset past 4 GiB (its raw form, emit_raw_store: a word or byte array) guards them the same way: a store whose offset
+ * has an index wider than 32 bits is made only when that offset, in 64 bits, is at most UINT32_MAX - (size - 1). */
 static void
 air_ssbo_store(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t align)
 {
    const unsigned n = ptr->desc - 1u, eb = air_ssbo_elem_bits(t, n), bits = value->bit_size;
-   if (!eb || (t->desc_guarded >> n & 1) || (bits != eb && !(bits == 64 && eb == 32)))
+   const bool mixed = eb == NVMTL_AIR_NIR_ELEM_MIXED, guarded = (t->desc_guarded >> n & 1) && !mixed;
+   if (!eb || (!mixed && bits != eb && !(bits == 64 && eb == 32)))
       unsupported(t, "a store to buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor and "
-                  "stores to %s", n, !eb ? "as elements of mixed widths" : (t->desc_guarded >> n & 1) ?
-                  "behind a guard against offsets past 4 GiB (the translator's raw form)" : "in elements of another width");
+                  "stores to %s", n, !eb ? "as elements it does not type (pointers, or of unknown widths)" :
+                  "in elements of another width");
+   if (guarded && ptr->wide && !ptr->off64)
+      unsupported(t, "a store to buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor and "
+                  "guards against offsets past 4 GiB (the translator's raw form), at an offset chosen by a phi", n);
    if (align < bits / 8)
       unsupported(t, "a %u-bit store to buffer %u (a bounds-checked storage-buffer descriptor on the SPIR-V road) "
                   "aligned to %u bytes", bits, n, align);
@@ -1216,6 +1250,15 @@ air_ssbo_store(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t a
       unsupported(t, "a store to buffer %u, which its metadata says is read only", n);
    align = air_ssbo_align(t, align, bits == 64 && eb == 32 ? 32 : bits);   /* as a load's (air_ssbo_load) */
    nir_builder *b = &t->b;
+   nir_block *join = NULL;
+   if (guarded && ptr->wide) {
+      /* the raw form's guard (emit_raw_u32_addressable): the whole store's bytes below 4 GiB */
+      const uint64_t size = (uint64_t)value->num_components * (bits / 8u);
+      nir_block *store = air_new_block(t);
+      join = air_new_block(t);
+      nir_goto_if(b, store, nir_ule_imm(b, ptr->off64, (uint64_t)UINT32_MAX - (size - 1)), join);
+      b->cursor = nir_after_block(store);
+   }
    if (bits == 64 && eb == 32) {
       nir_def *c[8];
       for (unsigned i = 0; i < value->num_components; i++) {
@@ -1225,10 +1268,14 @@ air_ssbo_store(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t a
       }
       nir_store_deref(b, air_ssbo_deref(t, ptr, ptr->def, 2 * value->num_components, 32, MIN2(align, 8u)),
                       nir_vec(b, c, 2 * value->num_components), BITFIELD_MASK(2 * value->num_components));
-      return;
+   } else {
+      nir_store_deref(b, air_ssbo_deref(t, ptr, ptr->def, value->num_components, bits, align), value,
+                      BITFIELD_MASK(value->num_components));
    }
-   nir_store_deref(b, air_ssbo_deref(t, ptr, ptr->def, value->num_components, bits, align), value,
-                   BITFIELD_MASK(value->num_components));
+   if (join) {
+      nir_goto(b, join);
+      b->cursor = nir_after_block(join);
+   }
 }
 
 static nir_def *
@@ -2840,6 +2887,7 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
              * as the module reads them, air_ssbo_load), its fields at known offsets where they are */
             struct air_val *v = air_set(t, a->param, nir_imm_int(&t->top, 0), AIR_SSBO,
                                         a->align ? MIN2((uint32_t)a->align, 16) : 4);
+            v->off64 = nir_imm_int64(&t->top, 0);
             v->ab_param = (uint16_t)(a->index + 1);
             v->desc = (uint8_t)(a->location + 1);
             v->desc_ro = a->space == 2 || (a->access && !strcmp(a->access, "air.read"));
@@ -5530,6 +5578,12 @@ air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
       struct air_val *r = air_make(t, nir_bcsel(&t->b, c, x->def, y->def), AIR_SSBO, MIN2(x->align, y->align));
       r->desc = x->desc;
       r->desc_ro = x->desc_ro;
+      /* the raw form stores through each arm under its own guard (emit_selected_raw_store): the same when both arms
+       * are guarded alike; arms of which one is guarded and one not are not followed (a guarded store refuses) */
+      if (x->off64 && y->off64 && x->wide == y->wide) {
+         r->off64 = nir_bcsel(&t->b, c, x->off64, y->off64);
+         r->wide = x->wide;
+      }
       return r;
    }
    if ((x->kind == AIR_TEXTURE || x->kind == AIR_SAMPLER) && x->res == y->res)

@@ -150,6 +150,9 @@
                                                  * gradients is not applied (the translator's without its bit 4). A
                                                  * gradient sample's clamp is always applied (MinLod). */
 
+/* request.descriptor_elem_bits[n]: elements of more than one scalar width, typed member by member (round 11) */
+#define NVMTL_AIR_NIR_ELEM_MIXED     1u
+
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
 #define NVMTL_AIR_NIR_STAGE_VERTEX   1u
@@ -246,10 +249,14 @@ struct nvmtl_air_nir_request {
    /* Since version 8, read with NVMTL_AIR_NIR_DESCRIPTORS and a size that reaches them: how the translator's module
     * reads and writes each of descriptor_buffers (nvmtl_air_nir_kept_forms): descriptor_elem_bits[n], the width of
     * every scalar of its runtime array's element (64: a ulong array, its 64-bit values one value each; 32: a word array,
-    * a 64-bit value two words, low first; 8 or 16 a byte or short array; 0 an element of mixed widths, a struct); bit n
-    * of descriptor_store_guarded, a store to it the module guards against a byte offset past 4 GiB (the translator's
-    * raw form). A 64-bit access is taken with a width of 64 or 32, a store of components of the element's width (or 64
-    * bits to a word array) when it is not guarded; anything else to such a buffer stays refused. */
+    * a 64-bit value two words, low first; 8 or 16 a byte or short array; NVMTL_AIR_NIR_ELEM_MIXED, since round 11, an
+    * element of integer and float scalars of more than one width, which the module types member by member: each value
+    * read and written as itself; 0 any other element, of pointers or of a type this does not read); bit n of
+    * descriptor_store_guarded, a store to it the module guards against a byte offset past 4 GiB (the translator's raw
+    * form, a word or byte array). A 64-bit access is taken with a width of 64, 32 or mixed; a store of components of the
+    * element's width (or 64 bits to a word array, any width to mixed elements), under the raw form's guard (round 11)
+    * when the module guards it and its offset has an index wider than 32 bits; anything else to such a buffer stays
+    * refused. An older frontend reads NVMTL_AIR_NIR_ELEM_MIXED as a width it does not take, and refuses as before. */
    uint8_t descriptor_elem_bits[32];
    uint32_t descriptor_store_guarded;
    uint32_t reserved8;

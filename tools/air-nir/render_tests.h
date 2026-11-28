@@ -1919,6 +1919,134 @@ rdrw_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_kept_mixed, r_kept_guarded (round 11): the translator's other two forms of a kept buffer ------------------- */
+
+#define RKM_PAL 3000u   /* structs of 24 bytes, the last 12 bytes short: element 2999's ulong straddles the end */
+#define RKM_OUT 2500u   /* the same: element 2499's ulong straddles the end */
+struct rkm { float f; uint32_t u; uint64_t l; float v[2]; };
+_Static_assert(sizeof(struct rkm) == 24, "the shader's struct M");
+static struct rkm rkm_pal(uint32_t i)
+{
+   return (struct rkm){ (float)(i * 3u + 1u), i * 7u + 5u, (uint64_t)(i * 11u + 3u) | (uint64_t)(i * 13u + 7u) << 40,
+                        { (float)(i * 5u + 2u), (float)(i * 5u + 3u) } };
+}
+
+static void
+rkm_setup(struct rrun *r)
+{
+   setup_quad(r);
+   uint32_t idx[RW * RH];
+   for (uint32_t p = 0; p < RW * RH; p++)
+      idx[p] = rk_idx(p);
+   r->fbuf[0] = rbuf(idx, sizeof idx);
+   r->fbuf[1] = rbuf(NULL, RKM_PAL * 24 - 12);
+   memset(r->fbuf[1].contents, 0x5a, RKM_PAL * 24 - 12);
+   struct rkm *pal = r->fbuf[1].contents;
+   for (uint32_t i = 0; i < RKM_PAL - 1; i++)
+      pal[i] = rkm_pal(i);
+   const struct rkm last = rkm_pal(RKM_PAL - 1);
+   memcpy(&pal[RKM_PAL - 1], &last, 12);   /* f, u and the ulong's low word: what lies before the end */
+   r->fbuf[2] = rbuf(NULL, RKM_OUT * 24 - 12);
+   memset(r->fbuf[2].contents, 0xab, RKM_OUT * 24 - 12);
+}
+
+/* each member read and written as itself: in range its value, past the end 0 and dropped; element 2999's ulong, whose
+ * low word lies before the end, is 0 (one 64-bit access, checked whole), as are its float2; element 2499's ulong store
+ * is dropped whole */
+static bool
+rkm_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const uint32_t k = rk_idx(py * RW + px);
+         struct rkm x = { 0 };
+         if (k < RKM_PAL - 1)
+            x = rkm_pal(k);
+         else if (k == RKM_PAL - 1) {
+            const struct rkm full = rkm_pal(k);
+            x.f = full.f;
+            x.u = full.u;
+         }
+         const float want[4] = { x.f, (float)x.u, (float)(uint32_t)(x.l & 0xffffffu), (float)(uint32_t)(x.l >> 40) + x.v[1] };
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (element %u)", k), false;
+      }
+   const uint8_t *o = r->fbuf[2].contents;
+   for (uint32_t k = 0; k < RKM_OUT; k++) {
+      const struct rkm x = rkm_pal(k);   /* every k below 4096 is some pixel's, and every one below 2500 is in the palette */
+      const float f = x.f * 2.0f;
+      if (memcmp(o + k * 24, &f, 4)) {
+         snprintf(r->why, sizeof r->why, "out element %u's float was not written as %.9g", k, f);
+         return false;
+      }
+      uint64_t want = x.l ^ 0x0123456789abcdefull, have;
+      if (k == RKM_OUT - 1)
+         memset(&want, 0xab, 4);   /* only its low word is in the buffer, and it stays: the store is dropped whole */
+      memcpy(&have, o + k * 24 + 8, k == RKM_OUT - 1 ? 4 : 8);
+      if (k == RKM_OUT - 1 ? memcmp(&have, &want, 4) : have != want) {
+         snprintf(r->why, sizeof r->why, "out element %u's ulong: %#llx, want %#llx%s", k, (unsigned long long)have,
+                  (unsigned long long)want, k == RKM_OUT - 1 ? " (its low word: the straddling store split)" : "");
+         return false;
+      }
+      for (unsigned b = 4; b < 8; b++)
+         if (o[k * 24 + b] != 0xab)
+            return snprintf(r->why, sizeof r->why, "out element %u's uint was written", k), false;
+   }
+   return true;
+}
+
+#define RKG_WORDS 3001u   /* the float buffer: 12004 bytes */
+/* the index each pixel reads: even ones up to 500 (in range; 500's float2 straddles the end), ones past the end, and
+ * odd ones past 4 GiB (0x40000000 + j: the raw form's guard drops their stores, where a 32-bit offset would wrap onto
+ * the odd floats and uints, and onto the float2s between the even ones') */
+static uint32_t rkg_idx(uint32_t p)
+{
+   return p % 4 == 0 ? 0x40000000u + 2u * (p % 250u) + 1u : p % 4 == 1 ? RKG_WORDS + p : 2u * (p % 251u);
+}
+
+static void
+rkg_setup(struct rrun *r)
+{
+   setup_quad(r);
+   uint32_t idx[RW * RH];
+   for (uint32_t p = 0; p < RW * RH; p++)
+      idx[p] = rkg_idx(p);
+   r->fbuf[0] = rbuf(idx, sizeof idx);
+   r->fbuf[1] = rbuf(NULL, RKG_WORDS * 4);
+   memset(r->fbuf[1].contents, 0xab, RKG_WORDS * 4);
+}
+
+/* for an even k up to 500: the float at word k, the uint 7 at word k + 600, the float2 at words 2k + 2000 and 2k + 2001
+ * (k = 500's second word past the end); nothing else (the half-words read, words 1200 to 1599, keep 0xabab) */
+static bool
+rkg_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const uint32_t k = rkg_idx(py * RW + px);
+         const float want[4] = { (float)(k & 255u), (float)(k >> 24), (float)0xababu, 1 };
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return false;
+      }
+   const uint32_t *o = r->fbuf[1].contents;
+   for (uint32_t w = 0; w < RKG_WORDS; w++) {
+      uint32_t want = 0xababababu;
+      float f = 0;
+      if (w <= 500 && w % 2 == 0)
+         f = 1.5f, memcpy(&want, &f, 4);
+      else if (w >= 600 && w <= 1100 && w % 2 == 0)
+         want = 7;
+      else if (w >= 2000 && (w - 2000) % 4 < 2 && (w - 2000) / 2 <= 500)
+         f = (w - 2000) % 4 == 0 ? 2.5f : 3.5f, memcpy(&want, &f, 4);
+      if (o[w] != want) {
+         snprintf(r->why, sizeof r->why, "word %u: %#x, want %#x%s", w, o[w], want,
+                  want == 0xababababu ? " (a store past 4 GiB wrapped, or one past the end landed)" : "");
+         return false;
+      }
+   }
+   return true;
+}
+
 /* ---- r_minlod (round 10): minimum-LOD clamps ---------------------------------------------------------------------- */
 
 static float rml_level(unsigned m) { return 0.125f * (float)(m + 1); }   /* every texel of level m of the 64x64 texture */
@@ -2106,6 +2234,12 @@ static const struct rtest rtests[] = {
    { "r_oob_misaligned", "r_dummy", "rd_vs", "rd_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, romis_setup,
      romis_check, "exact; r_oob's palette bound at offset 4, read there as Metal reads it (each component bounds-checked), after a "
      "kernel wrote through unbound bindings", false, false, NULL, NULL, NULL, true },
+   { "r_kept_mixed", "r_kept2", "rk2_vs", "rkm_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rkm_setup,
+     rkm_check, "exact; a kept array of structs of mixed scalar widths, typed member by member: its ulong read and written "
+     "whole (0 and dropped when it straddles the end)", false, false, NULL, NULL, NULL, true },
+   { "r_kept_guarded", "r_kept2", "rk2_vs", "rkg_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rkg_setup,
+     rkg_check, "exact; a kept word array (the raw form) stored to as floats, uints and float2s: stores past 4 GiB dropped "
+     "by its guard, past the end by the bounds check, a straddling float2 split", false, false, NULL, NULL, NULL, true },
    { "r_dummy_rw", "r_dummy", "rd_vs", "rdr_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rdrw_setup,
      rdrw_check, "exact; an unbound kept buffer and an unbound texture_buffer read 0 after a kernel wrote through unbound ones",
      false, false, NULL, NULL, NULL, true },
