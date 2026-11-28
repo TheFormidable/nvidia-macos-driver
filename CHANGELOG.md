@@ -1,8 +1,14 @@
 # Changelog
 
-## Not in a package yet
+## 3.0.29
 
-### AIR to NIR, after 3.0.28: null textures, tile functions, depth gathers and multisampled reads, written cubes
+**AIR to NIR, round 11 continued** (not released; packaged and signed for the owner's RTX 5050). On top of 3.0.28, which
+was never installed: one package with all of round 11. Tile functions run, on both roads, and their kernel takes the
+road; a fragment that reads `[[sample_id]]` is shaded per sample on the road; null textures and more of the AIR
+cache's calls take the road as the translator makes them. NVK's AIR-to-NIR ABI is version 9: the plugin and NVK change
+together.
+
+### What changed
 
 - Null textures (`texture2d<float>()`, MPS's and RenderBox's `air.get_null_texture_*`) take the road (NVK's frontend,
   ABI version 9): the translator's placeholder image, at the texture binding it lands on (often an argument's own), and
@@ -23,7 +29,31 @@
 - Still refused, with the reason: explicit imageblocks (the translator's cell staging), sampled and `read_write` cube
   reads, written cube arrays, a null `texture_buffer`, run-time choices of handles.
 
-### AIR to NIR, round 11: kept buffers where Metal binds them, unbound bindings, texture_buffer arrays, the raw form
+### What ran where
+
+On the RTX 5050 (2026-11-28, macOS 26.7.3, the development plugin and this tree's NVK and translator, 3.0.27
+installed; the four fault counters 0 before and after every run): with the road on 133 tests pass twice and once
+from the first run's caches (123 on the road), on the SPIR-V road 132 pass twice; with corrupted outputs every test that
+dispatches or draws fails on both roads; compute with buffer robustness 79 on each road; the attachments are equal on
+both roads byte for byte (19 of 19, `r_tile`'s three); each new test fails with 3.0.27's plugin and NVK on the road
+(`r_tile` on both roads). Offline, the AIR cache: 5,910 of 10,814 functions translate with reflections equal to the
+translator's, 0 different; WindowServer's 179 of 211 as before. Details: `docs/AIR-TO-NIR.md`, round 11.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+| `NVMTL_TILE_SHADING` unset (the default) | environment | A tile pipeline is refused with its reason, as before 3.0.29 |
+
+## 3.0.28
+
+**AIR to NIR, round 11** (not released; packaged and signed for the owner's RTX 5050, not installed). On top of 3.0.27.
+Buffers the translator keeps bounds-checked are bound where Metal binds them, unbound bindings no longer share one
+dummy, and run-time arrays of `texture_buffer`s read their elements, on both roads; more of the translator's buffer
+forms take the road.
+
+### What changed
 
 - **Fixed on both roads: a buffer the translator keeps bounds-checked, bound at an offset below 16 bytes, read the
   plugin's shared dummy** instead of the buffer. NVK gives the plugin's instance 4-byte storage-buffer offsets
@@ -41,6 +71,25 @@
   null textures and imageblocks stay refused.
 - Tests (`tools/air-nir`): `r_oob_misaligned` (Metal's data now), `r_dummy_rw`, `r_kept_mixed`, `r_kept_guarded`
   (render), `tex_tbarray` (compute, on the road); `plugin_run` can dispatch a kernel before a draw.
+
+### What ran where
+
+On the RTX 5050 (2026-11-28, the development plugin and this tree's NVK and translator, 3.0.27 installed; the four
+fault counters 0 before and after every run): with the road on 122 tests pass twice and once warm (114 on the road), on
+the SPIR-V road 121 twice; with corrupted outputs every test that dispatches or draws fails; the new tests fail on both
+roads with 3.0.27's plugin, NVK and translator. The translator's tests: 2,599 pass, the same 26 fail as at 941c6185.
+Offline, the AIR cache 5,893 of 10,814 equal, 0 different; WindowServer 179 of 211.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+
+## 3.0.21 to 3.0.27
+
+AIR to NIR, phases 1 to 4 and rounds 6 to 10: packaged and signed for testing on the owner's RTX 5050, not released.
+3.0.28 and 3.0.29 carry all of it.
 
 ### AIR to NIR, round 10: tessellation, raster order groups, dual-source blending, minimum-LOD clamps, kept buffers
 

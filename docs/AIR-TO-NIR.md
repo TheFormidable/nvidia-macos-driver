@@ -1274,6 +1274,9 @@ level 0 on the SPIR-V road. The tessellation tests' attachments are equal byte f
 
 ## Kept buffers where Metal binds them, unbound bindings, texture_buffer arrays and the raw form (round 11)
 
+Packages: 3.0.28 holds the round up to 285dc748 (never installed); 3.0.29 holds all of it, the work marked "after
+3.0.28" below included.
+
 Part A of round 11 (3.0.27, the desktop since its boot, read only): clean. The installed files are the signed 941c6185
 package's; WindowServer on the road (62 of 64 render pipelines, its compute ones too), the crash marker cleared after 60
 s; no Xid, channel recovery, device loss or "AIR to NIR off in", no fallback list, the four counters 0, no crash or
