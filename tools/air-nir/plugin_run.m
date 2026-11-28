@@ -288,6 +288,72 @@ tex_ms_clear(struct run *r, unsigned i, uint32_t w, uint32_t h, unsigned samples
    [cb waitUntilCompleted];
 }
 
+/* a Depth32Float multisampled texture of w x h (layers > 1: a multisampled array), each sample of layer l drawn to
+ * base[l] + (sample + 1) / 16 by tdm_vs/tdm_fs of AIRDIR/<lib>.metallib, one pass per layer (tex_depth_ms) */
+static const char *air_dir;
+static void
+tex_ms_depth(struct run *r, unsigned i, const char *lib_name, uint32_t w, uint32_t h, unsigned samples, unsigned layers,
+             const float *base)
+{
+   struct timg *t = &r->tex[i];
+   memset(t, 0, sizeof *t);
+   t->fmt = VK_FORMAT_D32_SFLOAT;
+   t->vtype = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+   t->w = w; t->h = h; t->d = t->mips = 1; t->layers = layers; t->texel = 4;
+   t->depth = t->rendered = true;
+   MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+   td.textureType = layers > 1 ? MTLTextureType2DMultisampleArray : MTLTextureType2DMultisample;
+   td.pixelFormat = MTLPixelFormatDepth32Float;
+   td.width = w;
+   td.height = h;
+   td.arrayLength = layers;
+   td.sampleCount = samples;
+   td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+   td.storageMode = MTLStorageModePrivate;
+   t->tex = [dev newTextureWithDescriptor:td];
+   [td release];
+   char path[2048];
+   snprintf(path, sizeof path, "%s/%s.metallib", air_dir, lib_name);
+   NSError *e = nil;
+   id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
+   id<MTLFunction> vf = [lib newFunctionWithName:@"tdm_vs"], ff = [lib newFunctionWithName:@"tdm_fs"];
+   MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+   pd.vertexFunction = vf;
+   pd.fragmentFunction = ff;
+   pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+   pd.rasterSampleCount = samples;
+   id<MTLRenderPipelineState> ps = vf && ff ? [dev newRenderPipelineStateWithDescriptor:pd error:&e] : nil;
+   MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+   dd.depthCompareFunction = MTLCompareFunctionAlways;
+   dd.depthWriteEnabled = YES;
+   id<MTLDepthStencilState> ds = [dev newDepthStencilStateWithDescriptor:dd];
+   if (!t->tex || !ps || !ds) {
+      fprintf(stderr, "plugin_run: no %u-sample depth texture of %u layer(s) drawn here: %s\n", samples, layers,
+              e.localizedDescription.UTF8String ?: "no texture or depth state");
+      exit(2);
+   }
+   id<MTLCommandBuffer> cb = [queue commandBuffer];
+   for (unsigned l = 0; l < layers; l++) {
+      MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.depthAttachment.texture = t->tex;
+      rp.depthAttachment.slice = l;
+      rp.depthAttachment.loadAction = MTLLoadActionClear;
+      rp.depthAttachment.storeAction = MTLStoreActionStore;
+      rp.depthAttachment.clearDepth = 1.0;
+      rp.renderTargetWidth = w;
+      rp.renderTargetHeight = h;
+      id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+      [re setRenderPipelineState:ps];
+      [re setDepthStencilState:ds];
+      [re setFragmentBytes:&base[l] length:sizeof base[l] atIndex:0];
+      [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+      [re endEncoding];
+   }
+   [cb commit];
+   [cb waitUntilCompleted];
+   [ps release]; [ds release]; [dd release]; [pd release]; [vf release]; [ff release]; [lib release];
+}
+
 /* ---- argument buffers (PLUGIN_ONLY tests): what Metal writes into one, by hand or through an MTLArgumentEncoder --- */
 
 static id<MTLFunction> cur_fn;   /* the test's function: its argument encoders */

@@ -1586,6 +1586,12 @@ air_builtin(struct air_tr *t, const char *kind)
       return nir_imm_int(b, 4);
    if (!strcmp(kind, "air.simdgroups_per_threadgroup"))
       return nir_load_num_subgroups(b);
+   /* (threads per threadgroup + 3) / 4, as the translator counts the groups (collapse.rs LoadKernelGroupsPerThreadgroup) */
+   if (!strcmp(kind, "air.quadgroups_per_threadgroup")) {
+      nir_def *w = nir_load_workgroup_size(b);
+      nir_def *n = nir_imul(b, nir_imul(b, nir_channel(b, w, 0), nir_channel(b, w, 1)), nir_channel(b, w, 2));
+      return nir_ushr_imm(b, nir_iadd_imm(b, n, 3), 2);
+   }
    return NULL;
 }
 
@@ -2242,8 +2248,10 @@ air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
                                    a->no_perspective ? INTERP_MODE_NOPERSPECTIVE : INTERP_MODE_SMOOTH;
          var->data.centroid = a->centroid;
          var->data.sample = a->at_sample;
-         if (a->at_sample)
+         if (a->at_sample) {
             t->fragment_flags |= NVMTL_AIR_NIR_FS_PER_SAMPLE;
+            t->nir->info.fs.uses_sample_shading = true;   /* as spirv_to_nir marks a Sample input: shaded per sample */
+         }
       }
       air_set(t, a->param, air_io_narrow(b, nir_load_var(b, var), &ty), AIR_VALUE, 0);
       return true;
@@ -2332,8 +2340,12 @@ air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
                                    builtins[j].is_float ? glsl_vec_type(builtins[j].components) :
                                    builtins[j].sv == SYSTEM_VALUE_SAMPLE_MASK_IN ? glsl_int_type() : glsl_uint_type();
       nir_def *v = air_sysval(t, builtins[j].sv, gt);
-      if (builtins[j].sv == SYSTEM_VALUE_SAMPLE_ID)
+      if (builtins[j].sv == SYSTEM_VALUE_SAMPLE_ID) {
+         /* spirv_to_nir marks a module with a SampleId in its interface as shaded per sample (NVK then runs it once
+          * per sample, minSampleShading 1); the road's NIR did not, and [[sample_id]] read 0 in one invocation per pixel */
          t->fragment_flags |= NVMTL_AIR_NIR_FS_PER_SAMPLE;
+         t->nir->info.fs.uses_sample_shading = true;
+      }
       if (ty.components < v->num_components)
          v = nir_trim_vector(b, v, ty.components);
       air_set(t, a->param, air_io_narrow(b, v, &ty), AIR_VALUE, 0);
@@ -3475,6 +3487,23 @@ air_integer_function(struct air_tr *t, const char *fn, bool is_signed, nir_def *
       NEED(3);
       return nir_iadd(b, is_signed ? nir_imul_high(b, s[0], s[1]) : nir_umul_high(b, s[0], s[1]), s[2]);
    }
+   /* a * b + c clamped to the type, as the translator's wide multiply lowers it (integer_simd.rs lower_wide_multiply):
+    * the three widened to 64 bits (sign- or zero-extended), the product plus c clamped to [INT_MIN, INT_MAX] or
+    * [0, UINT_MAX] there, then narrowed; a scalar 32-bit integer only, as there (a vector or another width the
+    * translator refuses, and the SPIR-V road makes no function of it) */
+   if (IS("mad_sat")) {
+      NEED(3);
+      if (x->bit_size != 32 || x->num_components != 1)
+         unsupported(t, "air.mad_sat of %u x %u-bit integers (the translator's wide multiply takes a scalar 32-bit one)",
+                     x->num_components, x->bit_size);
+      nir_def *w[3];
+      for (unsigned k = 0; k < 3; k++)
+         w[k] = is_signed ? nir_i2i64(b, s[k]) : nir_u2u64(b, s[k]);
+      nir_def *sum = nir_iadd(b, nir_imul(b, w[0], w[1]), w[2]);
+      nir_def *c = is_signed ? nir_imin(b, nir_imax(b, sum, nir_imm_int64(b, INT32_MIN)), nir_imm_int64(b, INT32_MAX))
+                             : nir_umin(b, nir_umax(b, sum, nir_imm_int64(b, 0)), nir_imm_int64(b, UINT32_MAX));
+      return nir_u2u32(b, c);
+   }
    return NULL;
 #undef NEED
 #undef IS
@@ -3974,8 +4003,9 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
    x->storage = !strcmp(access, "air.write") || !strcmp(access, "air.read_write");
    if (!strcmp(access, "air.write"))
       x->access = ACCESS_NON_READABLE;
-   /* a multisampled texture is read by sample (txf_ms) and queried; a depth one, or one written, stays refused */
-   if (x->dim == GLSL_SAMPLER_DIM_MS && (x->depth || x->storage))
+   /* a multisampled texture, a depth one too (round 11), is read by sample (txf_ms) and queried; one written stays
+    * refused */
+   if (x->dim == GLSL_SAMPLER_DIM_MS && x->storage)
       unsupported(t, "the multisampled texture %s", a->type_name);
    if (x->storage && (x->dim == GLSL_SAMPLER_DIM_CUBE || x->depth))
       unsupported(t, "a written %s (the translator writes it through a 2D-array view)", a->type_name);
@@ -5116,6 +5146,10 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
    bool read = air_starts(name, "air.read_texture_") || read_depth, write = air_starts(name, "air.write_texture_");
    bool sample = air_starts(name, "air.sample_texture_"), depth_sample = air_starts(name, "air.sample_depth_");
    bool compare = air_starts(name, "air.sample_compare_depth_"), gather = air_starts(name, "air.gather_texture_");
+   /* air.gather_depth_2d[_array](texture, sampler, i32, coord, [layer,] bool, offset, i32): a depth texture's four
+    * depths, as the translator gathers them (gather.rs lower_gather_depth: component 0, through lower_gather_2d) */
+   const bool gather_depth = air_starts(name, "air.gather_depth_");
+   gather = gather || gather_depth;
    bool fence = air_starts(name, "air.fence_texture_");
    const char *query = NULL;
    static const char *const queries[] = { "air.get_width_", "air.get_height_", "air.get_depth_",
@@ -5124,6 +5158,10 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (air_starts(name, queries[i]) && (strstr(name, "_texture_") || strstr(name, "_depth_")))
          query = queries[i];
    }
+   /* the translator has no array-size query of a depth texture (air_intrinsics.rs: get_array_size_texture only), and
+    * makes no function of one */
+   if (air_starts(name, "air.get_array_size_depth_"))
+      unsupported(t, "the texture call %s (the translator has no array-size query of a depth texture)", name);
    if (air_starts(name, "air.get_null_texture")) {
       *out = air_make(t, NULL, AIR_TEXTURE, 1);
       (*out)->res = air_null_texture(t, name);
@@ -5143,8 +5181,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       }
    }
    if (!read && !write && !sample && !depth_sample && !compare && !gather && !fence && !query) {
-      if (air_starts(name, "air.gather_depth_") ||
-          air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
+      if (air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
           air_starts(name, "air.get_num_samples_") || air_starts(name, "air.is_null_texture") ||
           air_starts(name, "air.get_null_texture") || strstr(name, "_texture_") || strstr(name, "texture_buffer"))
          unsupported(t, "the texture call %s", name);
@@ -5240,10 +5277,12 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       /* the translator's read_operands: (texture, [read sampler,] coord, [layer,] [offset,] lod, access) */
       LLVMValueRef coord, layer = NULL, lodv = NULL;
       if (read_depth) {
-         /* (texture, read sampler, i32, coord, [layer,] offset, lod, access) */
+         /* (texture, read sampler, i32, coord, [layer,] [offset,] lod or sample, access): the level or sample where
+          * the translator takes it (write_read.rs lower_read_depth), by the operand count: a multisampled read has
+          * no offset */
          coord = ARG(3);
          layer = x->array ? ARG(4) : NULL;
-         lodv = ARG(x->array ? 6 : 5);
+         lodv = x->array ? ARG(nargs >= 8 ? 6 : 5) : ARG(nargs >= 7 ? 5 : 4);
       } else if (air_is_int(ARG(1))) {
          coord = ARG(1);
          if (x->array) {
@@ -5301,9 +5340,9 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       unsupported(t, "a sample of a texture_buffer");
    struct air_sampler *s = air_sampler_of(t, ARG(1));
    unsigned at = 2;
-   if ((depth_sample || compare) && ARG(at) && air_is_int(ARG(at)) && !air_is_bool(ARG(at)) &&
+   if ((depth_sample || compare || gather_depth) && ARG(at) && air_is_int(ARG(at)) && !air_is_bool(ARG(at)) &&
        L.LLVMGetTypeKind(L.LLVMTypeOf(ARG(at))) == TY_INTEGER)
-      at++;   /* sample_depth's leading i32 */
+      at++;   /* sample_depth's and gather_depth's leading i32 */
    LLVMValueRef coordv = ARG(at);
    at++;
    if (!coordv || air_is_int(coordv))
@@ -5502,15 +5541,18 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       coord = x->array ? air_append(b, sp, nir_channel(b, coord, spatial)) : sp;
    }
    if (gather) {
-      if (x->depth || grad)
+      if (x->depth != gather_depth || grad)
          unsupported(t, "%s", name);
-      /* (texture, sampler, coord, [layer,] bool, offset, component, ...) */
-      LLVMValueRef comp = ARG(x->array ? 6 : 5);
-      if (!comp || !L.LLVMIsAConstantInt(comp) || L.LLVMConstIntGetZExtValue(comp) > 3)
+      if (gather_depth && x->dim != GLSL_SAMPLER_DIM_2D)
+         unsupported(t, "%s (the translator gathers 2D depth textures only)", name);
+      /* (texture, sampler, coord, [layer,] bool, offset, component, ...); a depth gather's component is 0 */
+      LLVMValueRef comp = gather_depth ? NULL : ARG(x->array ? 6 : 5);
+      if (!gather_depth && (!comp || !L.LLVMIsAConstantInt(comp) || L.LLVMConstIntGetZExtValue(comp) > 3))
          unsupported(t, "a gather of a component not known here");
       struct air_tex_srcs in = { .texture = tex_deref, .sampler = air_sampler_deref(t, s, false),
                                  .coord = coord, .offset = offset, .sampler_heap = s->heap_slot != NULL };
-      *out = air_texel_result(t, call, air_build_tex(t, nir_texop_tg4, x, &in, (int)L.LLVMConstIntGetZExtValue(comp)));
+      *out = air_texel_result(t, call, air_build_tex(t, nir_texop_tg4, x, &in,
+                                                     gather_depth ? 0 : (int)L.LLVMConstIntGetZExtValue(comp)));
       return true;
    }
    if (s->is_static && comparator && ((s->words[0] >> 16) & 0xf) == 0)

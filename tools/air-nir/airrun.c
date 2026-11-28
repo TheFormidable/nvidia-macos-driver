@@ -425,6 +425,16 @@ tex_ms_clear(struct run *r, unsigned i, uint32_t w, uint32_t h, unsigned samples
    exit(2);
 }
 
+/* tex_depth_ms is PLUGIN_ONLY: its textures are drawn by Metal render passes (plugin_run.m) */
+static void
+tex_ms_depth(struct run *r, unsigned i, const char *lib_name, uint32_t w, uint32_t h, unsigned samples, unsigned layers,
+             const float *base)
+{
+   (void)r; (void)i; (void)lib_name; (void)w; (void)h; (void)samples; (void)layers; (void)base;
+   fprintf(stderr, "airrun: tex_ms_depth is plugin_run's\n");
+   exit(2);
+}
+
 #include "airrun_tests.h"
 
 /* ---------------------------------------------------------------------------------------------------------------- */

@@ -5,7 +5,8 @@
 using namespace metal;
 kernel void simd_fill(device const float4 *in [[buffer(0)]], device const ushort2 *dm [[buffer(1)]], device float4 *out [[buffer(2)]],
                       device uint4 *lanes [[buffer(3)]], uint i [[thread_position_in_grid]],
-                      ushort q [[thread_index_in_quadgroup]], ushort qg [[quadgroup_index_in_threadgroup]])
+                      ushort q [[thread_index_in_quadgroup]], ushort qg [[quadgroup_index_in_threadgroup]],
+                      ushort qn [[quadgroups_per_threadgroup]])
 {
    const float4 x = in[i];
    const float4 f = -x - 1000.0f;
@@ -18,5 +19,5 @@ kernel void simd_fill(device const float4 *in [[buffer(0)]], device const ushort
    }
    out[i * 18 + 18 * 64] = simd_shuffle_and_fill_down(x, f, ushort(i % 5));   /* the SIMD-group's width as the modulo */
    out[i * 18 + 18 * 64 + 1] = simd_shuffle_and_fill_up(x, f, ushort(i % 7));
-   lanes[i] = uint4(q, qg, 4u, 0u);
+   lanes[i] = uint4(q, qg, 4u, qn);
 }

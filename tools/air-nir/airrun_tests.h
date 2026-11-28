@@ -2296,6 +2296,60 @@ tex_depth_check(struct run *r)
    return true;
 }
 
+/* tex_gather_depth (round 11): air.gather_depth_2d and _2d_array, component 0 of the bilinear footprint's four texels
+ * (i0,j1), (i1,j1), (i1,j0), (i0,j0) from floor(coord * 8 - 0.5) + offset, clamped to the edge */
+static void
+tex_gdepth_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_D32_SFLOAT, 4, 8, 8, 1, 1, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_D32_SFLOAT, 4, 8, 8, 1, 3, 1, false);
+   float *d0 = r->tex[0].stage.map, *d1 = r->tex[1].stage.map;
+   for (unsigned k = 0; k < 64; k++)
+      d0[k] = rndf(0, 1);
+   for (unsigned k = 0; k < 64 * 3; k++)
+      d1[k] = rndf(0, 1);
+   samp_create(r, 0, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *uv = slot(r, 0, 256 * 8);
+   slot(r, 1, 256 * 4 * 16);
+   for (unsigned i = 0; i < 256; i++) {
+      uv[i * 2] = centre_coord(8, -2, 10);
+      uv[i * 2 + 1] = centre_coord(8, -2, 10);
+   }
+}
+
+static void
+gdepth_want(struct run *r, unsigned tex, unsigned layer, float u, float v, int ox, int oy, float w[4])
+{
+   const int i0 = (int)floorf(u * 8 - 0.5f) + ox, j0 = (int)floorf(v * 8 - 0.5f) + oy;
+   const VkSamplerAddressMode cl = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+   const int x0 = wrap(i0, 8, cl), x1 = wrap(i0 + 1, 8, cl), y0 = wrap(j0, 8, cl), y1 = wrap(j0 + 1, 8, cl);
+   const int xs[4] = { x0, x1, x1, x0 }, ys[4] = { y1, y1, y0, y0 };
+   for (unsigned c = 0; c < 4; c++)
+      w[c] = *(const float *)tex_at(r, tex, 0, (uint32_t)xs[c], (uint32_t)ys[c], layer);
+}
+
+static bool
+tex_gdepth_check(struct run *r)
+{
+   const float *uv = S(r, 0), *got = S(r, 1);
+   static const char *what[4] = { "depth2d gather", "depth2d gather offset (1,-1)", "depth2d_array gather layer i % 3",
+                                  "depth2d_array gather layer 2 offset (-2,1)" };
+   for (unsigned i = 0; i < 256; i++) {
+      const float u = uv[i * 2], v = uv[i * 2 + 1];
+      float w[4][4];
+      gdepth_want(r, 0, 0, u, v, 0, 0, w[0]);
+      gdepth_want(r, 0, 0, u, v, 1, -1, w[1]);
+      gdepth_want(r, 1, i % 3, u, v, 0, 0, w[2]);
+      gdepth_want(r, 1, 2, u, v, -2, 1, w[3]);
+      for (unsigned k = 0; k < 4; k++)
+         for (unsigned c = 0; c < 4; c++)
+            if (got[(i * 4 + k) * 4 + c] != w[k][c])
+               return FAILF(r, "%s, thread %u (uv %.5f %.5f) lane %u = %g, expected %g", what[k], i, u, v, c,
+                            got[(i * 4 + k) * 4 + c], w[k][c]);
+   }
+   return true;
+}
+
 /* tex_fence */
 static void
 tex_fence_setup(struct run *r)
@@ -2777,6 +2831,54 @@ tnull_check(struct run *r)
    return ok;
 }
 
+/* mad_sat (metal/mad_sat.metal, round 11): air.mad_sat.s/u.i32, a * b + c clamped to the type; the operands mix the
+ * edges (INT_MIN, INT_MAX, 0, +-1, 46341, 65536) with random words. mad_sat_v (v4i32) the translator refuses: so must
+ * the frontend */
+static uint32_t
+ms_word(void)
+{
+   static const uint32_t edge[] = { 0x80000000u, 0x7fffffffu, 0, 1, 0xffffffffu, 46341, 65536, 0xffff0000u };
+   const uint32_t k = rnd();
+   return k % 3 ? edge[rnd() % 8] : rnd();
+}
+static void
+ms_setup(struct run *r)
+{
+   uint32_t *in = slot(r, 0, 64 * 3 * 16);
+   for (unsigned k = 0; k < 64 * 3 * 4; k++)
+      in[k] = ms_word();
+   slot(r, 1, 64 * 16);
+   slot(r, 2, 64 * 16);
+}
+static uint32_t ms_s(uint32_t a, uint32_t b, uint32_t c)
+{
+   const int64_t v = (int64_t)(int32_t)a * (int32_t)b + (int32_t)c;
+   return (uint32_t)(int32_t)(v < INT32_MIN ? INT32_MIN : v > INT32_MAX ? INT32_MAX : v);
+}
+static uint32_t ms_u(uint32_t a, uint32_t b, uint32_t c)
+{
+   const uint64_t v = (uint64_t)a * b + c;
+   return v > UINT32_MAX ? UINT32_MAX : (uint32_t)v;
+}
+static bool
+ms_check(struct run *r)
+{
+   const uint32_t *in = S(r, 0), *so = S(r, 1), *uo = S(r, 2);
+   for (unsigned i = 0; i < 64; i++) {
+      const uint32_t *a = in + i * 12, *b = a + 4, *c = a + 8;
+      uint32_t ws[4], wu[4];
+      for (unsigned k = 0; k < 3; k++) {
+         ws[k] = ms_s(a[k], b[k], c[k]);
+         wu[k] = ms_u(a[k], b[k], c[k]);
+      }
+      ws[3] = ms_s(a[3], b[1], c[2]);
+      wu[3] = ms_u(a[3], b[0], c[1]);
+      if (!check_u32(r, "mad_sat.s.i32", so + i * 4, ws, 4, 0) || !check_u32(r, "mad_sat.u.i32", uo + i * 4, wu, 4, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
+   }
+   return true;
+}
+
 /* simd_fill (metal/simd_fill.metal, PLUGIN_ONLY, round 11): simd_shuffle_and_fill_down/up with a cluster width, the
  * three-operand forms (the SIMD-group's width, air.get_simdgroup_size.i16), a half4 one, the quad-group builtins; the
  * references are the translator's lowering (air_calls/shuffle.rs) over each SIMD-group of 32 lanes */
@@ -2844,7 +2946,7 @@ sf_check(struct run *r)
          want[c] = inb ? in[(sg + ul) * 4 + c] : -in[(sg + ul) * 4 + c] - 1000.0f;
       if (!check_f4(r, "fill_up (width)", out + (i * 18 + 18 * 64 + 1) * 4, want, 4, 0))
          return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
-      const uint32_t lw[4] = { lane & 3u, i >> 2, 4, 0 };
+      const uint32_t lw[4] = { lane & 3u, i >> 2, 4, 16 };   /* 64 threads: 16 quad-groups */
       if (!check_u32(r, "quad-group builtins", lanes + i * 4, lw, 4, 0))
          return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
    }
@@ -3274,6 +3376,37 @@ tex_ms_check(struct run *r)
    return true;
 }
 
+/* tex_depth_ms (round 11, PLUGIN_ONLY): depth2d_ms (base 0) and a depth2d_ms_array of two layers (bases 0.25, 0.5),
+ * each sample's depth base + (sample + 1) / 16: read by sample, by layer, and the queries */
+static const float tdm_base[3] = { 0.0f, 0.25f, 0.5f };
+static void
+tex_dms_setup(struct run *r)
+{
+   tex_ms_depth(r, 0, "tex_depth_ms", 8, 8, 4, 1, tdm_base);
+   tex_ms_depth(r, 1, "tex_depth_ms", 8, 8, 4, 2, tdm_base + 1);
+   slot(r, 0, 64 * 3 * 16);
+}
+
+static bool
+tex_dms_check(struct run *r)
+{
+   const float *got = S(r, 0);
+   for (unsigned i = 0; i < 64; i++) {
+      const float w[3][4] = {
+         { 0.0625f, 0.125f, 0.1875f, 0.25f },
+         { 0.25f + (float)(i % 4 + 1) * 0.0625f, 0.5f + (float)(3 - i % 4 + 1) * 0.0625f, 4, 4 },
+         { 8, 8, 8, 8 },
+      };
+      static const char *what[3] = { "depth2d_ms samples 0-3", "depth2d_ms_array layers 0, 1 and the sample counts",
+                                     "the widths and heights" };
+      for (unsigned k = 0; k < 3; k++)
+         for (unsigned c = 0; c < 4; c++)
+            if (got[(i * 3 + k) * 4 + c] != w[k][c])
+               return FAILF(r, "%s, texel %u lane %u = %g, expected %g", what[k], i, c, got[(i * 3 + k) * 4 + c], w[k][c]);
+   }
+   return true;
+}
+
 static const struct test tests[] = {
    { "fmath", NULL, "fmath", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
    { "fmath_precise", NULL, "fmath_precise", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, fmath_setup, fmath_check },
@@ -3325,6 +3458,8 @@ static const struct test tests[] = {
    { "tex_buffer", NULL, "tex_buffer", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_buffer_setup, tex_buffer_check },
    { "tex_depth", NULL, "tex_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_depth_setup, tex_depth_check,
      tex_depth_expect },
+   { "tex_gather_depth", NULL, "tex_gather_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, MUST_ROAD, NULL, tex_gdepth_setup,
+     tex_gdepth_check },
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },
@@ -3335,6 +3470,8 @@ static const struct test tests[] = {
    { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tba_setup, tba_check },
    { "tex_null", NULL, "tex_null", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
    { "simd_fill", NULL, "simd_fill", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, sf_setup, sf_check },
+   { "mad_sat", NULL, "mad_sat_k", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, ms_setup, ms_check },
+   { "mad_sat_v", "mad_sat", "mad_sat_v", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, ms_setup, NULL },
    { "tex_null_tb", "tex_null", "tex_null_tb", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
    { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
@@ -3348,6 +3485,9 @@ static const struct test tests[] = {
      tex_intsample_check },
    { "pack", NULL, "pack", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, pack_setup, pack_check },
    { "tex_ms", NULL, "tex_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_ms_setup, tex_ms_check },
+   { "tex_depth_ms", NULL, "tex_depth_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tex_dms_setup,
+     tex_dms_check },
+   { "tex_depth_asize", "tex_depth_ms", "tex_depth_asize", { 1, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
    { "tex_arrays", NULL, "tex_arrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_arrays_setup, tex_arrays_check },
    { "ab_kernel", NULL, "ab_kernel", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_kernel_setup, ab_kernel_check },
    { "ab_encoder", NULL, "ab_encoder", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_encoder_setup, ab_encoder_check },
