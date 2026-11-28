@@ -395,6 +395,10 @@ struct air_tr {
    /* the buffers the translator keeps as storage-buffer descriptors (NVMTL_AIR_NIR_DESCRIPTORS): given, read, wanted */
    uint32_t desc_buffers, desc_mask, desc_wanted;
    bool desc_given;
+   /* how the translator's module reads and writes each of them (version 8, request descriptor_elem_bits) */
+   bool desc_forms;
+   uint8_t desc_bits[32];
+   uint32_t desc_guarded;
    struct set *dd_sources;      /* parameters that count as read from memory (air_data_dependent) */
    uint32_t pre_wanted;         /* the buffers air_dd_before_passes asks about */
    uint32_t desc_ro_mask;       /* the descriptor buffers the translator declares NonWritable */
@@ -1131,12 +1135,31 @@ air_ssbo_desc(struct air_tr *t, unsigned n)
  * bounds-checked access component by component against the descriptor's range rounded up to 4 bytes
  * (nir_lower_explicit_io, NVK_SSBO_BOUNDS_CHECK_ALIGNMENT), so such a component is read, or reads 0, exactly as the
  * translator's module reads it, whether that reads it as itself or within the aligned 32-bit word that holds it. A
- * 64-bit component is not: the translator reads one as a 64-bit value in some modules and as two 32-bit words in
- * others, which differ when the buffer ends between them. */
+ * 64-bit component is not: the translator reads one as a 64-bit value from an array of 64-bit elements and as two
+ * 32-bit words, low first, from a word array (round 10: the plugin says which, request descriptor_elem_bits), and the
+ * two differ when the buffer ends between them; from any other it stays refused. */
+static nir_deref_instr *
+air_ssbo_deref(struct air_tr *t, const struct air_val *ptr, nir_def *off, unsigned components, unsigned bits, uint32_t align)
+{
+   nir_builder *b = &t->b;
+   nir_deref_instr *d = nir_build_deref_cast(b, air_ssbo_desc(t, ptr->desc - 1u), nir_var_mem_ssbo, glsl_uint8_t_type(), 1);
+   d = nir_build_deref_ptr_as_array(b, d, off);
+   const enum glsl_base_type base = bits == 8 ? GLSL_TYPE_UINT8 : bits == 16 ? GLSL_TYPE_UINT16 :
+                                    bits == 64 ? GLSL_TYPE_UINT64 : GLSL_TYPE_UINT;
+   d = nir_build_deref_cast(b, &d->def, nir_var_mem_ssbo, glsl_vector_type(base, components), 0);
+   d->cast.align_mul = align;
+   d->cast.align_offset = 0;
+   return d;
+}
+
+/* the width of buffer n's elements in the translator's module (0: not known, or mixed) */
+static unsigned air_ssbo_elem_bits(const struct air_tr *t, unsigned n) { return t->desc_forms && n < 32 ? t->desc_bits[n] : 0; }
+
 static nir_def *
 air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
 {
-   if (bits > 32)
+   const unsigned eb = air_ssbo_elem_bits(t, ptr->desc - 1u);
+   if (bits > 32 && eb != 64 && eb != 32)
       unsupported(t, "a %u-bit load from buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer "
                   "descriptor: the translator reads a 64-bit value there as one value or as two 32-bit words, "
                   "depending on the module, and the two differ when the buffer ends between them", bits, ptr->desc - 1u);
@@ -1144,14 +1167,49 @@ air_ssbo_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsign
       unsupported(t, "a %u-bit load from buffer %u (a bounds-checked storage-buffer descriptor on the SPIR-V road) "
                   "aligned to %u bytes", bits, ptr->desc - 1u, align);
    nir_builder *b = &t->b;
-   nir_deref_instr *d = nir_build_deref_cast(b, air_ssbo_desc(t, ptr->desc - 1u), nir_var_mem_ssbo,
-                                             glsl_uint8_t_type(), 1);
-   d = nir_build_deref_ptr_as_array(b, d, ptr->def);
-   const enum glsl_base_type base = bits == 8 ? GLSL_TYPE_UINT8 : bits == 16 ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT;
-   d = nir_build_deref_cast(b, &d->def, nir_var_mem_ssbo, glsl_vector_type(base, components), 0);
-   d->cast.align_mul = align;
-   d->cast.align_offset = 0;
-   return nir_load_deref_with_access(b, d, ptr->desc_ro ? ACCESS_NON_WRITEABLE : 0);
+   const enum gl_access_qualifier acc = ptr->desc_ro ? ACCESS_NON_WRITEABLE : 0;
+   if (bits == 64 && eb == 32) {
+      /* a word array: each 64-bit value as its two words, low first, each bounds-checked */
+      nir_def *w = nir_load_deref_with_access(b, air_ssbo_deref(t, ptr, ptr->def, 2 * components, 32, MIN2(align, 8u)), acc);
+      nir_def *c[4];
+      for (unsigned i = 0; i < components; i++)
+         c[i] = nir_pack_64_2x32_split(b, nir_channel(b, w, 2 * i), nir_channel(b, w, 2 * i + 1));
+      return nir_vec(b, c, components);
+   }
+   return nir_load_deref_with_access(b, air_ssbo_deref(t, ptr, ptr->def, components, bits, align), acc);
+}
+
+/* A store through a descriptor buffer (round 10), as the translator's module stores to it: of components of the width
+ * of the buffer's elements (64 bits to a word array as two words, low first), each bounds-checked, at the offset it
+ * computes (32 bits, as the typed access the translator makes there). A buffer whose stores the module guards against a
+ * byte offset past 4 GiB (its raw form), and any other width, stay refused. */
+static void
+air_ssbo_store(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t align)
+{
+   const unsigned n = ptr->desc - 1u, eb = air_ssbo_elem_bits(t, n), bits = value->bit_size;
+   if (!eb || (t->desc_guarded >> n & 1) || (bits != eb && !(bits == 64 && eb == 32)))
+      unsupported(t, "a store to buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor and "
+                  "stores to %s", n, !eb ? "as elements of mixed widths" : (t->desc_guarded >> n & 1) ?
+                  "behind a guard against offsets past 4 GiB (the translator's raw form)" : "in elements of another width");
+   if (align < bits / 8)
+      unsupported(t, "a %u-bit store to buffer %u (a bounds-checked storage-buffer descriptor on the SPIR-V road) "
+                  "aligned to %u bytes", bits, n, align);
+   if (ptr->desc_ro)
+      unsupported(t, "a store to buffer %u, which its metadata says is read only", n);
+   nir_builder *b = &t->b;
+   if (bits == 64 && eb == 32) {
+      nir_def *c[8];
+      for (unsigned i = 0; i < value->num_components; i++) {
+         nir_def *v = nir_channel(b, value, i);
+         c[2 * i] = nir_unpack_64_2x32_split_x(b, v);
+         c[2 * i + 1] = nir_unpack_64_2x32_split_y(b, v);
+      }
+      nir_store_deref(b, air_ssbo_deref(t, ptr, ptr->def, 2 * value->num_components, 32, MIN2(align, 8u)),
+                      nir_vec(b, c, 2 * value->num_components), BITFIELD_MASK(2 * value->num_components));
+      return;
+   }
+   nir_store_deref(b, air_ssbo_deref(t, ptr, ptr->def, value->num_components, bits, align), value,
+                   BITFIELD_MASK(value->num_components));
 }
 
 static nir_def *
@@ -1201,10 +1259,8 @@ air_store_mem(struct air_tr *t, struct air_val *ptr, nir_def *value, uint32_t al
    case AIR_CONSTANT:
       unsupported(t, "a store to constant memory");
    case AIR_SSBO:
-      /* the translator guards a store against a byte offset past 4 GiB in one of its access forms and not in the
-       * other, and which one a module has is the translator's own choice */
-      unsupported(t, "a store to buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor",
-                  ptr->desc - 1u);
+      air_ssbo_store(t, ptr, value, align);
+      return;
    default:
       unsupported(t, "a store through a value that is not a pointer");
    }
@@ -2760,12 +2816,12 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
             unsupported(t, "buffer argument %u is not a pointer", i);
          if (t->desc_given && (t->desc_buffers >> a->location & 1)) {
-            /* a buffer the translator's module keeps a storage-buffer descriptor: read through it, at binding n */
-            if (argbuf)
-               unsupported(t, "argument buffer %u is a storage-buffer descriptor in the translator's module",
-                           (unsigned)a->location);
+            /* a buffer the translator's module keeps a storage-buffer descriptor: read through it, at binding n; an
+             * argument buffer so kept (round 10) is read the same way, its handles and pointers from it (64-bit ones
+             * as the module reads them, air_ssbo_load), its fields at known offsets where they are */
             struct air_val *v = air_set(t, a->param, nir_imm_int(&t->top, 0), AIR_SSBO,
                                         a->align ? MIN2((uint32_t)a->align, 16) : 4);
+            v->ab_param = (uint16_t)(a->index + 1);
             v->desc = (uint8_t)(a->location + 1);
             v->desc_ro = a->space == 2 || (a->access && !strcmp(a->access, "air.read"));
             t->desc_mask |= 1u << a->location;
@@ -8473,6 +8529,11 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
        t->req->size >= offsetof(struct nvmtl_air_nir_request, descriptor_buffers) + sizeof t->req->descriptor_buffers) {
       t->desc_given = true;
       t->desc_buffers = t->req->descriptor_buffers;
+      if (t->req->size >= offsetof(struct nvmtl_air_nir_request, descriptor_store_guarded) + sizeof t->req->descriptor_store_guarded) {
+         t->desc_forms = true;
+         memcpy(t->desc_bits, t->req->descriptor_elem_bits, sizeof t->desc_bits);
+         t->desc_guarded = t->req->descriptor_store_guarded;
+      }
    }
 
    if (t->req->flags & NVMTL_AIR_NIR_ARGBUF)

@@ -879,7 +879,7 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
       if (r->fbuf[i] && (r->fbuf_ab >> i & 1))
          [re useResource:r->fbuf[i] usage:MTLResourceUsageRead stages:both];
       else if (r->fbuf[i])
-         [re setFragmentBuffer:r->fbuf[i] offset:0 atIndex:i];
+         [re setFragmentBuffer:r->fbuf[i] offset:r->fbuf_off[i] atIndex:i];
    }
    for (unsigned i = 0; i < RMAXTEX; i++) {
       if (r->ftex[i] && (r->ftex_ab >> i & 1))

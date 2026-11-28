@@ -242,12 +242,24 @@ struct nvmtl_air_nir_request {
     * translator's own (SpacingEqual, VertexOrderCcw) */
    uint32_t tess_spacing;
    uint32_t tess_order;
+
+   /* Since version 8, read with NVMTL_AIR_NIR_DESCRIPTORS and a size that reaches them: how the translator's module
+    * reads and writes each of descriptor_buffers (nvmtl_air_nir_kept_forms): descriptor_elem_bits[n], the width of
+    * every scalar of its runtime array's element (64: a ulong array, its 64-bit values one value each; 32: a word array,
+    * a 64-bit value two words, low first; 8 or 16 a byte or short array; 0 an element of mixed widths, a struct); bit n
+    * of descriptor_store_guarded, a store to it the module guards against a byte offset past 4 GiB (the translator's
+    * raw form). A 64-bit access is taken with a width of 64 or 32, a store of components of the element's width (or 64
+    * bits to a word array) when it is not guarded; anything else to such a buffer stays refused. */
+   uint8_t descriptor_elem_bits[32];
+   uint32_t descriptor_store_guarded;
+   uint32_t reserved8;
 };
 #define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V3_SIZE 208u   /* the request without the varying_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V4_SIZE 232u   /* the request without the sampler_state_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V5_SIZE 256u   /* the request without descriptor_buffers */
 #define NVMTL_AIR_NIR_REQUEST_V7_SIZE 264u   /* the request without tess_spacing */
+#define NVMTL_AIR_NIR_REQUEST_V8_SIZE 312u   /* the whole version-8 request */
 #define NVMTL_AIR_NIR_TESS_INPUTS   40u      /* the inputs a tessellation evaluation stage lists (nvmtl_vk.c nvt_tese) */
 
 struct nvmtl_air_nir_result {

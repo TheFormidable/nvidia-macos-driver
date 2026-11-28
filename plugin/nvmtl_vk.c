@@ -5805,6 +5805,16 @@ int nvmtl_vk_descriptor_buffers(const void *spv, size_t n, int render, uint32_t 
     if (!d) return -1;
     return nvmtl_air_nir_kept_buffers((const uint32_t *)d.bytes, d.length / 4, mask);
 }
+// ... and how that module reads and writes each of them (round 10, nvmtl_air_nir_kept_forms)
+int nvmtl_vk_descriptor_forms(const void *spv, size_t n, int render, uint32_t *mask, uint8_t bits[32], uint32_t *guarded)
+{
+    *mask = 0; memset(bits, 0, 32); *guarded = 0;
+    if (!spv || n < 20) return -1;
+    NSData *d = render ? nvmtl_address_shader(spv, n) : nvmtl_address_shader_g(spv, n, 0, NULL);
+    if (!d) return -1;
+    if (nvmtl_air_nir_kept_buffers((const uint32_t *)d.bytes, d.length / 4, mask)) return -1;
+    return nvmtl_air_nir_kept_forms((const uint32_t *)d.bytes, d.length / 4, bits, guarded);
+}
 int nvmtl_vk_pipeline_create_ex2(const void *vs, size_t vn, const void *fs, size_t fn, uint32_t vkfmt, uint32_t depthfmt, nvk_pipeline *out)
 {
     return nvmtl_vk_pipeline_create_blend(vs, vn, fs, fn, vkfmt, depthfmt, NULL, out);

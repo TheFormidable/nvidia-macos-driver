@@ -167,7 +167,7 @@ static xfree_fn xfree;
  * finds them (nvmtl_vk_descriptor_buffers): 0, or -1 and why */
 static int
 kept_buffers(const char *text, const char *stage, const uint32_t *fi, const uint32_t *fs, const uint8_t *const *fp, size_t nfc,
-             uint32_t *mask, char *e, size_t en)
+             uint32_t *mask, uint8_t bits[32], uint32_t *guarded, char *e, size_t en)
 {
    uint8_t *spv = NULL, *low = NULL;
    size_t n = 0, ln = 0;
@@ -179,7 +179,8 @@ kept_buffers(const char *text, const char *stage, const uint32_t *fi, const uint
    if (nfc ? xtrans_fc(text, stage, fi, fs, fp, nfc, &spv, &n, e, en) : xtrans(text, stage, &spv, &n, e, en))
       return -1;
    int rc = xlower(spv, n, &low, &ln, e, en) ? -1 : 0;
-   if (!rc && nvmtl_air_nir_kept_buffers((const uint32_t *)low, ln / 4, mask)) {
+   if (!rc && (nvmtl_air_nir_kept_buffers((const uint32_t *)low, ln / 4, mask) ||
+               nvmtl_air_nir_kept_forms((const uint32_t *)low, ln / 4, bits, guarded))) {
       snprintf(e, en, "the lowered module has a buffer of another form");
       rc = -1;
    }
@@ -205,7 +206,8 @@ main(int argc, char **argv)
       xlower = x ? (lower_fn)dlsym(x, "nvmtl_lower_buffer_addresses") : NULL;
       void (*caps)(uint32_t) = x ? (void (*)(uint32_t))dlsym(x, "nvmtl_translate_set_caps") : NULL;
       if (caps)
-         caps(3u | 4u | 8u);   /* as the plugin sets them (NVMTLLibraryLoad.m), typed dummies on */
+         caps(3u | 4u | 8u | 16u);   /* as the plugin sets them (NVMTLLibraryLoad.m), typed dummies on, the device's
+                                       * minimum-LOD clamp (this machine's has it) */
       if (!xrefl || !xrefl_fc) {
          fprintf(stderr, "airsweep: %s has no nvmtl_reflect\n", argv[4]);
          return 2;
@@ -395,7 +397,7 @@ main(int argc, char **argv)
                                                     NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_COLOR_INPUTS |
                                                     NVMTL_AIR_NIR_TEXTURE_ARRAYS | NVMTL_AIR_NIR_HEAP |
                                                     NVMTL_AIR_NIR_ARGBUF | NVMTL_AIR_NIR_TYPED_DUMMIES |
-                                                    (l > 0 ? NVMTL_AIR_NIR_TESS : 0) |
+                                                    (l > 0 ? NVMTL_AIR_NIR_TESS : 0) | NVMTL_AIR_NIR_MIN_LOD |
                                                     (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0) |
                                                     /* a kernel as the plugin's compute pipelines are made by default,
                                                      * without buffer robustness (AIRSWEEP_ROBUST_COMPUTE=1: with it) */
@@ -414,10 +416,11 @@ main(int argc, char **argv)
                const bool render = l > 0;
                if ((st && res.descriptor_wanted) || (!st && render && getenv("AIRSWEEP_KEPT_ALL"))) {
                   const uint32_t wanted = st ? res.descriptor_wanted : 0;
-                  uint32_t kept = 0;
+                  uint32_t kept = 0, guarded = 0;
+                  uint8_t bits[32];
                   char ke[512] = { 0 };
                   const int k = kept_buffers(data, lists[l][1], fc_idx, fc_sz, (const uint8_t *const *)fc_pay, fcs ? nfc : 0,
-                                             &kept, ke, sizeof ke);
+                                             &kept, bits, &guarded, ke, sizeof ke);
                   clean(name);
                   clean(ke);
                   printf("DSC\t%s\t%s\t%s\t%#x\t", path, name, lists[l][1], wanted);
@@ -429,6 +432,8 @@ main(int argc, char **argv)
                      free(res.reflection);
                      req.flags |= NVMTL_AIR_NIR_DESCRIPTORS;
                      req.descriptor_buffers = kept;
+                     memcpy(req.descriptor_elem_bits, bits, sizeof req.descriptor_elem_bits);
+                     req.descriptor_store_guarded = guarded;
                      memset(&res, 0, sizeof res);
                      res.size = sizeof res;
                      st = to_nir(dev, &req, &res);

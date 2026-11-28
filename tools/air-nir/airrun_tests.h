@@ -2685,6 +2685,42 @@ pxw_check(struct run *r)
    return pxm_check_cases(r, cases);
 }
 
+/* tex_tbarray (metal/tex_tbarray.metal, PLUGIN_ONLY, round 10): texture_buffer arrays indexed at run time; textures 0-2
+ * read (r32f, 64 texels), 4-5 written; slot 0 the index per thread. The frontend must refuse it (MUST_REFUSE): the
+ * translator keeps each such array one array binding, which the plugin's layout holds with one descriptor, and the SPIR-V
+ * * road reads the elements wrongly (zeros: measured in round 10, before the test was marked so) */
+static void
+tba_setup(struct run *r)
+{
+   for (unsigned k = 0; k < 3; k++) {
+      float *tb = tex_buffer(r, k, VK_FORMAT_R32_SFLOAT, 4, 64, false);
+      for (unsigned q = 0; q < 64; q++)
+         tb[q] = (float)(k * 100 + q);
+   }
+   for (unsigned k = 4; k < 6; k++)
+      tex_buffer(r, k, VK_FORMAT_R32_SFLOAT, 4, 64, true);
+   uint32_t *sel = slot(r, 0, 64 * 4);
+   for (unsigned i = 0; i < 64; i++)
+      sel[i] = (i * 7u + 3u) % 11u;
+   slot(r, 1, 64 * 16);
+}
+
+static bool
+tba_check(struct run *r)
+{
+   const uint32_t *sel = S(r, 0);
+   const float *out = S(r, 1);
+   for (unsigned i = 0; i < 64; i++) {
+      const float want[4] = { (float)((sel[i] % 3u) * 100 + i), 0, 0, 1 };
+      if (!check_f4(r, "tb[k]", out + i * 4, want, 4, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, k %u)", i, sel[i]), false;
+      const float *w = r->tex[4 + (sel[i] & 1u)].stage.map, wb = (float)i + 0.5f;
+      if (!check_f4(r, "wtb[k]", w + i, &wb, 1, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, k %u)", i, sel[i]), false;
+   }
+   return true;
+}
+
 /* tex_bicubic (metal/tex_bicubic.metal, PLUGIN_ONLY, round 10): bicubic samples as the translator emulates them
  * (images/sample.rs lower_pixel_bicubic_sample, catmull_rom_weights), the references step by step as it computes;
  * tex_pixmodes's textures and pixel coordinates, the normalized ones in slot 2 (each pixel one over its axis' size) */
@@ -3166,6 +3202,7 @@ static const struct test tests[] = {
    { "tex_warrays", NULL, "tex_warrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, twa_setup, twa_check },
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
+   { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, tba_setup, tba_check },
    { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },

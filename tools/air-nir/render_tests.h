@@ -27,6 +27,7 @@ struct rrun {
    /* argument buffers: the buffers, textures and samplers a test reaches only through one are made resident
     * (useResource:usage:stages:) and not bound */
    uint32_t vbuf_ab, fbuf_ab, ftex_ab, fsamp_ab;
+   unsigned fbuf_off[RMAXBUF];                    /* the offset a fragment buffer is bound at (r_oob_misaligned) */
    id<MTLBuffer> back[RMAXCOL], dback;            /* the attachments, read back */
    uint8_t tex[16 * 16 * 4];                      /* r_texture's texels */
    uint8_t texn[3][16 * 16 * 4];                  /* r_handlechoice's three textures */
@@ -1765,6 +1766,93 @@ rrog_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_kept (round 10): stores and 64-bit values in buffers the translator keeps descriptors --------------------- */
+
+#define RK_PAL 3000u    /* ulongs, and 4 bytes more: element 3000 straddles the end */
+#define RK_OUTF 3500u   /* floats */
+#define RK_OUT64 2500u  /* ulongs, and 4 bytes more: element 2500 straddles the end */
+static uint64_t rk_pal(uint32_t i) { return (uint64_t)(i * 3u + 1u) | (uint64_t)(i * 7u + 5u) << 32; }
+static uint32_t rk_idx(uint32_t p) { return (p * 1103u + 17u) % 4096u; }   /* a permutation of the 4096 pixels */
+
+static void
+rk_setup(struct rrun *r)
+{
+   setup_quad(r);
+   uint32_t idx[RW * RH];
+   for (uint32_t p = 0; p < RW * RH; p++)
+      idx[p] = rk_idx(p);
+   r->fbuf[0] = rbuf(idx, sizeof idx);
+   r->fbuf[1] = rbuf(NULL, RK_PAL * 8 + 4);
+   uint64_t *pal = r->fbuf[1].contents;
+   for (uint32_t i = 0; i < RK_PAL; i++)
+      pal[i] = rk_pal(i);
+   memset((uint8_t *)r->fbuf[1].contents + RK_PAL * 8, 0x5a, 4);   /* the straddling element's low word */
+   r->fbuf[2] = rbuf(NULL, RK_OUTF * 4);
+   memset(r->fbuf[2].contents, 0xab, RK_OUTF * 4);
+   r->fbuf[3] = rbuf(NULL, RK_OUT64 * 8 + 4);
+   memset(r->fbuf[3].contents, 0xab, RK_OUT64 * 8 + 4);
+}
+
+static bool
+rk_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const uint32_t k = rk_idx(py * RW + px);
+         const uint64_t v = k < RK_PAL ? rk_pal(k) : 0;   /* past the end, the straddling element too: 0 */
+         const float want[4] = { (float)(uint32_t)v, (float)(uint32_t)(v >> 32), (float)k, 1 };
+         if (!rwant(r, 0, px, py, want, 4, 0))
+            return false;
+      }
+   const float *outf = r->fbuf[2].contents;
+   for (uint32_t k = 0; k < RK_OUTF; k++) {
+      const uint64_t v = k < RK_PAL ? rk_pal(k) : 0;
+      const float want = (float)(uint32_t)(v & 0xffff) * 0.5f;
+      if (outf[k] != want) {
+         snprintf(r->why, sizeof r->why, "float buffer element %u: %.9g, want %.9g", k, outf[k], want);
+         return false;
+      }
+   }
+   const uint64_t *o64 = r->fbuf[3].contents;
+   for (uint32_t k = 0; k < RK_OUT64; k++) {
+      const uint64_t want = (k < RK_PAL ? rk_pal(k) : 0) ^ 0x0123456789abcdefull;
+      if (o64[k] != want) {
+         snprintf(r->why, sizeof r->why, "ulong buffer element %u: %#llx, want %#llx", k, (unsigned long long)o64[k],
+                  (unsigned long long)want);
+         return false;
+      }
+   }
+   const uint8_t *tail = (const uint8_t *)r->fbuf[3].contents + RK_OUT64 * 8;   /* one 64-bit store, out of range: none */
+   for (unsigned b = 0; b < 4; b++)
+      if (tail[b] != 0xab) {
+         snprintf(r->why, sizeof r->why, "the straddling ulong's byte %u was written (%#x): a 64-bit store split in words", b, tail[b]);
+         return false;
+      }
+   return true;
+}
+
+/* ---- r_oob_misaligned (round 10): a kept descriptor bound at offset 4 --------------------------------------------- */
+
+static void
+romis_setup(struct rrun *r)
+{
+   rob_setup(r);
+   /* the palette from 4 bytes into its buffer, as setFragmentBuffer:offset:4 binds it: below the 16-byte storage-buffer
+    * alignment it cannot be a descriptor, and both roads bind the dummy there (zeros) */
+   r->fbuf_off[0] = 4;
+}
+
+static bool
+romis_check(struct rrun *r)
+{
+   const float zero[4] = { 0, 0, 0, 0 };
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++)
+         if (!rwant(r, 0, px, py, zero, 4, 0))
+            return false;
+   return true;
+}
+
 /* ---- r_minlod (round 10): minimum-LOD clamps ---------------------------------------------------------------------- */
 
 static float rml_level(unsigned m) { return 0.125f * (float)(m + 1); }   /* every texel of level m of the 64x64 texture */
@@ -1938,14 +2026,20 @@ static const struct rtest rtests[] = {
      "4e-5 (sums of nearest samples and buffer values); argument buffers in both stages: fields, arrays of textures and "
      "samplers indexed at run time, nested ones, arrays of them", false, false, NULL, NULL },
    { "r_argbuf_data", "r_argbuf_data", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rab_setup,
-     rab_check, "4e-5; r_argbuf indexed by values read from buffers: an argument buffer the translator keeps a descriptor, "
-     "the SPIR-V road's", true, false, NULL, NULL },
+     rab_check, "4e-5; r_argbuf indexed by values read from buffers: an argument buffer the translator keeps a descriptor (a "
+     "word array: its pointers two words each), on both roads since round 10", false, false, NULL, NULL, NULL, true },
    { "r_argbuf_reuse", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rsr_setup,
      rsr_check, "4e-5; r_argbuf after six samplers of other states held heap slots and were released: no slot changes its "
      "sampler state", false, false, NULL, NULL },
    { "r_rog", "r_rog", "rrog_vs", "rrog_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, rrog_setup, rrog_check,
      "1e-6; raster order groups on [[color(0)]], a written texture and a device buffer (WindowServer's inplace_copy): "
      "bound as without them, no interlock, on both roads", false, false, NULL, NULL, NULL, true, NULL },
+   { "r_kept", "r_kept", "rk_vs", "rk_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rk_setup, rk_check,
+     "exact; buffers the translator keeps descriptors: a ulong palette past its end and straddling it (0), a float and a "
+     "ulong buffer written, past their ends (dropped, the straddling ulong whole)", false, false, NULL, NULL, NULL, true },
+   { "r_oob_misaligned", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, romis_setup,
+     romis_check, "exact; r_oob's palette bound at offset 4: no descriptor there, the dummy (zeros) on both roads", false,
+     false, NULL, NULL, NULL, true },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
      "value per level", false, false, NULL, NULL, NULL, true, NULL },

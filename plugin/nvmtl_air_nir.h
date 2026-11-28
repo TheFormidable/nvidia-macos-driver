@@ -111,6 +111,80 @@ static inline int nvmtl_air_nir_kept_buffers(const uint32_t *w, size_t nw, uint3
     return rc;
 }
 
+/* How the module reads and writes each buffer nvmtl_air_nir_kept_buffers names (round 10, request descriptor_elem_bits and
+ * descriptor_store_guarded): bits[n], the width every scalar of its runtime array's element has (0: widths mixed, or no
+ * runtime array), and bit n of *guarded when a store through it sits under the branch of a 64-bit unsigned compare (the
+ * translator's raw store, emit_raw_store: byte offset <= UINT32_MAX - (size - 1)). 0, or -1 for a module this does not
+ * read. */
+static inline unsigned nvmtl_air_nir_leaf_bits(const uint32_t *op, const uint32_t *a0, const uint32_t *a1,
+                                               const uint32_t *nm, const uint32_t *mem, uint32_t bound, uint32_t ty, int depth)
+{
+    if (ty >= bound || depth > 8) return 0;
+    switch (op[ty]) {
+    case 21: case 22: return a0[ty];                                            /* OpTypeInt, OpTypeFloat: width */
+    case 23: case 28: return nvmtl_air_nir_leaf_bits(op, a0, a1, nm, mem, bound, a0[ty], depth + 1);   /* vector, array */
+    case 30: {                                                                   /* OpTypeStruct: every member alike */
+        unsigned w = 0;
+        for (uint32_t k = 0; k < nm[ty]; k++) {
+            const unsigned m = nvmtl_air_nir_leaf_bits(op, a0, a1, nm, mem, bound, mem[a1[ty] + k], depth + 1);
+            if (!m || (w && m != w)) return 0;
+            w = m;
+        }
+        return w;
+    }
+    default: return 0;
+    }
+}
+static inline int nvmtl_air_nir_kept_forms(const uint32_t *w, size_t nw, uint8_t bits[32], uint32_t *guarded)
+{
+    memset(bits, 0, 32); *guarded = 0;
+    if (!w || nw < 5 || w[0] != 0x07230203u) return -1;
+    const uint32_t bound = w[3];
+    if (!bound || bound > (1u << 22)) return -1;
+    /* per id: its type op and first operands (a type), a struct's member list (into mem), the variable's decorations, a
+     * value's type, an access chain's base, a label's guard */
+    uint32_t *op = (uint32_t *)calloc(bound, 4), *a0 = (uint32_t *)calloc(bound, 4), *a1 = (uint32_t *)calloc(bound, 4);
+    uint32_t *nm = (uint32_t *)calloc(bound, 4), *set = (uint32_t *)calloc(bound, 4), *bind = (uint32_t *)calloc(bound, 4);
+    uint32_t *sc = (uint32_t *)calloc(bound, 4), *vty = (uint32_t *)calloc(bound, 4), *base = (uint32_t *)calloc(bound, 4);
+    uint8_t *ule = (uint8_t *)calloc(bound, 1), *gl = (uint8_t *)calloc(bound, 1);
+    uint32_t *mem = (uint32_t *)calloc(nw, 4);
+    int rc = op && a0 && a1 && nm && set && bind && sc && vty && base && ule && gl && mem ? 0 : -1;
+    uint32_t nmem = 0, cur = 0;
+    for (size_t i = 5; rc == 0 && i < nw; ) {
+        const uint32_t n = w[i] >> 16, o = w[i] & 0xffffu;
+        if (!n || i + n > nw) { rc = -1; break; }
+        const uint32_t *a = w + i + 1;
+        if ((o == 21 || o == 22) && n >= 3 && a[0] < bound) { op[a[0]] = o; a0[a[0]] = a[1]; }
+        else if ((o == 23 || o == 28 || o == 29) && n >= 3 && a[0] < bound) { op[a[0]] = o; a0[a[0]] = a[1]; }
+        else if (o == 30 && n >= 2 && a[0] < bound) { op[a[0]] = o; a1[a[0]] = nmem; nm[a[0]] = n - 2; for (uint32_t k = 2; k < n; k++) mem[nmem++] = a[k - 1]; }
+        else if (o == 32 && n >= 4 && a[0] < bound) { op[a[0]] = o; a0[a[0]] = a[2]; }                  /* pointer -> pointee */
+        else if (o == 71 && n >= 4 && a[0] < bound && a[1] == 34) set[a[0]] = a[2] + 1;
+        else if (o == 71 && n >= 4 && a[0] < bound && a[1] == 33) bind[a[0]] = a[2] + 1;
+        else if (o == 59 && n >= 4 && a[1] < bound) { sc[a[1]] = a[2] + 1; vty[a[1]] = a[0]; base[a[1]] = a[1]; }
+        else if ((o == 65 || o == 66 || o == 67 || o == 70) && n >= 4 && a[1] < bound && a[2] < bound) base[a[1]] = base[a[2]] ? base[a[2]] : a[2];
+        else if (o == 178 && n >= 5 && a[1] < bound && a[2] < bound && vty[a[2]] < bound && op[vty[a[2]]] == 21 && a0[vty[a[2]]] == 64) ule[a[1]] = 1;
+        else if (o == 250 && n >= 4 && a[0] < bound && a[1] < bound && ule[a[0]]) gl[a[1]] = 1;
+        else if (o == 248 && n >= 2 && a[0] < bound) cur = a[0];
+        else if (o == 62 && n >= 3 && a[0] < bound && gl[cur] && base[a[0]] < bound && bind[base[a[0]]] && bind[base[a[0]]] <= 32 &&
+                 set[base[a[0]]] == 1 && sc[base[a[0]]] == 12 + 1)
+            *guarded |= 1u << (bind[base[a[0]]] - 1);
+        /* a value's type, for the compares above: every instruction whose first operand is a type and second its result */
+        if (n >= 3 && a[0] < bound && a[1] < bound && op[a[0]] && o != 71 && o != 59 && o != 32 && !(o >= 19 && o <= 39)) vty[a[1]] = a[0];
+        i += n;
+    }
+    for (uint32_t v = 0; rc == 0 && v < bound; v++) {
+        if (set[v] != 1 || !bind[v] || bind[v] > 32 || sc[v] != 12 + 1) continue;
+        const uint32_t pt = vty[v] < bound ? vty[v] : 0, blk = pt && op[pt] == 32 ? a0[pt] : 0;
+        if (!blk || blk >= bound || op[blk] != 30 || !nm[blk]) continue;
+        const uint32_t m0 = mem[a1[blk]];
+        if (m0 < bound && (op[m0] == 29 || op[m0] == 28))
+            bits[bind[v] - 1] = (uint8_t)nvmtl_air_nir_leaf_bits(op, a0, a1, nm, mem, bound, a0[m0], 0);
+    }
+    free(op); free(a0); free(a1); free(nm); free(set); free(bind); free(sc); free(vty); free(base); free(ule); free(gl); free(mem);
+    if (rc) { memset(bits, 0, 32); *guarded = 0; }
+    return rc;
+}
+
 /* A threadgroup size the road compiles: every dimension from 1 to the device's per-dimension limit w and at most
  * max_inv (and the frontend's 1024) invocations. Any other size (one the SPIR-V road linearizes) runs that road. */
 static inline int nvmtl_air_nir_size_ok(const uint32_t l[3], const uint32_t w[3], uint32_t max_inv)
