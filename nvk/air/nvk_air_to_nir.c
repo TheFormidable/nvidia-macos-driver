@@ -4894,6 +4894,12 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       }
    }
    if (!read && !write && !sample && !depth_sample && !compare && !gather && !fence && !query) {
+      /* a null texture (round 10, kept refused; MPS's array_ref kernels, which link visible functions MPS supplies at
+       * pipeline creation): the translator loads a placeholder image it declares at the first texture binding its own
+       * module leaves free (lower_get_null_texture, default_null_image_of) and tracks the value (null_image_values);
+       * neither the binding rule nor the tracking is ported */
+      if (air_starts(name, "air.get_null_texture"))
+         unsupported(t, "a null texture (%s: the translator's placeholder binding is not reproduced)", name);
       if (air_starts(name, "air.gather_depth_") ||
           air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
           air_starts(name, "air.get_num_samples_") || air_starts(name, "air.is_null_texture") ||
