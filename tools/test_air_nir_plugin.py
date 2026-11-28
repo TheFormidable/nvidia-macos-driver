@@ -86,11 +86,12 @@ def reasons(s):
 
 def cache_key(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
-    sh = body(an, 'static int nvmtl_air_nir_shader(')
+    sh = body(an, 'static int nvmtl_air_nir_shader_with(')
     ky = body(an, 'static void nvmtl_air_nir_key(')
-    keys = all(f'@"{k}"' in ky for k in ("abi", "entry", "constants", "threadgroup", "size", "flags", "ids", "samplers"))
+    # round 9: the descriptor buffers the frontend is asked with (NVMTL_AIR_NIR_DESCRIPTORS) key the entry too
+    keys = all(f'@"{k}"' in ky for k in ("abi", "entry", "constants", "threadgroup", "size", "flags", "ids", "samplers", "descriptors"))
     path = ('nvmtl_spvcache_path_air(ad, tail, @"nir1")' in ky and 'nvmtl_air_state(f->_air)' in ky and
-            'nvmtl_air_nir_key(f, tgLen, flags, local, varyings, stageKey, samplers, path, memoKey);' in sh)
+            'nvmtl_air_nir_key(f, tgLen, flags, local, varyings, stageKey, samplers, descriptors, path, memoKey);' in sh)
     ids = 'nvmtl_air_nir_image_uuid((const void *)pnvk_air_to_nir' in an and 'st.st_mtimespec' in an
     stored = re.search(r'if \(st == NVMTL_AIR_NIR_UNSUPPORTED \|\| st == NVMTL_AIR_NIR_BAD_AIR\) nvmtl_air_nir_store\(', sh) is not None
     return keys and path and ids and stored
@@ -184,7 +185,7 @@ def render_link(s):
 def fragment_set(s):
     fe = strip_comments(s["nvk/air/nvk_air_to_nir.c"])
     return ('t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;' in fe and
-            fe.count('.desc_set = t->set') == 1 and fe.count('descriptor_set = t->set') >= 2 and
+            fe.count('.desc_set = t->set') == 2 and fe.count('descriptor_set = t->set') >= 2 and
             not re.search(r'desc(riptor)?_set = 0', fe))
 
 # --- phase 4 (round 5): functions made without the translator --------------------------------------------------------
