@@ -169,23 +169,29 @@ the frontend writes the expansion itself: a NIR opcode that reaches NAK unsuppor
 pipeline, not a refusal.
 
 Everything else is refused with a message, never guessed (`result.message`, status `NVMTL_AIR_NIR_UNSUPPORTED`):
-argument buffers, imageblocks, ray tracing, function constants read without their values, function pointers and
+imageblocks (round 10: by kind, below), ray tracing, function constants read without their values, function pointers and
 recursive calls, doubles, run-time-sized `alloca`s, a `select` or phi between two kinds of memory, mesh and object
-functions; of vertex and fragment functions: post-tessellation vertex functions (and any metadata after a function's
-arguments other than `early_fragment_tests`), a stage input or output of more than one Location (a matrix, an array, a
+functions; of vertex and fragment functions: an isoline patch, and any metadata after a function's arguments other than
+`early_fragment_tests` and a post-tessellation function's `air.patch` (post-tessellation vertex functions take the road
+since round 10, as their tessellation evaluation stage), a stage input or output of more than one Location (a matrix, an array, a
 nested structure), a stage input or output under a function constant the request gives no value for, `[[color(n)]]` inputs (framebuffer
-fetch) without `NVMTL_AIR_NIR_COLOR_INPUTS` (round 8) and of 16- or 8-bit integers, `[[stencil]]` outputs (stencil export), dual-source outputs (`[[color(0), index(1)]]`), raster order groups,
+fetch) without `NVMTL_AIR_NIR_COLOR_INPUTS` (round 8) and of 16- or 8-bit integers, `[[stencil]]` outputs (stencil export), a
+raster order group on anything but a `[[color(n)]]` input, a texture or a buffer (on those since round 10 it is bound as
+the translator binds it, without interlock; dual-source outputs, `[[color(0), index(1)]]`, take the road since round 10),
 `[[primitive_id]]`, `[[barycentric_coord]]`, the amplification builtins and any other builtin not listed above,
 threadgroup arguments, a varying the request gives no Location; and of textures: `array_ref<...>` (MPS's, passed through
 objects in thread memory), and of `array<texture2d<T>, N>` (round 8) a written element or a `texture_buffer` element
 chosen at run time, multisampled depth textures and written multisampled ones, a written cube or depth texture and a texel read of a cube
 (the translator goes through a 2D-array view of them), a gradient sample or a cube sample of an integer texture through a
-sampler known here (the translator's nearest fetch has neither), a bias in a kernel, a minimum-LOD clamp, an offset known only at run time, a write or a storage read at a
-level other than 0, `air.is_null_texture`/`get_null_texture` (and, since round 5, a texture or sampler handle used as a plain value:
+sampler known here (the translator's nearest fetch has neither), a bias in a kernel, a minimum-LOD clamp on a nearest
+fetch, a gather, a comparison, a pixel-coordinate or a bicubic sample (since round 10 any other is applied as the
+translator applies it), an offset known only at run time, a write or a storage read at a
+level other than 0, `get_null_texture` (round 10: the translator's placeholder binding is not reproduced; and, since round 5, a texture or sampler handle used as a plain value:
 a `ptrtoint` and a compare, a select or a phi of two handles that known branches do not decide (round 8), which Apple's compiler writes for a null-texture test; the
 frontend read such a handle's missing value and crashed, below), and samplers with pixel coordinates (constexpr, or an
 argument one whose state the request gives) other than nearest with a clamp and linear 2D `clamp_to_edge`, and with
-bicubic filtering or min/max reduction (the translator emulates the first two); `pack`/`unpack` of `srgb`, `rgb10a2`,
+min/max reduction (the translator emulates the first; bicubic samples, pixel and normalized, take the road since round
+10 as the translator emulates them); `pack`/`unpack` of `srgb`, `rgb10a2`,
 `rg11b10f`, `rgb9e5` and `rgb565`.
 
 An argument sampler's state is not known when the function is translated: the frontend treats it as one with
@@ -910,7 +916,7 @@ or at pipeline creation, and where the road does the same or stays off). Line nu
 | the BDA probe's hashes | `NVMTLDevice.m:3043` | off the road with `NVMTL_BDA_PROBE_FILE` (`NVMTLAirNir.m:574`, `:754`, `:1087`) |
 | A8 framebuffer-fetch remap, A8 variant | `nvmtl_vk.c:6525`, `NVMTLDevice.m:2574` | refused (`NVMTLAirNir.m:755`) |
 | vertex amplification (multiview variants) | `NVMTLDevice.m:2586` | refused (`NVMTLAirNir.m:756`) |
-| tessellation (TES patch, generated TCS and VS) | `nvmtl_vk.c:6544` `nvmtl_tess_patch_tese` | refused (`NVMTLAirNir.m:761`; the frontend refuses a post-tessellation vertex function) |
+| tessellation (TES patch, generated TCS and VS) | `nvmtl_vk.c:6544` `nvmtl_tess_patch_tese` | refused (`NVMTLAirNir.m:761`; the frontend refuses a post-tessellation vertex function); since round 10 the same patch made by the frontend, the same TCS and VS (below) |
 | the GL uniform buffer | `NVMTLDevice.m:2658` | refused (`NVMTLAirNir.m:762`) |
 | framebuffer fetch by copies | `nvmtl_vk.c:6620` | refused (`NVMTLAirNir.m:763`) |
 | stencil export emulation | `nvmtl_vk.c:5243` `nvmtl_spirv_stencil_emu` | refused (`NVMTLAirNir.m:766`) |
@@ -1111,6 +1117,160 @@ fails when two share a slot with different states: 6 of 6 runs without the fix, 
   report the bindless heap's set 2, binding 0 as declared and not reflected (the plugin binds the heap itself); two
   check image shapes (a texel-read cube reflected as a cube, not the 2D array it binds; one of four textures given a
   shape); the wrapper's two read a module from a literal `$HOME` path.
+
+## Tessellation, raster order groups, dual-source blending, minimum-LOD clamps and kept buffers (round 10)
+
+Part A of round 10 (3.0.26, the desktop since its boot, read only): clean. Terminal on the road (4 pipelines, none on
+SPIR-V, no fault, no fallback list), no Xid, channel recovery, device loss or "AIR to NIR off in" anywhere, the four
+counters 0, WindowServer 62 of 64 pipelines on the road and no GPU error, no crash or hang report. Of 204 nir1 entries
+since the boot 57 were refusals: 55 the descriptor retry's first request, a dual-source colour output (taken now) and a
+kernel reading a function constant its request does not give.
+
+**Post-tessellation vertex functions take the road** (ABI version 8, `NVMTL_AIR_NIR_TESS`). The plugin's tessellation
+path works on the translator's TessellationEvaluation module: it sets the module's spacing and vertex order, moves its
+`PrimitiveId` to a per-patch input at the Location after every other (`nvmtl_tess_patch_tese`), and builds a
+tessellation control stage that writes every input the module declares, pulled from the vertex buffers by the vertex
+descriptor, with the patch id and the factors (`nvmtl_tess_make_tcs`), and a pass-through vertex stage. The frontend
+now makes that same evaluation stage (`MESA_SHADER_TESS_EVAL`): each control-point field an input array of n at its
+Location (the accessor `X.MTL_CONTROL_POINT_FN(index, ...)` reads it, as `lower_patch_control_point_calls`), each
+`patch_input` and a TES's `[[instance_id]]` a per-patch input at theirs (instance_id after the highest the metadata
+names, `tessellation_system_input_location`), `[[position_in_patch]]` the tessellation coordinate, `[[patch_id]]` the
+per-patch input after every other, the spacing and vertex order the request gives (`tess_spacing`, `tess_order`: the
+plugin's own mapping of Metal's partition mode and winding, `NVMTL_TESS_ORDER_FLIP` included), the reflection's
+`TessellationInterface` and stage `TessellationEvaluation` equal to the translator's. The result lists the inputs
+(`tess_inputs`, `tess_patch_id_location`), the plugin builds its control and vertex stages from them as from the module
+(`nvmtl_air_nir_tese`), and the pipeline holds the two SPIR-V modules beside the NIR evaluation and fragment stages: Mesa's
+`vk_pipeline` takes a NIR or a SPIR-V stage each on its own, and merges the tessellation modes of the stages. The
+pipeline's tessellation description (factor format, control points, amplification, the instance Location) is made once
+for both roads (`nvmtl_tess_desc_make`), from the reflection on the road; `patchType` and `patchControlPointCount` read the
+reflection of a function made without the translator. Refused, as the SPIR-V road refuses the pipeline: an input other
+than a 32-bit scalar or vector (the control stage writes no other), an isoline patch. All 223 post-tessellation
+functions of the AIR cache (SceneKit's) now translate with reflections equal to the translator's.
+
+**Raster order groups, as the translator binds them.** The translator reads `air.raster_order_group` only of a fragment
+imageblock's members (pixel interlock there); a `[[color(n)]]` input, a texture or a buffer in a group it binds as one
+without it, with no interlock (WindowServer's `inplace_copy_lpf`/`_lph`, QuartzCore's, carry one on a written texture).
+The frontend now does the same; a group on anything else stays refused. Like the SPIR-V road, the road does not order
+those accesses as Metal does.
+
+**Imageblocks stay refused, by kind.** An implicit imageblock is a tile function's view of the colour attachments, which
+the plugin runs only through the translator's rewrite of its AIR (`NVMTL_TILE_SHADING`, `tile_imageblock.rs`), a module
+that stays on the SPIR-V road; an explicit one (`imageblock_data`, `write_imageblock_slice_to_texture_2d`: MPS's Lanczos
+and DoG kernels, CoreAnimation's variable blur) the translator stages in a workgroup array whose width, capacity and cell
+scale its IR analysis infers (`native/ir`: the cross-coordinate cells, the APV extent, `threads_per_threadgroup`, the lane
+scales) and copies through its slice writer, which are not ported.
+
+**Dual-source blending** (`[[color(0), index(1)]]`): the frontend's Location 0 output of index 1 (`data.index`, which
+`nir_lower_io` hands NAK as the dual-source blend index), as the translator decorates it `Index 1`; the result says so
+(`NVMTL_AIR_NIR_FS_DUAL_SOURCE`). The pipeline checked a dual-source blend against the fragment's SPIR-V, which made the
+translator run for a fragment made without it; the road asks the result, and the SPIR-V road checks the module it makes.
+
+**Minimum-LOD clamps, fixed on both roads.** Metal's `min_lod_clamp(c)` keeps a sample at level c or above; the
+translator applied it only to gradient samples, so a sample with `bias(b)` and `min_lod_clamp(c)` read levels below c
+(D3DMetal's converted shaders pass one with every sample: the 30 `shader_main_*` fragments the cache refused for it).
+With the device's `shaderResourceMinLod` (now enabled at device creation; the translator's capability bit 4 and its SPIR-V
+cache tag `-ml1`), an implicit level takes the clamp as `MinLod` and an explicit one is raised to it (GLSL `FMax`), colour
+and depth samples alike (`apply_sample_min_lod_clamp`; the owned-module contract takes `ImplicitLod` with `MinLod`). The
+frontend applies it the same way (`NVMTL_AIR_NIR_MIN_LOD`, `nir_tex_src_min_lod`; a gradient sample's always, as the
+translator's); a clamp on a nearest fetch, a gather, a comparison, a pixel-coordinate or a bicubic sample stays refused
+(the translator's lowering of those has no place for it). Without the device's clamp a clamp on a sample without
+gradients is not applied, on both roads, as before. Found on the way: an integer texture sampled through an argument
+sampler in a fragment function was sampled at its implicit level on the road, where the translator samples level 0
+(`force_lod0`); now level 0, its bias dropped.
+
+**Bicubic samples, as the translator emulates them** (`lower_pixel_bicubic_sample`): the sixteen texels (four in 1D)
+around `coord - 0.5`, each weighted by Catmull-Rom's weights of the fraction (the same operations in the same order),
+addressed by the sampler's modes, zero outside where it clamps to zero, at the level given; pixel coordinates and
+normalized ones (scaled by the size at that level), 1D and 2D float textures.
+
+**Buffers the translator keeps bounds-checked: stores, 64-bit values, argument buffers.** Which of the translator's
+access forms a module has is now read off the module by the plugin (`nvmtl_air_nir_kept_forms`, request
+`descriptor_elem_bits` and `descriptor_store_guarded`): the scalar width of each kept buffer's runtime-array element, and
+whether a store to it sits under a 64-bit compare (the raw store, `emit_raw_store`: a byte offset at most
+`UINT32_MAX - (size - 1)`). The frontend reads a 64-bit value from an array of 64-bit elements as one value (NVK checks
+it whole: 0 when it straddles the end) and from a word array as two words, low first, each checked; it stores components
+of the element's width (64 bits to a word array as two words), at the 32-bit offset the typed access computes, when the
+module does not guard them; anything else to a kept buffer stays refused. An argument buffer the translator keeps a
+descriptor (an index read from memory selects within it) is read the same way: its handles' low words, its pointers' two
+words, its fields where they are (`r_argbuf_data`, on the SPIR-V road only until now). A kept buffer bound at an offset
+below NVK's 16-byte storage-buffer alignment cannot be a descriptor: both roads bind the plugin's dummy there and read
+it as it is (`r_oob_misaligned`); Metal would read the buffer from that offset, and a store through such a binding writes the
+shared dummy, on both roads. **Still refused**: an array of `texture_buffer`s indexed at run time. The translator keeps
+it one array binding, which the plugin's layout holds with one descriptor, and the SPIR-V road reads its elements wrongly
+(`tex_tbarray`: zeros); none of the cache's functions does it.
+
+**MPS's null textures stay refused.** The 55 kernels (`MPSTextureFunctions`, `MPSHistogram`) link visible functions MPS
+supplies at pipeline creation (`prefixPrimary_*`, `postfixPrimary_*`: none of them in the AIR cache, so their linked form
+cannot be checked offline) and call `air.get_null_texture_*`, which the translator lowers to a placeholder image it
+declares at the first texture binding its own module leaves free, tracking the value (`lower_get_null_texture`,
+`default_null_image_of`, `null_image_values`); the frontend reproduces neither and refuses, naming it. A linked kernel's
+text reaches the frontend as any other.
+
+### Tested (round 10)
+
+| test | what | tolerance |
+|---|---|---|
+| r_tess_quad | quad patches, integer spacing, factor 4: s^2, t^3 and (s - 1/2)^2 piecewise linear at i/4, a tint per patch, the patch id | 2e-5 |
+| r_tess_pow2 | pow2 spacing at factor 3: 4 segments | 2e-5 |
+| r_tess_fodd, r_tess_feven | fractional odd (2.5) and even (3.5) spacing: symmetric segments, not the uniform subdivision | 2e-5 |
+| r_tess_ccw | counter-clockwise output: the other face | 2e-5 |
+| r_tess_tri | triangle patches, factors from a kernel per patch (one 0: not drawn), two instances, a buffer at the instance | 1e-4 |
+| r_rog | raster order groups on `[[color(0)]]`, a written texture and a device buffer, two instances | 1e-6 |
+| r_dual | `[[color(0), index(1)]]` blending attachment 0 with Source1Color and Source1Alpha | 1e-6 |
+| r_minlod | min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture | 1e-6 |
+| tex_bicubic | bicubic samples, normalized and pixel, 1D and 2D, every address mode, a level, offsets | 5e-5 |
+| r_kept | a kept ulong palette past and straddling its end, a float and a ulong buffer written past their ends | exact |
+| r_oob_misaligned | a kept palette bound at offset 4: the dummy as it is, the same on both roads | exact |
+| r_argbuf_data | (round 9's) an argument buffer the translator keeps a descriptor, now on both roads | 4e-5 |
+| tex_tbarray | `texture_buffer` arrays indexed at run time: refused | - |
+
+A test marked `road` (render) or `MUST_ROAD` (compute) must take the road when it is on; with round 9's NVK and plugin
+each of these takes the SPIR-V road and fails there (`r10/oldbuild.sh`), and with 3.0.26's translator `r_minlod` reads
+level 0 on the SPIR-V road. The tessellation tests' attachments are equal byte for byte on both roads, and with
+`NVMTL_TESS_ORDER_FLIP=1` (the negative control) `r_tess_quad` and `r_tess_ccw` fail on both.
+
+- `sweep.py --reflect` over the AIR cache (round 5's list, `r10/sweeps.sh`): of 10,814 functions the frontend translates
+  5,893 (round 9: 5,636; 3,565 kernels, 941 vertex and 1,387 fragment functions), every reflection equal to the
+  translator's (different 0, not reflected 0); new: the 223 post-tessellation functions, 30 fragments with a
+  minimum-LOD clamp, 4 with a raster order group; none that translated before is refused now. It refuses 4,919 (5,176);
+  the two MPS modules whose translator reflection does not finish stay crashes. 437 asked again with descriptor
+  buffers: 409 then translate, 28 are refused. Refused, the first ten: a function constant read without its value
+  4,026, an argument index from one 572, a stage input under a constant without its value 72, a texture argument under
+  one 59, a `[[color(n)]]` input under one 27, implicit imageblocks 26, an output under a constant 24, a kernel's
+  `stage_in` 17, `amplification_id` 14, an instance acceleration structure 13 (explicit imageblocks 7).
+- WindowServer's functions on disk (offline in a normal process): 179 of 211 translate with reflections equal to the
+  translator's (round 9: 177: QuartzCore's `inplace_copy_lpf`/`_lph`); refused: implicit imageblocks 13, function
+  constants without values 9, stage inputs under constants without values 5, explicit imageblocks 3, outputs under one 2.
+  With each module's constants all 0 and all 1 (26 variants): 12 equal, 14 not reflected (initializer-computed gates).
+- On the card (`tools/air-nir/plugin-run.sh` with the development plugin, this tree's NVK and the rebuilt translator,
+  `MESA_SHADER_CACHE_DISABLE=true`, `r10/final-runs.sh`; the four fault counters 0 before and after every run, none
+  new; WindowServer logged no GPU error): with `NVMTL_AIR_NIR=1` 119 pass twice and once with the first run's caches
+  (110 on the road; `fc_refuse`, `fc_kernel_c`, `fc_kernel_none`, `fc_texture_none`, `tex_tbarray`, `r_primid` and
+  `r_fcin_missing` take the SPIR-V road as they must; `ib_refuse` and `tex_pixborder` are refused by both),
+  `grid2d_base` and `oob_kernel` skipped. With `NVMTL_AIR_NIR=0` 118 pass twice, `r_handlechoice` skipped as well. With
+  `PLUGIN_RUN_CORRUPT=1` every test that dispatches or draws fails on both roads (the seven that pass are refusals).
+  Compute with `NVMTL_COMPUTE_ROBUST=1`: 68 pass on each road. The fetch tests and `r_rog` with `NVMTL_NO_FBFETCH=1`
+  pass on both roads and with `NVMTL_FETCH_COPY=1`; the pixel-coordinate tests and `tex_bicubic` with
+  `NVMTL_NO_PIXEL_HW_FILTER=1` pass on both roads; the three argument-buffer tests 50 times from their setup pass 150 of
+  150 on each road; the new render tests' attachments are equal byte for byte on both roads (16 of 16); the `ws_marker`
+  trio passes. Found by a whole run: the plugin's 256-byte dummy buffer, bound for a kept buffer at a misaligned offset
+  and behind a texel-buffer dummy, holds what an earlier draw wrote through a dummy binding (0xff where `r_oob_misaligned`
+  read), on both roads; the test now reads it as it is.
+- The translator's tests (`r10/ttests.sh`, `--no-fail-fast`): 2,595 pass and 26 fail, exactly the 26 that 57b79dda's tree
+  fails (round 9's list: fixtures the public tree does not ship, the heap's set 2, two image shapes, the wrapper's
+  literal `$HOME` path); the three new ones (`min_lod_clamp_tests`) pass.
+- Host: `tools/test_air_nir_plugin.py` (a new check of the tessellation road and its negative control),
+  `test_embedded_fast.py`, `test_a8_framebuffer_fetch.py`, `test_graphics_bindings.py`, `test_address_snapshot.py`,
+  `test_switch_registry.py` (docs/SWITCHES.md regenerated: NVMTLAirNir.m reads `NVMTL_TESS_ORDER_FLIP`),
+  `test_refusal_reasons.py`, `test_cgl_gld_guard.py`, `test_host_buffer_release.py`, `test_import_cache_limit.py`,
+  `test_mem_unmap_no_double_free.py`, `test_nocopy_once.py`, `test_nvk_local_map.py`, `test_readonly_copyback.py`,
+  `test_static_sampler_device.py`, `test_texrc.py`, `test_submission_copies.py`, `test_slot_handle_guard.py`,
+  `test_surfin_zero_plugin.py`, `test_zink_subdata_stage.py`, `test_opengl_perf.py` pass; `test_fetch_copy.py` skips (no
+  glslangValidator).
+- Left: imageblocks (the translator's tile rewrite and cell staging), null textures, run-time `texture_buffer` arrays
+  (and the SPIR-V road's wrong reads of them), a store to a kept buffer in the translator's raw form (its 4 GiB guard) and
+  64-bit values in kept buffers of mixed element widths; Metal's ordering of raster order groups and its reads of a kept
+  buffer bound at a misaligned offset, on both roads.
 
 ## Phases
 

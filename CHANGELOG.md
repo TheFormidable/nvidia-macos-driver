@@ -2,6 +2,28 @@
 
 ## Not in a package yet
 
+### AIR to NIR, round 10: tessellation, raster order groups, dual-source blending, minimum-LOD clamps, kept buffers
+
+- **Post-tessellation vertex functions take the road** (NVK's AIR-to-NIR frontend, ABI version 8): the frontend makes
+  the tessellation evaluation stage the plugin's tessellation path makes of the translator's module (control points,
+  patch inputs, the instance and the patch id where the plugin's control stage writes them, the spacing and vertex
+  order it sets, the same reflection), and the plugin builds its control and vertex stages from what that stage reads.
+  All 223 of the AIR cache (SceneKit's) translate.
+- **Fixed on both roads: a sample's minimum-LOD clamp was dropped** unless the sample had gradients: `bias(b)` with
+  `min_lod_clamp(c)` read levels below c (D3DMetal's converted shaders carry one on every sample). With the device's
+  `shaderResourceMinLod`, now enabled, the translator and the frontend apply it (an implicit level's `MinLod`, an
+  explicit level raised to it).
+- Dual-source blending (`[[color(0), index(1)]]`), raster order groups on colour inputs, textures and buffers (bound as
+  the translator binds them, without interlock: WindowServer's `inplace_copy` fragments), bicubic samples (the
+  translator's sixteen-texel emulation), and stores and 64-bit values in the buffers the translator keeps bounds-checked
+  (in the form its module has them, read off the module), argument buffers so kept among them, take the road.
+- Still refused, with the reason: imageblocks (tile functions, the translator's cell staging), MPS's null textures,
+  `texture_buffer` arrays indexed at run time (which the SPIR-V road reads wrongly).
+- Tests (`tools/air-nir`): `r_tess_quad`, `r_tess_pow2`, `r_tess_fodd`, `r_tess_feven`, `r_tess_ccw`, `r_tess_tri`,
+  `r_rog`, `r_dual`, `r_minlod`, `r_kept`, `r_oob_misaligned` (render), `tex_bicubic`, `tex_tbarray` (compute); a test
+  can require the road (`road`, `MUST_ROAD`); `plugin_run` draws patches. The AIR-cache sweep: 5,893 functions
+  translate (5,636), every reflection equal to the translator's; WindowServer's functions on disk: 179 of 211 (177).
+
 ### AIR to NIR, round 9: argument buffers, bounds-checked buffers, pixel-coordinate samples, written texture arrays
 
 - **Fixed: Terminal's GPU fault on 3.0.25** (Xid 31, one channel rebuilt): the helper invocations of QuartzCore's
