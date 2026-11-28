@@ -2777,6 +2777,80 @@ tnull_check(struct run *r)
    return ok;
 }
 
+/* simd_fill (metal/simd_fill.metal, PLUGIN_ONLY, round 11): simd_shuffle_and_fill_down/up with a cluster width, the
+ * three-operand forms (the SIMD-group's width, air.get_simdgroup_size.i16), a half4 one, the quad-group builtins; the
+ * references are the translator's lowering (air_calls/shuffle.rs) over each SIMD-group of 32 lanes */
+static const uint16_t sf_dm[6][2] = { { 1, 4 }, { 3, 8 }, { 5, 0 }, { 2, 32 }, { 7, 16 }, { 9, 2 } };
+static void
+sf_setup(struct run *r)
+{
+   float *in = slot(r, 0, 64 * 16);
+   for (unsigned k = 0; k < 64 * 4; k++)
+      in[k] = rndf(-100, 100);
+   uint16_t *dm = slot(r, 1, 6 * 4);
+   memcpy(dm, sf_dm, sizeof sf_dm);
+   slot(r, 2, (18 * 64 + 63 * 18 + 2) * 16);
+   slot(r, 3, 64 * 16);
+}
+
+static unsigned sf_down(unsigned lane, unsigned delta, unsigned mod, bool *inb, unsigned *fl)
+{
+   const unsigned safe = mod ? mod : 1, local = lane % safe, base = lane - local, src = local + delta, wrapped = src % safe;
+   *inb = src < safe;
+   *fl = base + wrapped;
+   return base + (*inb ? src : wrapped);
+}
+static unsigned sf_up(unsigned lane, unsigned delta, unsigned mod, bool *inb)
+{
+   const unsigned safe = mod ? mod : 1, local = lane % safe, base = lane - local;
+   *inb = local >= delta;
+   return base + (local + safe - delta % safe) % safe;
+}
+
+static bool
+sf_check(struct run *r)
+{
+   const float *in = S(r, 0), *out = S(r, 2);
+   const uint32_t *lanes = S(r, 3);
+   float want[4], fill[4];
+   for (unsigned i = 0; i < 64; i++) {
+      const unsigned sg = i / 32 * 32, lane = i % 32;
+      for (unsigned k = 0; k < 6; k++) {
+         bool inb;
+         unsigned fl, dl = sf_down(lane, sf_dm[k][0], sf_dm[k][1], &inb, &fl);
+         for (unsigned c = 0; c < 4; c++) {
+            want[c] = inb ? in[(sg + dl) * 4 + c] : -in[(sg + fl) * 4 + c] - 1000.0f;
+            fill[c] = h2f(f2h(want[c]));   /* the half4 form: data and fill as halves */
+            if (!inb)
+               fill[c] = h2f(f2h(-in[(sg + fl) * 4 + c] - 1000.0f));
+         }
+         if (!check_f4(r, "fill_down", out + (i * 18 + k * 3) * 4, want, 4, 0) ||
+             !check_f4(r, "fill_down half4", out + (i * 18 + k * 3 + 2) * 4, fill, 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, case %u)", i, k), false;
+         const unsigned ul = sf_up(lane, sf_dm[k][0], sf_dm[k][1], &inb);
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = inb ? in[(sg + ul) * 4 + c] : -in[(sg + ul) * 4 + c] - 1000.0f;
+         if (!check_f4(r, "fill_up", out + (i * 18 + k * 3 + 1) * 4, want, 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, case %u)", i, k), false;
+      }
+      bool inb;
+      unsigned fl, dl = sf_down(lane, i % 5, 32, &inb, &fl);
+      for (unsigned c = 0; c < 4; c++)
+         want[c] = inb ? in[(sg + dl) * 4 + c] : -in[(sg + fl) * 4 + c] - 1000.0f;
+      if (!check_f4(r, "fill_down (width)", out + (i * 18 + 18 * 64) * 4, want, 4, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
+      const unsigned ul = sf_up(lane, i % 7, 32, &inb);
+      for (unsigned c = 0; c < 4; c++)
+         want[c] = inb ? in[(sg + ul) * 4 + c] : -in[(sg + ul) * 4 + c] - 1000.0f;
+      if (!check_f4(r, "fill_up (width)", out + (i * 18 + 18 * 64 + 1) * 4, want, 4, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
+      const uint32_t lw[4] = { lane & 3u, i >> 2, 4, 0 };
+      if (!check_u32(r, "quad-group builtins", lanes + i * 4, lw, 4, 0))
+         return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u)", i), false;
+   }
+   return true;
+}
+
 /* tex_bicubic (metal/tex_bicubic.metal, PLUGIN_ONLY, round 10): bicubic samples as the translator emulates them
  * (images/sample.rs lower_pixel_bicubic_sample, catmull_rom_weights), the references step by step as it computes;
  * tex_pixmodes's textures and pixel coordinates, the normalized ones in slot 2 (each pixel one over its axis' size) */
@@ -3260,6 +3334,7 @@ static const struct test tests[] = {
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
    { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tba_setup, tba_check },
    { "tex_null", NULL, "tex_null", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
+   { "simd_fill", NULL, "simd_fill", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, sf_setup, sf_check },
    { "tex_null_tb", "tex_null", "tex_null_tb", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tnull_setup, tnull_check },
    { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },

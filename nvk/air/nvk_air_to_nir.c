@@ -1576,6 +1576,14 @@ air_builtin(struct air_tr *t, const char *kind)
       return nir_imm_int(b, 32);
    if (!strcmp(kind, "air.simdgroup_index_in_threadgroup"))
       return nir_load_subgroup_id(b);
+   /* the quad-group builtins, as the translator binds them (stage_input execution_group_role, quadgroup of 4 lanes):
+    * the lane's index masked to the quad, the threadgroup index shifted, the groups rounded up, the width */
+   if (!strcmp(kind, "air.thread_index_in_quadgroup"))
+      return nir_iand_imm(b, nir_load_subgroup_invocation(b), 3);
+   if (!strcmp(kind, "air.quadgroup_index_in_threadgroup"))
+      return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
+   if (!strcmp(kind, "air.threads_per_quadgroup"))
+      return nir_imm_int(b, 4);
    if (!strcmp(kind, "air.simdgroups_per_threadgroup"))
       return nir_load_num_subgroups(b);
    return NULL;
@@ -2948,9 +2956,11 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          tg_len[a->location] = len;
          tg_used[a->location] = true;
       } else {
-         /* a vertex or fragment function reads only the SIMD-group builtins among the kernel's (Metal allows no more) */
+         /* a vertex or fragment function reads only the SIMD-group and quad-group lane builtins among the kernel's
+          * (Metal allows no more; the translator's stage_execution_group_role takes the lane and the width there) */
          if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && strcmp(a->kind, "air.thread_index_in_simdgroup") &&
-             strcmp(a->kind, "air.threads_per_simdgroup") && strcmp(a->kind, "air.thread_execution_width"))
+             strcmp(a->kind, "air.threads_per_simdgroup") && strcmp(a->kind, "air.thread_execution_width") &&
+             strcmp(a->kind, "air.thread_index_in_quadgroup") && strcmp(a->kind, "air.threads_per_quadgroup"))
             unsupported(t, "the %s argument kind %s", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment", a->kind);
          nir_def *v = air_builtin(t, a->kind);
          if (!v)
@@ -3756,6 +3766,53 @@ air_simd_scalar(struct air_tr *t, const char *fn, bool quad, bool is_float, bool
    return r;
 }
 
+/* air.simd_shuffle_and_fill_down/up(data, fill, delta, modulo), as the translator lowers them (air_calls/shuffle.rs):
+ * the lanes in clusters of modulo (0 taken as 1), a lane's source delta lanes away within its cluster; a source past the
+ * cluster's end (down) or before its start (up) reads the fill value instead, at the wrapped lane (down: the data
+ * lane is the source itself when in the cluster, the fill lane the wrapped one; up: both the lifted, wrapped lane, in
+ * the cluster when the lane's index in it is at least delta). Each component shuffled on its own. */
+static nir_def *
+air_simd_shuffle_fill(struct air_tr *t, bool up, bool is_float, nir_def **s)
+{
+   nir_builder *b = &t->b;
+   nir_def *delta = nir_u2u32(b, s[2]), *modulo = nir_u2u32(b, s[3]);
+   nir_def *safe = nir_bcsel(b, nir_ieq_imm(b, modulo, 0), nir_imm_int(b, 1), modulo);
+   nir_def *lane = nir_load_subgroup_invocation(b);
+   nir_def *local = nir_umod(b, lane, safe), *base = nir_isub(b, lane, local);
+   nir_def *in_bounds, *data_lane, *fill_lane;
+   if (!up) {
+      nir_def *src = nir_iadd(b, local, delta);
+      in_bounds = nir_ult(b, src, safe);
+      nir_def *wrapped = nir_umod(b, src, safe);
+      data_lane = nir_iadd(b, base, nir_bcsel(b, in_bounds, src, wrapped));
+      fill_lane = nir_iadd(b, base, wrapped);
+   } else {
+      nir_def *delta_mod = nir_umod(b, delta, safe);
+      in_bounds = nir_uge(b, local, delta);
+      nir_def *wrapped = nir_umod(b, nir_isub(b, nir_iadd(b, local, safe), delta_mod), safe);
+      data_lane = fill_lane = nir_iadd(b, base, wrapped);
+   }
+   nir_def *x = s[0], *f = s[1];
+   if (x->num_components != f->num_components || x->bit_size != f->bit_size)
+      unsupported(t, "a shuffle and fill of two values of different types");
+   const unsigned bits = x->bit_size;
+   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < x->num_components; i++) {
+      nir_def *xc = nir_channel(b, x, i), *fc = nir_channel(b, f, i);
+      if (bits < 32) {
+         xc = is_float ? nir_f2f32(b, xc) : nir_u2u32(b, xc);
+         fc = is_float ? nir_f2f32(b, fc) : nir_u2u32(b, fc);
+      } else if (bits > 32) {
+         unsupported(t, "a shuffle and fill of %u-bit values", bits);
+      }
+      nir_def *r = nir_bcsel(b, in_bounds, nir_shuffle(b, xc, data_lane), nir_shuffle(b, fc, fill_lane));
+      if (bits < 32)
+         r = is_float ? nir_f2fN(b, r, bits) : nir_u2uN(b, r, bits);
+      comps[i] = r;
+   }
+   return nir_vec(b, comps, x->num_components);
+}
+
 /* air.simd_<fn>[.<s|u>].<type>(value[, lane]) and air.quad_<fn>...: Metal's SIMD-group functions, on NVIDIA's warp of 32
  * (thread_execution_width). Vectors go component by component. */
 static nir_def *
@@ -3791,6 +3848,8 @@ air_simd(struct air_tr *t, const char *name, LLVMValueRef call, nir_def **s, uns
    }
    if (!strcmp(fn, "is_first") && !quad)
       return nir_elect(b, 1);
+   if ((!strcmp(fn, "shuffle_and_fill_down") || !strcmp(fn, "shuffle_and_fill_up")) && !quad && n == 4)
+      return air_simd_shuffle_fill(t, !strcmp(fn, "shuffle_and_fill_up"), is_float, s);
    if (n < 1 || n > 2)
       unsupported(t, "%s with %u operands", name, n);
    nir_def *x = s[0];
@@ -5573,6 +5632,11 @@ air_call(struct air_tr *t, LLVMValueRef call)
       r = air_convert(t, name + strlen("air.convert."), s[0], &rt);
    } else if ((air_starts(name, "air.pack.") || air_starts(name, "air.unpack.")) && returns && nargs == 1) {
       r = air_pack(t, name, s[0], &rt);
+   } else if (air_starts(name, "air.get_simdgroup_size.") && nargs == 0 && returns) {
+      /* the SIMD-group's width, as the translator gives it (integer_simd.rs: the constant 32 of the result's width) */
+      if (rt.is_float || rt.is_pointer || rt.components != 1)
+         unsupported(t, "%s that does not give one integer", name);
+      r = nir_imm_intN_t(b, 32, rt.bits);
    } else if (air_starts(name, "air.get_") && nargs == 1) {
       /* OpenCL's work-item functions, as Apple's OpenCL compiler writes them in AIR */
       static const struct { const char *cl, *metal; } map[] = {
