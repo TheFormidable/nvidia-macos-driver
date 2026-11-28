@@ -993,6 +993,71 @@ rbs_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_pixfrag: pixel-coordinate samples in a fragment function --------------------------------------------------- */
+
+#define RPF_N 12u
+static float rpf_tex[RPF_N * RPF_N];
+
+static void
+rpf_setup(struct rrun *r)
+{
+   setup_quad(r);
+   for (unsigned i = 0; i < RPF_N * RPF_N; i++)
+      rpf_tex[i] = (float)((int)(rnd() % 801) - 400) * 0.01f;
+   MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:RPF_N height:RPF_N mipmapped:NO];
+   td.usage = MTLTextureUsageShaderRead;
+   td.storageMode = MTLStorageModePrivate;
+   r->ftex[0] = [dev newTextureWithDescriptor:td];
+   r->tstage[0] = rbuf(rpf_tex, sizeof rpf_tex);
+   r->tw[0] = r->th[0] = RPF_N;
+   r->tbpp[0] = 4;
+}
+
+/* the translator's linear emulation of a 2D pixel-coordinate sample (airrun_tests.h pxm_linear, for this texture) */
+static float
+rpf_linear(float cx, float cy, int ox, int oy, bool zero)
+{
+   const float c[2] = { cx, cy };
+   const int off[2] = { ox, oy };
+   int base[2];
+   float w[2][2];
+   for (unsigned i = 0; i < 2; i++) {
+      const float f = fminf(fmaxf(c[i], -9.0f), (float)RPF_N + 9.0f), biased = f - 0.5f, fl = floorf(biased);
+      base[i] = (int)fl + off[i];
+      w[i][0] = 1.0f - (biased - fl);
+      w[i][1] = biased - fl;
+   }
+   float acc = 0;
+   for (unsigned tap = 0; tap < 4; tap++) {
+      int x = base[0] + (int)(tap & 1), y = base[1] + (int)(tap >> 1);
+      const bool in = x >= 0 && x < (int)RPF_N && y >= 0 && y < (int)RPF_N;
+      x = x < 0 ? 0 : x >= (int)RPF_N ? (int)RPF_N - 1 : x;
+      y = y < 0 ? 0 : y >= (int)RPF_N ? (int)RPF_N - 1 : y;
+      const float v = zero && !in ? 0.0f : rpf_tex[y * RPF_N + x];
+      const float weight = w[0][tap & 1] * w[1][tap >> 1];
+      acc += weight == 0.0f ? 0.0f : v * weight;
+   }
+   return acc;
+}
+
+static bool
+rpf_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float cx = (float)px * 0.25f - 1.5f, cy = (float)py * 0.25f - 1.5f;
+         const float want[4] = { rpf_linear(cx, cy, 0, 0, false), rpf_linear(cx, cy, 0, 0, true), rpf_linear(cx, cy, 0, 0, false),
+                                 rpf_linear(cx + 0.25f, cy + 0.25f, 1, -1, true) };
+         const float *got = rcol(r, 0, px, py);
+         static const float tol[4] = { 2e-6f, 2e-6f, 0.035f, 2e-6f };   /* the hardware filter's 8-bit weights for [2] */
+         for (unsigned c = 0; c < 4; c++)
+            if (!(fabsf(got[c] - want[c]) <= tol[c]))
+               return snprintf(r->why, sizeof r->why, "pixel (%u,%u) component %u: %.7g, want %.7g (tolerance %g)", px, py, c,
+                               got[c], want[c], tol[c]), false;
+      }
+   return true;
+}
+
 /* ---- r_fetch, r_fetch_mrt, r_fetch_noatt: framebuffer fetch -------------------------------------------------------- */
 
 /* With NVMTL_NO_FBFETCH=1 (WindowServer's default) the plugin binds the zeroed dummy image for every [[color(n)]] read,
@@ -1377,6 +1442,9 @@ static const struct rtest rtests[] = {
      "descriptor, on both roads)" },
    { "r_oob_nospace", "r_oob_nospace", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup,
      rob_check, "exact; r_oob without air.address_space in its metadata" },
+   { "r_pixfrag", "r_pixfrag", "rpf_vs", "rpf_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rpf_setup, rpf_check,
+     "2e-6; the hardware filter's sample at level(0) 0.035 (8-bit weights); the implicit-level ones the translator's fetch "
+     "emulation" },
    { "r_bsearch", "r_bsearch", "rbs_vs", "rbs_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rbs_setup, rbs_check,
      "exact; a phi and a select of pointers into a bounds-checked buffer, the bound past its end reading 0" },
    { "r_oob2", "r_oob2", "ro2_vs", "ro2_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob2_setup, rob2_check,

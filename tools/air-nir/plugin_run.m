@@ -167,6 +167,7 @@ tex_image(struct run *r, unsigned i, VkImageViewType vt, VkFormat fmt, uint32_t 
    t->depth = fmt == VK_FORMAT_D32_SFLOAT;
    MTLTextureDescriptor *td = [MTLTextureDescriptor new];
    switch (vt) {
+   case VK_IMAGE_VIEW_TYPE_1D: td.textureType = MTLTextureType1D; break;
    case VK_IMAGE_VIEW_TYPE_2D: td.textureType = MTLTextureType2D; break;
    case VK_IMAGE_VIEW_TYPE_2D_ARRAY: td.textureType = MTLTextureType2DArray; td.arrayLength = layers; break;
    case VK_IMAGE_VIEW_TYPE_3D: td.textureType = MTLTextureType3D; td.depth = d; break;

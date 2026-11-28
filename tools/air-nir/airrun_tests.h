@@ -2370,6 +2370,240 @@ tex_pixel_check(struct run *r)
    return true;
 }
 
+/* tex_pixmodes, tex_pixwrap (metal/tex_pixmodes.metal, metal/tex_pixwrap.metal, PLUGIN_ONLY): pixel-coordinate
+ * samples as the translator lowers them, the references here step by step as its emulation computes (images/sample.rs
+ * lower_pixel_linear_sample and clamp_pixel_coord_component_finite, fetch_coord.rs, gather.rs lower_pixel_gather_2d).
+ * Textures r32f: 0 1D of 7, 1 2D 5x6 with 2 levels, 2 3D 3x4x2, 3 2D array 4x3 of 3 layers; slot 0 the 64 threads'
+ * coordinates (x, y, z, layer), slot 1 16 samples per thread. Address modes: 0 clamp to zero, 1 clamp to edge, 2
+ * repeat, 3 mirrored repeat. */
+static const uint32_t pxm_size[4][3] = { { 7, 1, 1 }, { 5, 6, 1 }, { 3, 4, 2 }, { 4, 3, 1 } };
+
+static void
+pxm_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_1D, VK_FORMAT_R32_SFLOAT, 4, 7, 1, 1, 1, 1, false);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R32_SFLOAT, 4, 5, 6, 1, 1, 2, false);
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_3D, VK_FORMAT_R32_SFLOAT, 4, 3, 4, 2, 1, 1, false);
+   tex_image(r, 3, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_FORMAT_R32_SFLOAT, 4, 4, 3, 1, 3, 1, false);
+   for (unsigned k = 0; k < 4; k++) {
+      float *f = r->tex[k].stage.map;
+      for (size_t q = 0; q < r->tex[k].stage.size / 4; q++)
+         f[q] = (float)((int)(rnd() % 801) - 400) * 0.01f;
+   }
+   float *c = slot(r, 0, 64 * 16);
+   for (unsigned i = 0; i < 64; i++) {
+      c[i * 4 + 0] = (i % 13) == 7 ? NAN : -3.0f + fmodf((float)i * 0.37f, 14.0f);
+      c[i * 4 + 1] = (i % 4) == 1 ? (float)(i % 9) - 1.5f : -2.0f + fmodf((float)i * 0.53f, 10.0f);
+      c[i * 4 + 2] = -1.0f + fmodf((float)i * 0.29f, 5.0f);
+      c[i * 4 + 3] = (float)(i % 5);   /* layers 3 and 4 are past the last: the last */
+   }
+   slot(r, 1, 64 * 16 * 16);
+}
+
+/* the texel of texture k at level m, as a float4 an r32f fetch gives */
+static void
+pxm_texel(struct run *r, unsigned k, unsigned m, int x, int y, int zl, float o[4])
+{
+   o[0] = *(const float *)tex_at(r, k, m, (uint32_t)x, (uint32_t)y, (uint32_t)zl);
+   o[1] = o[2] = 0;
+   o[3] = 1;
+}
+
+static uint32_t pxm_dim(unsigned k, unsigned m, unsigned axis) { const uint32_t v = pxm_size[k][axis] >> m; return v ? v : 1; }
+
+/* clamp_pixel_coord_component_finite */
+static float
+pxm_finite(float c, uint32_t size, unsigned mode)
+{
+   const float sf = (float)size;
+   if (mode != 2 && mode != 3)
+      return fminf(fmaxf(c, -9.0f), sf + 9.0f);   /* NaN to the low end, as NClamp */
+   const float period = mode == 2 ? sf : sf * 2.0f;
+   const float fin = fminf(fmaxf(c, -4194304.0f), 4194304.0f);
+   return fin - period * floorf(fin / period);
+}
+
+/* build_pixel_fetch_coord_from_signed_components, one axis; *in cleared where a clamp-to-zero axis is outside */
+static int
+pxm_addr(int c, uint32_t size, unsigned mode, bool *in)
+{
+   const int sz = (int)size, below = c < 0, nonneg = below ? 0 : c, max = sz - 1, above = nonneg > max;
+   if (mode == 0 && (below || above))
+      *in = false;
+   if (mode == 2)
+      return ((c % sz) + sz) % sz;
+   if (mode == 3) {
+      const int period = 2 * sz, phase = ((c % period) + period) % period;
+      return phase >= sz ? period - 1 - phase : phase;
+   }
+   return above ? max : nonneg;
+}
+
+static int pxm_layer(float w, uint32_t count) { const uint32_t l = (uint32_t)w; return (int)(l < count ? l : count - 1); }
+
+static void
+pxm_fetch(struct run *r, unsigned k, unsigned m, unsigned dims, const int *ci, const unsigned *mode, int layer, float o[4])
+{
+   bool in = true;
+   int a[3] = { 0, 0, 0 };
+   for (unsigned i = 0; i < dims; i++)
+      a[i] = pxm_addr(ci[i], pxm_dim(k, m, i), mode[i], &in);
+   pxm_texel(r, k, m, a[0], a[1], layer >= 0 ? layer : a[2], o);
+   if (!in)
+      o[0] = o[1] = o[2] = o[3] = 0;
+}
+
+/* lower_pixel_linear_sample */
+static void
+pxm_linear(struct run *r, unsigned k, unsigned m, unsigned dims, const float *c, const int *off, const unsigned *mode,
+           int layer, float o[4])
+{
+   int base[3];
+   float frac[3], w[3][2];
+   for (unsigned i = 0; i < dims; i++) {
+      const float f = pxm_finite(c[i], pxm_dim(k, m, i), mode[i]), biased = f - 0.5f, fl = floorf(biased);
+      base[i] = (int)fl + (off ? off[i] : 0);
+      frac[i] = biased - fl;
+      w[i][0] = 1.0f - frac[i];
+      w[i][1] = frac[i];
+   }
+   float acc[4] = { 0, 0, 0, 0 };
+   for (unsigned tap = 0; tap < (1u << dims); tap++) {
+      int ci[3];
+      for (unsigned i = 0; i < dims; i++)
+         ci[i] = base[i] + (int)((tap >> i) & 1);
+      float col[4];
+      pxm_fetch(r, k, m, dims, ci, mode, layer, col);
+      float weight = w[0][tap & 1];
+      for (unsigned i = 1; i < dims; i++)
+         weight *= w[i][(tap >> i) & 1];
+      for (unsigned q = 0; q < 4; q++)
+         acc[q] += weight == 0.0f ? 0.0f : col[q] * weight;
+   }
+   memcpy(o, acc, sizeof acc);
+}
+
+/* build_pixel_fetch_coord: the texel at floor(coord) + offset */
+static void
+pxm_nearest(struct run *r, unsigned k, unsigned m, unsigned dims, const float *c, const int *off, const unsigned *mode,
+            int layer, float o[4])
+{
+   int ci[3];
+   for (unsigned i = 0; i < dims; i++)
+      ci[i] = (int)floorf(pxm_finite(c[i], pxm_dim(k, m, i), mode[i])) + (off ? off[i] : 0);
+   pxm_fetch(r, k, m, dims, ci, mode, layer, o);
+}
+
+/* lower_pixel_gather_2d: component comp of the texels (0,1), (1,1), (1,0), (0,0) from floor(coord - 0.5) + offset */
+static void
+pxm_gather(struct run *r, unsigned k, const float *c, const int *off, const unsigned *mode, unsigned comp, float o[4])
+{
+   static const int texel[4][2] = { { 0, 1 }, { 1, 1 }, { 1, 0 }, { 0, 0 } };
+   const float c2[2] = { c[0] - 0.5f, c[1] - 0.5f };
+   for (unsigned t = 0; t < 4; t++) {
+      int ci[2];
+      for (unsigned i = 0; i < 2; i++)
+         ci[i] = (int)floorf(pxm_finite(c2[i], pxm_dim(k, 0, i), mode[i])) + (off ? off[i] : 0) + texel[t][i];
+      float col[4];
+      pxm_fetch(r, k, 0, 2, ci, mode, -1, col);
+      o[t] = col[comp];
+   }
+}
+
+struct pxm_case {
+   char op;                 /* l linear, n nearest, g gather, h the hardware filter (linear) */
+   unsigned tex, level, mode, comp;
+   int off[3];
+   bool has_off;
+};
+
+static bool
+pxm_check_cases(struct run *r, const struct pxm_case *cases)
+{
+   const float *cs = S(r, 0), *got = S(r, 1);
+   if (getenv("PXM_ALL")) {   /* every failing sample, for a diagnosis */
+      for (unsigned j = 0; j < 16; j++) {
+         unsigned bad = 0;
+         for (unsigned i = 0; i < 64; i++) {
+            const struct pxm_case *e = &cases[j];
+            const unsigned dims = e->tex == 0 ? 1 : e->tex == 2 ? 3 : 2;
+            const unsigned mode[3] = { e->mode, e->mode, e->mode };
+            const float *c = cs + i * 4;
+            const int layer = e->tex == 3 ? pxm_layer(c[3], 3) : -1;
+            float want[4];
+            if (e->op == 'g') pxm_gather(r, e->tex, c, e->has_off ? e->off : NULL, mode, e->comp, want);
+            else if (e->op == 'n') pxm_nearest(r, e->tex, e->level, dims, c, e->has_off ? e->off : NULL, mode, layer, want);
+            else pxm_linear(r, e->tex, e->level, dims, c, e->has_off ? e->off : NULL, mode, layer, want);
+            for (unsigned q = 0; q < 4; q++)
+               bad += !(fabsf(got[(i * 16 + j) * 4 + q] - want[q]) <= (e->op == 'h' ? 0.035f : 2e-6f)) && !(e->op == 'h' && isnan(c[0]));
+         }
+         fprintf(stderr, "pxm sample %u: %u lanes differ\n", j, bad);
+      }
+   }
+   for (unsigned i = 0; i < 64; i++) {
+      const float *c = cs + i * 4;
+      for (unsigned j = 0; j < 16; j++) {
+         const struct pxm_case *e = &cases[j];
+         const unsigned dims = e->tex == 0 ? 1 : e->tex == 2 ? 3 : 2;
+         const unsigned mode[3] = { e->mode, e->mode, e->mode };
+         const int layer = e->tex == 3 ? pxm_layer(c[3], 3) : -1;
+         float want[4];
+         float tol = 2e-6f;
+         if (e->op == 'g')
+            pxm_gather(r, e->tex, c, e->has_off ? e->off : NULL, mode, e->comp, want);
+         else if (e->op == 'n')
+            pxm_nearest(r, e->tex, e->level, dims, c, e->has_off ? e->off : NULL, mode, layer, want);
+         else
+            pxm_linear(r, e->tex, e->level, dims, c, e->has_off ? e->off : NULL, mode, layer, want);
+         if (e->op == 'h') {
+            /* NVIDIA's filter weights have 8 bits: within 4/512 of each of the four texels' 4.0 at most */
+            if (isnan(c[0]))
+               continue;   /* the hardware's NaN coordinate is its own */
+            tol = 0.035f;
+         }
+         if (!check_f4(r, "sample", got + (i * 16 + j) * 4, want, 4, tol)) {
+            /* where the value read is in the texture, when it is one texel's */
+            char where[64] = "";
+            const struct timg *x = &r->tex[e->tex];
+            for (unsigned m = 0; m < x->mips && !where[0]; m++)
+               for (uint32_t zl = 0; zl < (x->d > 1 ? mip_size(x->d, m) : x->layers) && !where[0]; zl++)
+                  for (uint32_t y = 0; y < mip_size(x->h, m) && !where[0]; y++)
+                     for (uint32_t q = 0; q < mip_size(x->w, m) && !where[0]; q++)
+                        if (*(const float *)tex_at(r, e->tex, m, q, y, zl) == got[(i * 16 + j) * 4])
+                           snprintf(where, sizeof where, ", texel (%u,%u,%u) of level %u", q, y, zl, m);
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, sample %u, coord %g %g %g %g%s)",
+                            i, j, c[0], c[1], c[2], c[3], where), false;
+         }
+      }
+   }
+   return true;
+}
+
+static bool
+pxm_check(struct run *r)
+{
+   static const struct pxm_case cases[16] = {
+      { 'l', 0, 0, 1 }, { 'l', 0, 0, 0 }, { 'n', 0, 0, 0 }, { 'h', 1, 0, 1 }, { 'l', 1, 0, 0 }, { 'l', 1, 1, 1 },
+      { 'l', 1, 0, 1, 0, { 1, -1 }, true }, { 'n', 1, 0, 1, 0, { -2, 1 }, true }, { 'l', 2, 0, 0 }, { 'n', 2, 0, 1 },
+      { 'l', 3, 0, 1 }, { 'n', 3, 0, 0 }, { 'g', 1, 0, 1, 0 }, { 'g', 1, 0, 0, 1, { 1, 0 }, true }, { 'n', 0, 0, 1 },
+      { 'l', 2, 0, 1 },
+   };
+   return pxm_check_cases(r, cases);
+}
+
+static bool
+pxw_check(struct run *r)
+{
+   static const struct pxm_case cases[16] = {
+      { 'l', 0, 0, 2 }, { 'l', 0, 0, 3 }, { 'l', 1, 0, 2 }, { 'l', 1, 0, 3, 0, { 1, 1 }, true }, { 'l', 2, 0, 2 },
+      { 'n', 2, 0, 3 }, { 'l', 3, 0, 3 }, { 'n', 1, 1, 2 }, { 'g', 1, 0, 2, 0 }, { 'g', 1, 0, 3, 0, { -1, 2 }, true },
+      { 'n', 0, 0, 3 }, { 'n', 3, 0, 2 }, { 'l', 1, 1, 2 }, { 'l', 2, 0, 3 }, { 'n', 0, 0, 2 },
+      { 'n', 1, 0, 3, 0, { 2, -1 }, true },
+   };
+   return pxm_check_cases(r, cases);
+}
+
+
 /* tex_argpixel: argument samplers bound with pixel coordinates (round 5: their state reaches the frontend) */
 static void
 tex_argpixel_setup(struct run *r)
@@ -2763,6 +2997,9 @@ static const struct test tests[] = {
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },
+   { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
+   { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
+   { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
    { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,
      fc_texture_expect },

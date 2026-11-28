@@ -53,6 +53,15 @@ xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/r_oob_nospace.ll" "$HERE/meta
   xcrun -sdk macosx metal -c -o "$OUT/air/r_oob_nospace.air" "$OUT/air/r_oob_nospace.ll" &&
   xcrun -sdk macosx metallib -o "$OUT/air/r_oob_nospace.metallib" "$OUT/air/r_oob_nospace.air" ||
   { echo "plugin-run.sh: r_oob_nospace not made" >&2; exit 2; }
+# tex_pixwrap: its pixel-coordinate samplers' state words rewritten, clamp_to_edge to repeat and clamp_to_zero to
+# mirrored_repeat (Metal's compiler allows neither with coord::pixel; the translator emulates both)
+xcrun -sdk macosx metal -S -emit-llvm -o "$OUT/air/tex_pixwrap.ll" "$HERE/metal/tex_pixwrap.metal" &&
+  perl -i -pe 's/(\@__air_sampler_state\S* = internal addrspace\(2\) constant \[2 x i64\] \[i64 )(\d+)/$1 . ((($2 & 0x1ff) == 0x49) ? (($2 & ~0x1ff) | 0x92) : (($2 & 0x1ff) == 0) ? (($2 & ~0x1ff) | 0xdb) : $2)/e' "$OUT/air/tex_pixwrap.ll" &&
+  [ "$(perl -ne 'print "$1\n" if /\@__air_sampler_state\S* = internal addrspace\(2\) constant \[2 x i64\] \[i64 (\d+)/' "$OUT/air/tex_pixwrap.ll" |
+       perl -ne '$n++ if (($_ & 0x1ff) == 0x92 || ($_ & 0x1ff) == 0xdb); END { print $n + 0 }')" = 4 ] &&
+  xcrun -sdk macosx metal -c -o "$OUT/air/tex_pixwrap.air" "$OUT/air/tex_pixwrap.ll" &&
+  xcrun -sdk macosx metallib -o "$OUT/air/tex_pixwrap.metallib" "$OUT/air/tex_pixwrap.air" ||
+  { echo "plugin-run.sh: tex_pixwrap not made" >&2; exit 2; }
 # PLUGIN_RUN_EXTRA_AIR: a folder of more .metallib files for the tests that name them (r_qcblit: qc_blit.metallib, made
 # from QuartzCore's own functions, which are not in this tree)
 if [ -n "${PLUGIN_RUN_EXTRA_AIR:-}" ]; then cp "$PLUGIN_RUN_EXTRA_AIR"/*.metallib "$OUT/air/" || exit 2; fi
