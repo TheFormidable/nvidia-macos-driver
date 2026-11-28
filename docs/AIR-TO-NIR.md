@@ -1345,7 +1345,50 @@ their function constants: with each constant all 0 and all 1, 24 variants now tr
 initializer-computed, so their reflections are not compared) and 15 are refused for other reasons. `tex_null` and
 `tex_null_tb` (compute, `MUST_ROAD`) pass on both roads, and their offline reflections equal the translator's.
 
-**Imageblocks stay refused**, as in round 10.
+**SIMD-group and quad-group calls of the tile kernels (after 3.0.28).** QuartzCore's tile blur kernels use
+`simd_shuffle_and_fill_down/up` with a cluster width, the quad-group builtins and the SIMD-group width as a call. The
+frontend now lowers the four-operand shuffle and fill as the translator does (`air_calls/shuffle.rs`: the lanes in
+clusters of the modulo, 0 taken as 1, a source past the cluster's end or before its start reading the fill value at the
+wrapped lane), `air.get_simdgroup_size` as 32, `thread_index_in_quadgroup` as the lane masked to 3,
+`quadgroup_index_in_threadgroup` as the local index shifted by 2, `threads_per_quadgroup` as 4 and
+`quadgroups_per_threadgroup` as (threads per threadgroup + 3) / 4 (`collapse.rs` `LoadKernelGroupsPerThreadgroup`).
+
+**Tile functions on the road (after 3.0.28).** A tile function (`NVMTL_TILE_SHADING=1`) runs as the translator's
+rewrite of its AIR: a compute kernel whose colour attachments are `read_write` textures at 120 + A, dispatched once per
+tile between two render-pass segments (`dispatchThreadsPerTile`). The rewrite was marked SPIR-V-only with the mesh,
+object and stage-in rewrites; it is a compute kernel's AIR like any other and now asks the road as a kernel does (the
+build line names the road). On the card the tile function changed nothing on either road: Metal asks only for
+render-target usage of an attachment a tile function reads and writes, and the compute encoder gave a storage twin only
+to a texture made with `ShaderWrite`, so the attachments were bound to the dummy. The attachments of that dispatch now
+get their storage twins whatever their usage (`cb->_tileAttach`). The tile function itself is never a pipeline (its
+implicit imageblock stays refused, the message now says the rewrite takes the road). A multisampled tile function stays
+out of reach on both roads: the translator makes no library function of one that reads its samples in a loop (its
+library lowering of `air.load.implicit_imageblock` takes the fourth operand, the sample index, as the data rate and
+needs it constant; `air.get_imageblock_samples` it knows only inside its tile rewrite), so `newFunctionWithName` fails
+before any pipeline; the frontend refuses that rewrite's `texture2d_ms` `read_write` attachments with its reason.
+
+**From the cache's refusals, four more calls as the translator makes them (after 3.0.28).**
+`air.mad_sat.s/u.i32` (a * b + c in 64 bits, clamped, narrowed: `lower_wide_multiply`; a vector or another width the
+translator refuses, and so does the frontend); `air.gather_depth_2d` and `_2d_array` (component 0 through
+`lower_gather_2d`, offsets as a gather's; a cube or a pixel-coordinate sampler stays refused); `depth2d_ms` and
+`depth2d_ms_array` read by sample (`txf_ms`, the sample operand where `lower_read_depth` takes it, by the operand
+count) and queried; and a write-only `texturecube`, which the translator makes a 2D-array image when it never samples
+it by direction (`discovery.rs`) and writes at (x, y, face): the frontend does the same, the face where an array's layer
+is. The translator has no array-size query of a depth texture (`air.get_array_size_depth_*`) and makes no function of
+one; the frontend took it and now refuses it. A `read_write` or sampled cube read (the translator's sample at the
+texel centre, at level 0 whatever the level operand), a written cube array and a written depth texture stay refused.
+
+**Per-sample shading on the road's render path (fixed after 3.0.28).** `spirv_to_nir` marks a fragment module with a
+`SampleId` or a `Sample`-decorated input in its interface as shaded per sample, and NVK then runs it once per sample
+(`minSampleShading` 1). The frontend's NIR did not, so `[[sample_id]]` read 0 in one invocation per pixel and a
+`[[sample_perspective]]` varying was interpolated once per pixel. It now marks both as `spirv_to_nir` does (found by
+`tex_depth_ms`, whose setup draws each sample's depth through `[[sample_id]]`).
+
+**Explicit imageblocks stay refused.** `imageblock_data` and `write_imageblock_slice_to_texture_2d` (MPS's Lanczos and
+DoG kernels, CoreAnimation's variable blur, 7 in the cache and 3 of WindowServer's) are staged by the translator in a
+workgroup array whose width, capacity and cell scale its IR analysis infers (`native/ir`: cross-coordinate cells, the
+APV extent, `threads_per_threadgroup`, the lane scales, a non-zero byte field) and copied through its slice writer;
+matching those inferences exactly is a port of that analysis, not done here.
 
 ### Tested (round 11)
 
@@ -1356,6 +1399,13 @@ initializer-computed, so their reflections are not compared) and 15 are refused 
 | tex_tbarray | `texture_buffer` arrays read and written at run-time indices (now `MUST_ROAD`) | exact |
 | r_kept_mixed | a kept array of structs of mixed widths: a ulong straddling the end reads 0, its store is dropped whole | exact |
 | r_kept_guarded | a kept word array (raw form) stored to as floats, uints and float2s: past 4 GiB dropped, past the end dropped, a straddling float2 split | exact |
+| tex_null, tex_null_tb | (after 3.0.28) the translator's null-texture placeholders, at an argument's own index and after a `texture_buffer` | exact |
+| simd_fill | (after 3.0.28) shuffle and fill with a cluster width, the SIMD-group width as the modulo, a half4 form, the quad-group builtins | exact |
+| r_tile | (after 3.0.28, `NVMTL_TILE_SHADING=1`) a tile function over 16x16 tiles after a draw into RGBA32Float and R32Float: red times setTileBytes' 2, the second attachment plus one; its compute pipelines on the road | exact |
+| mad_sat, mad_sat_v | (after 3.0.28) `madsat` on i32, signed and unsigned, edge operands; the v4i32 form refused | exact |
+| tex_gather_depth | (after 3.0.28) depth2d and depth2d_array gathers with and without offsets, clamped | exact |
+| tex_depth_ms, tex_depth_asize | (after 3.0.28, plugin only) depth2d_ms and depth2d_ms_array drawn per sample, read by sample and queried; a depth array's size query refused | exact |
+| tex_cube_write | (after 3.0.28) six faces of a half and a uint cube written, read back face by face, their sizes | exact |
 
 `r_oob_misaligned`, `r_dummy_rw` and `tex_tbarray` fail on both roads with 3.0.27's plugin, NVK and translator
 (`r11/oldbuild.sh`); `r_kept_mixed` and `r_kept_guarded` take the SPIR-V road there (refused). The translator's
@@ -1395,8 +1445,35 @@ initializer-computed, so their reflections are not compared) and 15 are refused 
   `test_surfin_zero_plugin.py`, `test_zink_subdata_stage.py` pass; `test_fetch_copy.py` skips (no glslangValidator);
   `test_nvk_nak_switch_key.py` fails as it fails at 941c6185 (the frontend's `NVMTL_AIR_NIR_DEBUG` and `_DUMP` reads
   are in neither its key table nor its exempt list).
-- Left: imageblocks (its tile rewrite and cell staging), null `texture_buffer`s and run-time choices of handles, raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a
-  multiple of 4 (or of 8 for 64-bit elements).
+- After 3.0.28, the sweeps again with the final NVK (`r11/sweeps3.sh`, `logs/r11/*rsweep-3*`): the AIR cache 5,910 of
+  10,814 (17 more: the cube writers, the depth gathers, the multisampled depth fragments), every reflection equal
+  (different 0, not reflected 0), the same two crashes; the refusals that are not a missing function-constant value
+  went from 125 to 102 (gone: the depth gathers 5, written cubes 9 but one that also reads a sampled cube, multisampled
+  depth 4, `thread_index_in_quadgroup` 4, which now stop at their constants, `mad_sat` 2). WindowServer's set unchanged
+  (179 of 211; its 13 implicit imageblocks are tile functions, whose rewrite now takes the road), its constant variants
+  12 equal and 14 not reflected as before.
+- After 3.0.28 (`r11/final2-runs.sh`, the same set with the new tests; the four fault counters 0 before and after every
+  run; WindowServer logged no GPU error): with `NVMTL_AIR_NIR=1` 131 pass twice and once with the first run's caches
+  (121 on the road, the same six on the SPIR-V road as they must, four refused by both: `ib_refuse`, `tex_pixborder`,
+  `mad_sat_v`, `tex_depth_asize`), `grid2d_base`, `oob_kernel` and `r_tile` (it needs `NVMTL_TILE_SHADING=1`) skipped;
+  with `NVMTL_AIR_NIR=0` 130 pass twice, `r_handlechoice` skipped as well. `PLUGIN_RUN_CORRUPT=1`: every test that
+  dispatches or draws fails on both roads (the eight that pass are the refusals). Compute with `NVMTL_COMPUTE_ROBUST=1`
+  77 pass on each road; fetch off and by copies, the pixel-coordinate set without the hardware filter and the
+  argument-buffer tests 150 of 150 pass on both roads; the dumped attachments are equal on both roads (19 of 19, and
+  `r_tile`'s two with `NVMTL_TILE_SHADING=1`, where it passes on both); the `ws_marker` trio passes. With 3.0.27's plugin
+  and NVK (`TESTS=... r11/oldbuild.sh`) the road run fails `r_tile`, `mad_sat`, `tex_gather_depth`, `tex_depth_ms`,
+  `tex_cube_write` (the SPIR-V road taken) and `tex_depth_asize` (the road taken), and the SPIR-V run fails `r_tile`
+  (its attachments unchanged). `airrun` (NVK directly, without the plugin): 11 pass, 50 refused, 0 fail; its request
+  carries neither the plugin's unchecked-compute flag nor descriptor buffers, so since round 9 the frontend refuses
+  there every kernel that indexes a buffer with a loaded value (`plugin_run` is the harness that runs them).
+  Host: `test_air_nir_plugin.py` (two new checks: the tile rewrite asks the road; the tile dispatch's attachments get
+  twins; each fails without its change), `test_fence_wiring_plugin.py`, `test_no_category_shadowing.py` and the rest of
+  the list above as before (`test_nvk_nak_switch_key.py` failing as at 941c6185). The translator is unchanged since
+  3.0.28.
+- Left: explicit imageblocks (the translator's cell staging), multisampled tile functions (the translator's library
+  path), sampled and `read_write` cube reads and written cube arrays, null `texture_buffer`s and run-time choices of
+  handles, raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a multiple of 4 (or
+  of 8 for 64-bit elements).
 
 ## Phases
 

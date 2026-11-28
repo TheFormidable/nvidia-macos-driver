@@ -2,11 +2,25 @@
 
 ## Not in a package yet
 
-### AIR to NIR, after 3.0.28: null textures
+### AIR to NIR, after 3.0.28: null textures, tile functions, depth gathers and multisampled reads, written cubes
 
 - Null textures (`texture2d<float>()`, MPS's and RenderBox's `air.get_null_texture_*`) take the road (NVK's frontend,
   ABI version 9): the translator's placeholder image, at the texture binding it lands on (often an argument's own), and
   `is_null_texture` as the translator answers it. Tests: `tex_null`, `tex_null_tb`.
+- **Fixed on both roads: a tile function (`NVMTL_TILE_SHADING=1`) changed nothing** - its colour attachments, made with
+  render-target usage only as Metal allows, were bound to the dummy; that dispatch now gives them storage twins. Its
+  compute kernel (the translator's rewrite) now takes the road. A multisampled tile function that loops over its
+  samples is still refused by the translator's library path (both roads). Test: `r_tile`.
+- **Fixed on the road: a fragment reading `[[sample_id]]` or a sample-interpolated varying ran once per pixel**; it
+  is now shaded per sample, as the SPIR-V road's module is.
+- On the road, as the translator makes them: `simd_shuffle_and_fill_down/up` with a cluster width, the quad-group
+  builtins and `quadgroups_per_threadgroup`, the SIMD-group width call; `mad_sat` on 32-bit scalars; depth gathers
+  (2D, 2D array); `depth2d_ms` and `depth2d_ms_array` reads and queries; write-only `texturecube`s (a 2D-array image
+  written at the face). The frontend now refuses what the translator refuses there (a vector `mad_sat`, a depth
+  texture's array-size query). Tests: `simd_fill`, `mad_sat`, `mad_sat_v`, `tex_gather_depth`, `tex_depth_ms`,
+  `tex_depth_asize`, `tex_cube_write`.
+- Still refused, with the reason: explicit imageblocks (the translator's cell staging), sampled and `read_write` cube
+  reads, written cube arrays, a null `texture_buffer`, run-time choices of handles.
 
 ### AIR to NIR, round 11: kept buffers where Metal binds them, unbound bindings, texture_buffer arrays, the raw form
 
