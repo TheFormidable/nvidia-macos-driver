@@ -127,8 +127,8 @@ def size_twin(s):
 def render_fallback(s):
     dv = strip_comments(s["plugin/NVMTLDevice.m"])
     m = body(dv, '- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {')
-    ask = m.find('nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, &nirWhy) &&')
-    make = m.find('!nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, &ps->_p, &nirWhy)')
+    ask = m.find('nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, tess, &nirWhy) &&')
+    make = m.find('!nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, tess ? &rtd : NULL, &ps->_p, &nirWhy)')
     note = m.find('nvmtl_air_nir_render_note(vf, noFrag ? nil : ff, onNir, onNir ? nil : nirWhy,')
     ret = m.find('return ps;', note)
     link, spv = m.find('NSData *flk = nvmtl_varying_link(vf, ffx);'), m.find('prc = nvmtl_vk_pipeline_create_rt(')
@@ -137,7 +137,7 @@ def render_fallback(s):
     return 0 <= mv < ask < make < note < ret < link < spv and 'if (onNir) {' in m[note:ret]
 
 RENDER_REFUSALS = ('if (noFrag || !ff)', 'if (vf->_spirvOnly || ff->_spirvOnly)', 'if (getenv("NVMTL_BDA_PROBE_FILE"))',
-                   'if (a8mask)', 'if (amplified)', 'if (!vf->_spirvLazy && nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps))',
+                   'if (a8mask)', 'if (amplified)', 'if (tess && !g_air_nir_v8)',
                    'if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32)',
                    'if (!ff->_spirvLazy && nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length) && !nvmtl_air_nir_fetch_ok())',
                    'if (!ff->_spirvLazy && nvmtl_spirv_stencil_emu(ff->_spirv.bytes, ff->_spirv.length))',
@@ -146,6 +146,26 @@ def render_rewrites(s):
     an = strip_comments(s["plugin/NVMTLAirNir.m"])
     w = body(an, 'BOOL nvmtl_air_nir_render_wanted(')
     return all(r in w for r in RENDER_REFUSALS) and w.count('return NO;') >= len(RENDER_REFUSALS)
+
+# --- round 10: post-tessellation vertex functions on the road ---------------------------------------------------------
+def tess_road(s):
+    an, vk, dv = strip_comments(s["plugin/NVMTLAirNir.m"]), strip_comments(s["plugin/nvmtl_vk.c"]), strip_comments(s["plugin/NVMTLDevice.m"])
+    fl = body(an, 'static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)')
+    rp = body(an, 'int nvmtl_air_nir_render_pipeline(')
+    spv = body(vk, 'const void *vin_, uint32_t samples, const nvk_tess_desc *td, const nvk_rt *rt, void *out_, int uniform_layout)\n{')
+    nirp = body(vk, 'int nvmtl_vk_pipeline_create_nir(')
+    m = body(dv, '- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {')
+    # the modes the SPIR-V road sets on its module, the same expressions in the road's request
+    modes = ('td->partition == 2 ? 3' in spv and 'td->partition == 3 ? 2' in spv and '((td->winding == 0) != fl) ? 5 : 4' in spv
+             and '@(td->partition == 2 ? 3u : td->partition == 3 ? 2u : 1u)' in rp and '@(((td->winding == 0) != fl) ? 5u : 4u)' in rp)
+    return (modes and '(render && g_air_nir_v8 ? NVMTL_AIR_NIR_TESS : 0)' in fl
+            and 'vres.tess_domain != td->patch_type || vres.tess_control_points != td->n' in rp
+            and 'nvmtl_air_nir_tese(vres, &t0, &why)' in nirp
+            and 'nvmtl_tess_make_tcs(&t0, td, vin, pidloc, out->tess_vb, &nvb, &tcn, why2, sizeof why2)' in nirp
+            and 'if (!td && nvmtl_vertex_input_build(' in nirp
+            and 'if (td) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, NVMTL_TESS_PC_BYTES };' in nirp
+            and 'td ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : VK_SHADER_STAGE_VERTEX_BIT' in nirp
+            and m.count('nvmtl_tess_desc_make(vf, d, ') == 2)
 
 # --- round 8: framebuffer fetch and arrays of textures on the road ----------------------------------------------------
 def fetch_road(s):
@@ -304,6 +324,9 @@ CHECKS = [
      ("plugin/NVMTLDevice.m", '          return ps;\n      }\n', '      }\n')),
     ("every pipeline whose stages the SPIR-V road rewrites stays on it (A8, multiview, tessellation, GL, fetch, stencil, ...)",
      render_rewrites, ("plugin/NVMTLAirNir.m", '    if (a8mask) {', '    if (0) {')),
+    ("a post-tessellation pipeline takes the road with a version-8 NVK: the SPIR-V road's modes, control and vertex stages "
+     "from what the frontend's evaluation stage reads, its description made as the SPIR-V road's", tess_road,
+     ("plugin/NVMTLAirNir.m", '@(td->partition == 2 ? 3u : td->partition == 3 ? 2u : 1u)', '@(td->partition == 2 ? 2u : td->partition == 3 ? 3u : 1u)')),
     ("a fragment's [[color(n)]] inputs take the road only with a version-6 NVK and fetch not by copies, its pipeline with the "
      "SPIR-V road's set 3 and fetch masks", fetch_road,
      ("plugin/nvmtl_vk.c", 'out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;', 'out->fetch_mask = 0;')),

@@ -850,6 +850,15 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
       rp.depthAttachment.storeAction = MTLStoreActionStore;
       rp.depthAttachment.clearDepth = 1.0;
    }
+   if (t->tess && r->tfac_cps) {
+      /* the factors from a kernel first, one thread per patch (r_tess_tri) */
+      id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
+      [ce setComputePipelineState:r->tfac_cps];
+      [ce setBuffer:r->tfac offset:0 atIndex:0];
+      [ce setBuffer:r->tfac_in offset:0 atIndex:1];
+      [ce dispatchThreads:MTLSizeMake(t->tess->patches, 1, 1) threadsPerThreadgroup:MTLSizeMake(t->tess->patches, 1, 1)];
+      [ce endEncoding];
+   }
    id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
    [re setRenderPipelineState:ps];
    if (ds)
@@ -875,8 +884,13 @@ rencode(id<MTLCommandBuffer> cb, const struct rtest *t, struct rrun *r, id<MTLRe
    for (unsigned i = 0; i < RMAXSAMP; i++)
       if (r->fsamp[i] && !(r->fsamp_ab >> i & 1))
          [re setFragmentSamplerState:r->fsamp[i] atIndex:i];
+   if (t->tess)
+      [re setTessellationFactorBuffer:r->tfac offset:0 instanceStride:0];
    for (unsigned k = 0; k < n; k++) {
-      if (t->instances > 1 || t->base_instance)
+      if (t->tess)
+         [re drawPatches:t->tess->cps patchStart:0 patchCount:t->tess->patches patchIndexBuffer:nil patchIndexBufferOffset:0
+           instanceCount:t->tess->instances baseInstance:0];
+      else if (t->instances > 1 || t->base_instance)
          [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount instanceCount:t->instances baseInstance:t->base_instance];
       else
          [re drawPrimitives:t->prim vertexStart:t->vstart vertexCount:t->vcount];
@@ -958,6 +972,13 @@ run_render_test(const struct rtest *t)
    d.depthAttachmentPixelFormat = t->depth ? t->depth : MTLPixelFormatInvalid;
    if (t->prim == MTLPrimitiveTypePoint)
       d.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+   if (t->tess) {
+      d.tessellationPartitionMode = t->tess->part;
+      d.tessellationOutputWindingOrder = t->tess->wind;
+      d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+      d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+      d.maxTessellationFactor = 16;
+   }
    if (t->vdesc) {
       MTLVertexDescriptor *vd = [MTLVertexDescriptor vertexDescriptor];
       t->vdesc(vd);
@@ -982,6 +1003,14 @@ run_render_test(const struct rtest *t)
       [vf release]; [ff release]; [lib release];
       return SKIPPED;
    }
+   const bool road_on = !(getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0"));
+   if (ps && t->road && road_on && road != 1) {
+      /* a pipeline the road must make (round 10's): the SPIR-V road's is a failure here */
+      printf("%-16s FAIL     took the SPIR-V road, which it must not with the road on (not drawn)\n", name);
+      fprintf(rtsv, "%s\t%s\tFAIL\t%.3f\t%.3f\t\t\t0\ttook the SPIR-V road\t%s\n", name, road_name, fn_ms, ps_ms, t->tolerance);
+      [ps release]; [vf release]; [ff release]; [lib release];
+      return FAIL;
+   }
    if (!ps) {
       printf("%-16s FAIL     no pipeline: %s\n", name, e.localizedDescription.UTF8String ?: (vf && ff ? "?" : "no function"));
       fprintf(rtsv, "%s\tnone\tFAIL\t%.3f\t%.3f\t\t\t0\tno pipeline\t%s\n", name, fn_ms, ps_ms, t->tolerance);
@@ -999,6 +1028,7 @@ run_render_test(const struct rtest *t)
    struct rrun r;
    memset(&r, 0, sizeof r);
    r.t = t;
+   r.lib = lib;
    rng_state = 0x9e3779b9u ^ (uint32_t)strlen(t->name) * 2654435761u;
    t->setup(&r);
    id<MTLTexture> col[RMAXCOL] = { nil }, depth = nil;
@@ -1107,6 +1137,9 @@ run_render_test(const struct rtest *t)
       [r.vbuf[i] release];
       [r.fbuf[i] release];
    }
+   [r.tfac release];
+   [r.tfac_in release];
+   [r.tfac_cps release];
    for (unsigned i = 0; i < RMAXTEX; i++) {
       [r.ftex[i] release];
       [r.tstage[i] release];

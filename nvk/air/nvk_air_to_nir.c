@@ -428,6 +428,20 @@ struct air_tr {
    uint8_t vertex_input_kind[32];
    unsigned next_varying;       /* the translator's own Locations: the next one in order */
    nir_variable *sysval[8];     /* the system values read, one variable each */
+   /* a post-tessellation vertex function (since version 8, NVMTL_AIR_NIR_TESS): a tessellation evaluation shader whose
+    * inputs are those of the translator's TessellationEvaluation module as the plugin patches it (nvmtl_tess_patch_tese) */
+   bool tess;
+   unsigned tess_domain, tess_cps;      /* 1 triangle, 2 quad (MTLPatchType); the control points */
+   LLVMValueRef tess_cp_fn;             /* the control-point accessor the AIR calls with an index */
+   unsigned tess_cp_fields;
+   nir_variable *tess_cp_var[NVMTL_AIR_NIR_TESS_INPUTS];
+   uint32_t tess_cp_loc[NVMTL_AIR_NIR_TESS_INPUTS];
+   const char *tess_cp_type[NVMTL_AIR_NIR_TESS_INPUTS];
+   uint32_t tess_inst_loc;              /* [[instance_id]]: after every patch input and control-point field named */
+   struct { uint32_t location, patch, kind, components, array_length; } tess_in[NVMTL_AIR_NIR_TESS_INPUTS];
+   unsigned tess_nin;
+   nir_variable *tess_pid;              /* [[patch_id]]: a per-patch input after every other */
+   uint32_t tess_pid_loc;
 
    /* the reflection (since version 5, NVMTL_AIR_NIR_REFLECT) */
    uint8_t *rf_param;           /* the entry's parameters before the passes: AIR_RF_* */
@@ -490,6 +504,10 @@ _Static_assert(offsetof(struct nvmtl_air_nir_request, descriptor_buffers) == NVM
                "the version-6 request ends where descriptor_buffers starts");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, descriptor_mask) == NVMTL_AIR_NIR_RESULT_V6_SIZE,
                "version 6 of the result ends at descriptor_mask");
+_Static_assert(offsetof(struct nvmtl_air_nir_request, tess_spacing) == NVMTL_AIR_NIR_REQUEST_V7_SIZE,
+               "the version-7 request ends where tess_spacing starts");
+_Static_assert(offsetof(struct nvmtl_air_nir_result, tess_domain) == NVMTL_AIR_NIR_RESULT_V7_SIZE,
+               "version 7 of the result ends at tess_domain");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, texture_mask) == NVMTL_AIR_NIR_RESULT_V1_SIZE,
                "version 1 of the result ends at its message");
 _Static_assert(offsetof(struct nvmtl_air_nir_result, global_align) == NVMTL_AIR_NIR_RESULT_V2_SIZE,
@@ -1506,9 +1524,40 @@ air_find_kernel(struct air_tr *t, LLVMValueRef *args_node)
    if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL) {
       for (unsigned k = 3; k < found_count; k++) {
          const char *what = air_md_string(found_ops[k]);
+         LLVMValueRef *pops = NULL;
+         const unsigned pn = !what && t->stage == NVMTL_AIR_NIR_STAGE_VERTEX && found_ops[k] && L.LLVMIsAMDNode(found_ops[k]) ?
+                             air_md_operands(found_ops[k], &pops, t->mem) : 0;
          if (t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT && what && !strcmp(what, "early_fragment_tests"))
             t->fragment_flags |= NVMTL_AIR_NIR_FS_EARLY_TESTS;
-         else
+         else if (pn && air_md_string(pops[0]) && !strcmp(air_md_string(pops[0]), "air.patch") &&
+                  (t->req->flags & NVMTL_AIR_NIR_TESS) &&
+                  t->req->size >= offsetof(struct nvmtl_air_nir_request, tess_order) + sizeof t->req->tess_order) {
+            /* {"air.patch", "triangle" | "quad", "air.patch_control_point", n}: a post-tessellation vertex function (version
+             * 8), read as meta::parse_vertex_meta reads it; one whose shape it cannot read the translator refuses */
+            bool have_n = false;
+            uint64_t n = 0;
+            for (unsigned j = 1; j < pn; j++) {
+               const char *s = air_md_string(pops[j]);
+               if (!s)
+                  continue;
+               if (!strcmp(s, "triangle"))
+                  t->tess_domain = 1;
+               else if (!strcmp(s, "quad"))
+                  t->tess_domain = 2;
+               else if (!strcmp(s, "isoline"))
+                  unsupported(t, "an isoline patch (Metal draws triangle and quad patches)");
+               else if (!strcmp(s, "air.patch_control_point") && j + 1 < pn)
+                  have_n = air_md_int(pops[j + 1], &n);
+            }
+            if (!t->tess_domain)
+               unsupported(t, "a tessellation patch this cannot read (air.patch names no tessellation domain)");
+            if (!have_n)
+               unsupported(t, "a tessellation patch this cannot read (air.patch states no air.patch_control_point count)");
+            if (!n || n > 32)
+               unsupported(t, "a patch of %llu control points (1 to 32 are drawn)", (unsigned long long)n);
+            t->tess = true;
+            t->tess_cps = (unsigned)n;
+         } else
             unsupported(t, "a %s function with %s%s", t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? "vertex" : "fragment",
                         what ? what : "metadata this does not read (a post-tessellation vertex function's patch, ...)",
                         what ? " in its metadata" : "");
@@ -1519,6 +1568,7 @@ air_find_kernel(struct air_tr *t, LLVMValueRef *args_node)
 
 /* What one !air.kernel argument node says. */
 struct air_arg {
+   LLVMValueRef node;      /* its node in the entry's arguments */
    LLVMValueRef param;
    unsigned index;         /* the parameter's index */
    const char *kind;
@@ -1543,6 +1593,7 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
    unsigned count = air_md_operands(node, &ops, t->mem);
    uint64_t index;
    struct air_arg a = { .location = ~0ull, .space = ~0ull };
+   a.node = node;
    a.kind = count >= 2 ? air_md_string(ops[1]) : NULL;
    if (!a.kind || !air_md_int(ops[0], &index) || index >= params)
       air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "argument %u of the kernel has malformed metadata", i);
@@ -1763,6 +1814,249 @@ air_sysval(struct air_tr *t, gl_system_value sv, const struct glsl_type *type)
 
 static nir_def *air_f2f16(nir_builder *b, nir_def *x);
 
+/* ---- post-tessellation vertex functions (version 8, NVMTL_AIR_NIR_TESS) ----
+ *
+ * The translator makes a TessellationEvaluation module of one (passes/stage_input: patch_input, position_in_patch,
+ * patch_id, a TES's instance_id, lower_patch_control_point_calls; passes/finalize: Triangles or Quads, SpacingEqual,
+ * VertexOrderCcw). The plugin's tessellation path then sets its spacing and vertex order and moves its PrimitiveId to a
+ * per-patch input at the Location after every other (nvmtl_tess_patch_tese), and makes a tessellation control stage that
+ * writes each input the module declares, pulled from the vertex buffers, the patch id and the factors
+ * (nvmtl_tess_make_tcs), and a pass-through vertex stage. This frontend makes the same evaluation stage: each control-point
+ * field an input array of n at its Location, each patch input and [[instance_id]] a per-patch input at theirs (instance_id
+ * after the others the metadata names, meta::tessellation_system_input_location), [[position_in_patch]] the tessellation
+ * coordinate, [[patch_id]] the per-patch input the control stage writes, and lists them in result.tess_inputs for the
+ * plugin's control stage, as it reads the translator's module. */
+
+/* The kind of a tessellation input of AIR type lty: 1 float, 3 unsigned integer (a 32-bit integer is the translator's
+ * OpTypeInt 32 0); the control stage writes 32-bit scalars and vectors only (nvmtl_tess_make_tcs refuses the pipeline
+ * of any other), so any other is refused */
+static unsigned
+air_tess_kind(struct air_tr *t, LLVMTypeRef lty, uint32_t loc, const char *what)
+{
+   if (air_is_aggregate(lty))
+      unsupported(t, "the %s at Location %u is an aggregate (the tessellation control stage writes 32-bit scalars and "
+                  "vectors only)", what, loc);
+   const struct air_type ty = air_type_of(t, lty);
+   if (ty.is_pointer || ty.bits != 32 || ty.components > 4)
+      unsupported(t, "the %s at Location %u is not a 32-bit scalar or vector (the tessellation control stage writes no "
+                  "other: TESE input Location %u is not a 32-bit scalar/vector)", what, loc, loc);
+   return ty.is_float ? 1u : 3u;
+}
+
+static void
+air_tess_input(struct air_tr *t, uint32_t loc, bool patch, unsigned kind, unsigned components, unsigned array_length)
+{
+   if (t->tess_nin >= NVMTL_AIR_NIR_TESS_INPUTS)
+      unsupported(t, "more than %u tessellation inputs", NVMTL_AIR_NIR_TESS_INPUTS);
+   t->tess_in[t->tess_nin].location = loc;
+   t->tess_in[t->tess_nin].patch = patch;
+   t->tess_in[t->tess_nin].kind = kind;
+   t->tess_in[t->tess_nin].components = components;
+   t->tess_in[t->tess_nin++].array_length = array_length;
+}
+
+/* Before the arguments are bound: the control-point accessor and its fields' Locations, and [[instance_id]]'s Location
+ * (after every patch input's and control-point field's the metadata names, used or not) */
+static void
+air_tess_scan(struct air_tr *t, LLVMValueRef *nodes, unsigned n, unsigned params)
+{
+   bool any = false;
+   uint32_t max = 0;
+   for (unsigned i = 0; i < n; i++) {
+      const struct air_arg a = air_read_arg(t, nodes[i], i, params);
+      if (!strcmp(a.kind, "air.patch_input")) {
+         const uint32_t loc = a.location != ~0ull ? (uint32_t)a.location : a.index;
+         max = any ? MAX2(max, loc) : loc;
+         any = true;
+         continue;
+      }
+      if (strcmp(a.kind, "air.patch_control_point_input"))
+         continue;
+      /* {index, "air.patch_control_point_input", {"air.patch_control_point_function", fn}, field...}, each field
+       * {"air.location_index", L, 1, "air.arg_type_name", T, "air.arg_name", N} */
+      LLVMValueRef *ops;
+      const unsigned c = air_md_operands(a.node, &ops, t->mem);
+      for (unsigned k = 2; k < c; k++) {
+         if (!ops[k] || !L.LLVMIsAMDNode(ops[k]))
+            continue;
+         LLVMValueRef *f;
+         const unsigned fc = air_md_operands(ops[k], &f, t->mem);
+         const char *s0 = fc ? air_md_string(f[0]) : NULL;
+         if (s0 && !strcmp(s0, "air.patch_control_point_function")) {
+            LLVMValueRef fn = fc > 1 ? f[1] : NULL;
+            while (fn && L.LLVMIsAConstantExpr(fn))
+               fn = L.LLVMGetOperand(fn, 0);
+            if (fn && L.LLVMIsAFunction(fn))
+               t->tess_cp_fn = fn;
+            continue;
+         }
+         uint64_t loc = 0;
+         const char *type_name = NULL;
+         for (unsigned j = 0; j + 1 < fc; j++) {
+            const char *key = air_md_string(f[j]);
+            if (key && !strcmp(key, "air.location_index") && !air_md_int(f[j + 1], &loc))
+               unsupported(t, "a control-point field whose Location depends on a function constant");
+            if (key && !strcmp(key, "air.arg_type_name"))
+               type_name = air_md_string(f[j + 1]);
+         }
+         if (loc >= 32 || t->tess_cp_fields >= NVMTL_AIR_NIR_TESS_INPUTS)
+            unsupported(t, "a control-point field at Location %llu", (unsigned long long)loc);
+         t->tess_cp_type[t->tess_cp_fields] = type_name;
+         t->tess_cp_loc[t->tess_cp_fields++] = (uint32_t)loc;
+         max = any ? MAX2(max, (uint32_t)loc) : (uint32_t)loc;
+         any = true;
+      }
+   }
+   t->tess_inst_loc = any ? max + 1 : 0;
+}
+
+/* Whether the entry calls the accessor (the translator declares the control-point inputs only then) */
+static bool
+air_tess_cp_called(struct air_tr *t)
+{
+   if (!t->tess_cp_fn)
+      return false;
+   for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(t->function); bb; bb = L.LLVMGetNextBasicBlock(bb))
+      for (LLVMValueRef i = L.LLVMGetFirstInstruction(bb); i; i = L.LLVMGetNextInstruction(i))
+         if (L.LLVMGetInstructionOpcode(i) == OP_CALL && L.LLVMGetCalledValue(i) == t->tess_cp_fn)
+            return true;
+   return false;
+}
+
+/* A post-tessellation vertex function's argument that is a tessellation input: true when a is one */
+static bool
+air_bind_tess_input(struct air_tr *t, const struct air_arg *a)
+{
+   nir_builder *b = &t->top;
+   const char *k = a->kind, *name = a->arg_name ? a->arg_name : "(unnamed)";
+   LLVMTypeRef lty = L.LLVMTypeOf(a->param);
+   if (!strcmp(k, "air.patch_control_point_input")) {
+      air_set(t, a->param, nir_imm_int64(b, 0), AIR_VALUE, 0);   /* only the accessor reads it */
+      if (!t->tess_cp_fn || !air_tess_cp_called(t))
+         return true;
+      LLVMTypeRef rty = L.LLVMGetReturnType(L.LLVMGlobalGetValueType(t->tess_cp_fn));
+      if (L.LLVMGetTypeKind(rty) != TY_STRUCT)
+         unsupported(t, "tessellation control-point accessor must return a struct");
+      const unsigned members = L.LLVMCountStructElementTypes(rty);
+      if (members != t->tess_cp_fields)
+         unsupported(t, "tessellation control-point metadata has %u fields but accessor returns %u", t->tess_cp_fields, members);
+      for (unsigned i = 0; i < members; i++) {
+         LLVMTypeRef mty = L.LLVMStructGetTypeAtIndex(rty, i);
+         (void)air_tess_kind(t, mty, t->tess_cp_loc[i], "control-point field");
+         const struct air_type ty = air_type_of(t, mty);
+         for (unsigned j = 0; j < i; j++)
+            if (t->tess_cp_loc[j] == t->tess_cp_loc[i])
+               unsupported(t, "two control-point fields at Location %u", t->tess_cp_loc[i]);
+         nir_variable *var = nir_variable_create(t->nir, nir_var_shader_in,
+                                                 glsl_array_type(glsl_vector_type(ty.is_float ? GLSL_TYPE_FLOAT : GLSL_TYPE_UINT,
+                                                                                  ty.components), t->tess_cps, 0), "cp");
+         var->data.location = VARYING_SLOT_VAR0 + t->tess_cp_loc[i];
+         t->tess_cp_var[i] = var;
+      }
+      return true;
+   }
+   if (!strcmp(k, "air.patch_input")) {
+      if (air_fc_arg_present(t, a) != 1)
+         unsupported(t, "the patch input %s exists only under a function constant", name);
+      const uint32_t loc = a->location != ~0ull ? (uint32_t)a->location : a->index;
+      if (loc >= 32)
+         unsupported(t, "the patch input %s at Location %u", name, loc);
+      const unsigned kind = air_tess_kind(t, lty, loc, "patch input");
+      const struct air_type ty = air_type_of(t, lty);
+      nir_variable *var = nir_variable_create(t->nir, nir_var_shader_in,
+                                              glsl_vector_type(kind == 1 ? GLSL_TYPE_FLOAT : GLSL_TYPE_UINT, ty.components), name);
+      var->data.location = VARYING_SLOT_PATCH0 + loc;
+      var->data.patch = true;
+      air_tess_input(t, loc, true, kind, ty.components, 0);
+      air_set(t, a->param, nir_load_var(b, var), AIR_VALUE, 0);
+      return true;
+   }
+   if (!strcmp(k, "air.instance_id")) {
+      /* a per-patch input the control stage writes the instance into (passes/stage_input: a TES's instance_id) */
+      const uint32_t loc = t->tess_inst_loc;
+      if (loc >= 32)
+         unsupported(t, "[[instance_id]] at Location %u", loc);
+      const unsigned kind = air_tess_kind(t, lty, loc, "[[instance_id]] input");
+      const struct air_type ty = air_type_of(t, lty);
+      if (kind != 3 || ty.components != 1)
+         unsupported(t, "[[instance_id]] of type %s", a->type_name ? a->type_name : "?");
+      nir_variable *var = nir_variable_create(t->nir, nir_var_shader_in, glsl_uint_type(), name);
+      var->data.location = VARYING_SLOT_PATCH0 + loc;
+      var->data.patch = true;
+      air_tess_input(t, loc, true, kind, 1, 0);
+      air_set(t, a->param, nir_load_var(b, var), AIR_VALUE, 0);
+      return true;
+   }
+   if (!strcmp(k, "air.position_in_patch")) {
+      const struct air_type ty = air_is_aggregate(lty) ? (struct air_type){ 0 } : air_type_of(t, lty);
+      if (!ty.is_float || ty.bits != 32 || (ty.components != 2 && ty.components != 3))
+         unsupported(t, "position_in_patch parameter must be float2 or float3");
+      nir_def *v = air_sysval(t, SYSTEM_VALUE_TESS_COORD, glsl_vec_type(3));
+      air_set(t, a->param, ty.components == 2 ? nir_trim_vector(b, v, 2) : v, AIR_VALUE, 0);
+      return true;
+   }
+   if (!strcmp(k, "air.patch_id")) {
+      /* the translator's PrimitiveId, which the plugin makes the per-patch input its control stage writes the patch
+       * id into, at the Location after every other input (set once all are bound) */
+      const struct air_type ty = air_is_aggregate(lty) ? (struct air_type){ 0 } : air_type_of(t, lty);
+      if (ty.is_float || ty.is_pointer || ty.components != 1 || ty.bits > 32)
+         unsupported(t, "[[patch_id]] of type %s", a->type_name ? a->type_name : "?");
+      if (!t->tess_pid) {
+         t->tess_pid = nir_variable_create(t->nir, nir_var_shader_in, glsl_uint_type(), "patch_id");
+         t->tess_pid->data.patch = true;
+      }
+      air_set(t, a->param, air_io_narrow(b, nir_load_var(b, t->tess_pid), &ty), AIR_VALUE, 0);
+      return true;
+   }
+   if (!strcmp(k, "air.vertex_input") || !strcmp(k, "air.vertex_id") || !strcmp(k, "air.base_vertex") ||
+       !strcmp(k, "air.base_instance"))
+      unsupported(t, "%s in a post-tessellation vertex function", k);
+   return false;
+}
+
+/* Once every argument is bound: the control-point inputs after the others (the translator declares them last), and
+ * the patch id at the Location after the highest (nvmtl_tess_patch_tese: 0 when there is none) */
+static void
+air_tess_finish(struct air_tr *t)
+{
+   for (unsigned i = 0; i < t->tess_cp_fields; i++) {
+      if (!t->tess_cp_var[i])
+         continue;
+      const struct glsl_type *e = glsl_get_array_element(t->tess_cp_var[i]->type);
+      air_tess_input(t, t->tess_cp_loc[i], false, glsl_get_base_type(e) == GLSL_TYPE_FLOAT ? 1u : 3u,
+                     glsl_get_vector_elements(e), t->tess_cps);
+   }
+   t->tess_pid_loc = ~0u;
+   if (t->tess_pid) {
+      uint32_t max = 0;
+      for (unsigned i = 0; i < t->tess_nin; i++)
+         max = MAX2(max, t->tess_in[i].location + 1);
+      if (max >= 32)
+         unsupported(t, "[[patch_id]] at Location %u", max);
+      t->tess_pid_loc = max;
+      t->tess_pid->data.location = VARYING_SLOT_PATCH0 + max;
+   }
+}
+
+/* The accessor's call: each field of control point index, from its input array */
+static void
+air_tess_cp_call(struct air_tr *t, LLVMValueRef call)
+{
+   nir_builder *b = &t->b;
+   if (L.LLVMGetNumArgOperands(call) < 1)
+      unsupported(t, "tessellation control-point call has no index");
+   nir_def *idx = air_vdef(t, air_get(t, L.LLVMGetOperand(call, 0)));
+   idx = air_resize(b, idx, 32, false);
+   struct air_val *agg = air_aggregate(t, t->tess_cp_fields);
+   for (unsigned i = 0; i < t->tess_cp_fields; i++) {
+      if (!t->tess_cp_var[i])
+         unsupported(t, "a control-point call the binding did not see");
+      nir_def *v = nir_load_deref(b, nir_build_deref_array(b, nir_build_deref_var(b, t->tess_cp_var[i]), idx));
+      agg->elems[i] = air_make(t, v, AIR_VALUE, 0);
+   }
+   air_set_val(t, call, agg);
+}
+
 /* A vertex or fragment function's argument that is a stage input or a builtin: true when a is one */
 static bool
 air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
@@ -1772,6 +2066,8 @@ air_bind_stage_input(struct air_tr *t, const struct air_arg *a, unsigned i)
    const char *k = a->kind;
    const char *name = a->arg_name ? a->arg_name : "(unnamed)";
    LLVMTypeRef lty = L.LLVMTypeOf(a->param);
+   if (vs && t->tess && air_bind_tess_input(t, a))
+      return true;
    if ((vs && !strcmp(k, "air.vertex_input")) || (fs && !strcmp(k, "air.fragment_input"))) {
       /* one that exists only under a function constant: the request's values say whether it does, as they do for an
        * output (the translator's specialization drops one whose constant is false: no Location, no attribute) */
@@ -2424,6 +2720,8 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
    uint32_t tg_len[NVMTL_AIR_NIR_MAX_BUFFERS] = { 0 };
    bool tg_used[NVMTL_AIR_NIR_MAX_BUFFERS] = { false };
 
+   if (t->tess)
+      air_tess_scan(t, nodes, n, params);
    for (unsigned i = 0; i < n; i++) {
       struct air_arg *a = &args[i];
       *a = air_read_arg(t, nodes[i], i, params);
@@ -2512,6 +2810,8 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       }
    }
 
+   if (t->tess)
+      air_tess_finish(t);
    uint32_t at = 0;
    for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++) {
       if (!tg_used[i])
@@ -4834,6 +5134,10 @@ air_call(struct air_tr *t, LLVMValueRef call)
 
    if (!L.LLVMIsDeclaration(callee))
       unsupported(t, "a call to %s, which LLVM did not inline", name);
+   if (t->tess && callee == t->tess_cp_fn) {
+      air_tess_cp_call(t, call);
+      return;
+   }
 
    if (!strcmp(name, "air.discard_fragment")) {
       /* a demote, as the translator's (OpDemoteToHelperInvocation): derivatives after it stay defined */
@@ -7652,6 +7956,11 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
    struct air_rf_item { uint32_t loc; char *json; } fvary[64], vattr[64];
    unsigned nfvary = 0;
    uint32_t vin_loc = 0, frag_loc = 0;
+   /* a post-tessellation vertex function's patch inputs (by Location) and [[instance_id]] (reflect::from_vertex) */
+   struct { uint32_t loc; const char *type_name; } pin[32];
+   unsigned npin = 0;
+   bool have_inst = false;
+   const char *inst_type = NULL;
    LLVMValueRef *nodes = NULL;
    const unsigned n = args_node && L.LLVMIsAMDNode(args_node) ? air_md_operands(args_node, &nodes, t->mem) : 0;
    if (!t->rf_param) {
@@ -7726,6 +8035,25 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
                               "\"type_layout\":null,\"type_name\":");
          air_rf_jstr(&s->b, air_rf_string_after(&x, "air.arg_type_name"));
          ralloc_strcat(&s->b, ",\"texture_shape\":null,\"embedded_source\":null,\"access\":null,\"static_sampler\":null}");
+      } else if (vertex && t->tess && !strcmp(role, "patch_input")) {
+         bool g;
+         const uint32_t loc = air_rf_slot(t, &x, idx, &g);
+         unsigned at = 0;
+         while (at < npin && pin[at].loc != loc)
+            at++;
+         if (at == npin) {
+            if (npin >= ARRAY_SIZE(pin)) {
+               t->rf_why = "more than 32 patch inputs";
+               return;
+            }
+            npin++;
+         }
+         pin[at].loc = loc;
+         pin[at].type_name = air_rf_string_after(&x, "air.arg_type_name");
+      } else if (vertex && t->tess && !strcmp(role, "instance_id")) {
+         if (!have_inst)
+            inst_type = air_rf_string_after(&x, "air.arg_type_name");
+         have_inst = true;
       } else if (!strcmp(role, "indirect_buffer") || !strcmp(role, "render_target") || !strcmp(role, "stage_in") ||
                  !strcmp(role, "imageblock") || !strcmp(role, "visible_function_table") ||
                  !strcmp(role, "intersection_function_table") || !strcmp(role, "instance_acceleration_structure") ||
@@ -7852,12 +8180,49 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
       t->rf_why = "a function-constant gate the static initializer computes (the translator's evaluation may not know it)";
       return;
    }
+   /* a post-tessellation vertex function's interface (reflect::TessellationInterface): the patch inputs by Location */
+   char *tess = ralloc_strdup(t->mem, "null");
+   if (t->tess) {
+      for (unsigned a = 1; a < npin; a++)
+         for (unsigned b = a; b && pin[b - 1].loc > pin[b].loc; b--) {
+            const __typeof__(pin[0]) x = pin[b];
+            pin[b] = pin[b - 1];
+            pin[b - 1] = x;
+         }
+      tess = ralloc_asprintf(t->mem, "{\"domain\":\"%s\",\"control_point_count\":%u,\"control_point_locations\":[",
+                             t->tess_domain == 2 ? "Quad" : "Triangle", t->tess_cps);
+      for (unsigned i = 0; i < t->tess_cp_fields; i++)
+         ralloc_asprintf_append(&tess, "%s%u", i ? "," : "", t->tess_cp_loc[i]);
+      ralloc_strcat(&tess, "],\"patch_input_locations\":[");
+      for (unsigned i = 0; i < npin; i++)
+         ralloc_asprintf_append(&tess, "%s%u", i ? "," : "", pin[i].loc);
+      ralloc_strcat(&tess, "],\"control_point_attributes\":[");
+      for (unsigned i = 0; i < t->tess_cp_fields; i++) {
+         ralloc_asprintf_append(&tess, "%s{\"location\":%u,\"type_name\":", i ? "," : "", t->tess_cp_loc[i]);
+         air_rf_jstr(&tess, t->tess_cp_type[i]);
+         ralloc_strcat(&tess, "}");
+      }
+      ralloc_strcat(&tess, "],\"patch_attributes\":[");
+      for (unsigned i = 0; i < npin; i++) {
+         ralloc_asprintf_append(&tess, "%s{\"location\":%u,\"type_name\":", i ? "," : "", pin[i].loc);
+         air_rf_jstr(&tess, pin[i].type_name);
+         ralloc_strcat(&tess, "}");
+      }
+      ralloc_strcat(&tess, "],\"instance_id\":");
+      if (have_inst) {
+         ralloc_asprintf_append(&tess, "{\"location\":%u,\"type_name\":", t->tess_inst_loc);
+         air_rf_jstr(&tess, inst_type);
+         ralloc_strcat(&tess, "}");
+      } else
+         ralloc_strcat(&tess, "null");
+      ralloc_strcat(&tess, ",\"amplification_id\":null,\"amplification_count\":null}");
+   }
    char *j = ralloc_asprintf(t->mem, "{\"reflection_source\":\"air-to-nir\",\"stage\":\"%s\",\"entry_point\":",
-                             kernel ? "Kernel" : vertex ? "Vertex" : "Fragment");
+                             kernel ? "Kernel" : vertex ? (t->tess ? "TessellationEvaluation" : "Vertex") : "Fragment");
    air_rf_jstr(&j, air_name(t->function, NULL));
    ralloc_asprintf_append(&j, ",\"bindings\":[%s],\"argument_buffer_fields\":[%s],\"vertex_attributes\":[%s],\"varyings\":[%s],"
-                          "\"tessellation\":null,\"fragment_sample_positions\":null,\"local_size\":",
-                          s->b, fields, attrs, vary);
+                          "\"tessellation\":%s,\"fragment_sample_positions\":null,\"local_size\":",
+                          s->b, fields, attrs, vary, tess);
    /* a kernel's default size: the translator's (TransformOptions::default().kernel_local_size), its SpecIds' defaults */
    ralloc_strcat(&j, kernel ? "[64,1,1]}" : "null}");
    t->rf_json = j;
@@ -7938,8 +8303,19 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    const nir_shader_compiler_options *options = nak_nir_options(pdev->nak);
    const bool kernel = t->stage == NVMTL_AIR_NIR_STAGE_KERNEL;
    t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;
-   t->nir = nir_shader_create(NULL, kernel ? MESA_SHADER_COMPUTE : t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ?
-                                    MESA_SHADER_VERTEX : MESA_SHADER_FRAGMENT, options);
+   t->nir = nir_shader_create(NULL, kernel ? MESA_SHADER_COMPUTE : t->tess ? MESA_SHADER_TESS_EVAL :
+                                    t->stage == NVMTL_AIR_NIR_STAGE_VERTEX ? MESA_SHADER_VERTEX : MESA_SHADER_FRAGMENT, options);
+   if (t->tess) {
+      /* the modes the plugin sets on the translator's module (nvmtl_tess_patch_tese), as spirv_to_nir reads them;
+       * 0, the translator's own: SpacingEqual, VertexOrderCcw */
+      const uint32_t sp = t->req->tess_spacing ? t->req->tess_spacing : 1, order = t->req->tess_order ? t->req->tess_order : 5;
+      if (sp < 1 || sp > 3 || (order != 4 && order != 5))
+         air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "tess_spacing %u, tess_order %u", sp, order);
+      t->nir->info.tess._primitive_mode = t->tess_domain == 2 ? TESS_PRIMITIVE_QUADS : TESS_PRIMITIVE_TRIANGLES;
+      t->nir->info.tess.spacing = sp == 1 ? TESS_SPACING_EQUAL : sp == 2 ? TESS_SPACING_FRACTIONAL_EVEN : TESS_SPACING_FRACTIONAL_ODD;
+      t->nir->info.tess.ccw = order == 5;
+      t->nir->info.tess.point_mode = false;
+   }
    t->nir->info.name = ralloc_strdup(t->nir, air_name(t->function, NULL));
    for (unsigned i = 0; kernel && i < 3; i++)
       t->nir->info.workgroup_size[i] = t->req->local_size[i];
@@ -8418,6 +8794,19 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    if (res->size >= offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted) {
       res->descriptor_mask = t->out ? t->desc_mask : 0;
       res->descriptor_wanted = t->desc_wanted;   /* on a refusal too: the plugin asks again */
+   }
+   if (res->size >= offsetof(struct nvmtl_air_nir_result, tess_inputs) + sizeof res->tess_inputs) {
+      res->tess_domain = t->out && t->tess ? t->tess_domain : 0;
+      res->tess_control_points = t->out && t->tess ? t->tess_cps : 0;
+      res->tess_patch_id_location = t->out && t->tess ? t->tess_pid_loc : ~0u;
+      res->tess_input_count = t->out && t->tess ? t->tess_nin : 0;
+      for (unsigned i = 0; i < res->tess_input_count; i++) {
+         res->tess_inputs[i].location = t->tess_in[i].location;
+         res->tess_inputs[i].patch = t->tess_in[i].patch;
+         res->tess_inputs[i].kind = t->tess_in[i].kind;
+         res->tess_inputs[i].components = t->tess_in[i].components;
+         res->tess_inputs[i].array_length = t->tess_in[i].array_length;
+      }
    }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, reflection_why) + sizeof res->reflection_why &&
        (req->flags & NVMTL_AIR_NIR_REFLECT) && t->out) {

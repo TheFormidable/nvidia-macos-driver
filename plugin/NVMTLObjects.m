@@ -2906,8 +2906,20 @@ static NSDictionary *nvmtl_ci_stitch_entry(NVMTLFunction *fn)
 }
 - (NSArray<MTLVertexAttribute *> *)vertexAttributes { return (NSArray<MTLVertexAttribute *> *)nvmtl_vertex_attributes_for(self); }
 - (NSArray<MTLAttribute *> *)stageInputAttributes { return (NSArray<MTLAttribute *> *)nvmtl_vertex_attributes_for(self); }
-- (MTLPatchType)patchType { uint32_t pt = 0, n = 0; return nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n) ? (MTLPatchType)pt : MTLPatchTypeNone; }
+// A function newFunctionWithName: made without the translator (phase 4) has no module to read: its reflection (the
+// frontend's, the translator's form) says the patch's domain and control points
+static MTLPatchType nvmtl_reflected_patch(NVMTLFunction *f, NSInteger *n) {
+    NSDictionary *tr = nvmtl_function_reflection(f)[@"tessellation"];
+    if (![tr isKindOfClass:[NSDictionary class]]) return MTLPatchTypeNone;
+    NSNumber *k = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
+    if (n) *n = k.integerValue > 0 ? k.integerValue : -1;
+    return [tr[@"domain"] isEqual:@"Quad"] ? MTLPatchTypeQuad : [tr[@"domain"] isEqual:@"Triangle"] ? MTLPatchTypeTriangle : MTLPatchTypeNone;
+}
+- (MTLPatchType)patchType {
+    if (_spirvLazy) return nvmtl_reflected_patch(self, NULL);
+    uint32_t pt = 0, n = 0; return nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n) ? (MTLPatchType)pt : MTLPatchTypeNone; }
 - (NSInteger)patchControlPointCount {
+    if (_spirvLazy) { NSInteger k = -1; return nvmtl_reflected_patch(self, &k) != MTLPatchTypeNone ? k : -1; }
     uint32_t pt = 0, n = 0; if (!nvmtl_spirv_tess_info(_spirv.bytes, _spirv.length, &pt, &n)) return -1;
     NSDictionary *tr = nvmtl_function_reflection(self)[@"tessellation"];
     NSNumber *k = [tr isKindOfClass:[NSDictionary class]] && [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;

@@ -2460,9 +2460,33 @@ static void nvmtl_pipeline_key_log(id f, const char *stage, const void *pipe)
 }
 // The AIR-to-NIR road for render pipelines (NVMTLAirNir.m, imported at the end of this file)
 BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFrag, uint32_t a8mask, BOOL amplified,
-                                 id samplePayload, NSString **why);
+                                 id samplePayload, BOOL tess, NSString **why);
 int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
-                                  uint32_t samples, NSString *vdesc, nvk_pipeline *out, NSString **why);
+                                  uint32_t samples, NSString *vdesc, const nvk_tess_desc *td, nvk_pipeline *out, NSString **why);
+// A tessellation pipeline's description (nvk_tess_desc) for vertex function vf of patch type tpt, with tcps control
+// points read from its module (0: none known), as both roads make it: nil, or why the pipeline is refused
+static NSString *nvmtl_tess_desc_make(NVMTLFunction *vf, MTLRenderPipelineDescriptor *d, uint32_t tpt, uint32_t tcps, nvk_tess_desc *td)
+{
+    if (NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorFormat, MTLTessellationFactorFormatHalf) != MTLTessellationFactorFormatHalf)
+        return @"tess pipeline: REFUSED - tessellationFactorFormat is not Half";
+    NSDictionary *tr = nvmtl_function_reflection(vf)[@"tessellation"]; if (![tr isKindOfClass:[NSDictionary class]]) tr = nil;
+    NSNumber *rn = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
+    NSNumber *ra = [tr[@"amplification_count"] isKindOfClass:[NSNumber class]] ? tr[@"amplification_count"] : nil;
+    NSDictionary *ri = [tr[@"instance_id"] isKindOfClass:[NSDictionary class]] ? tr[@"instance_id"] : nil;
+    NSNumber *rl = [ri[@"location"] isKindOfClass:[NSNumber class]] ? ri[@"location"] : nil;
+    if (ra.unsignedIntValue > 1) return @"tess pipeline: REFUSED - vertex amplification with tessellation is not carried";
+    uint32_t n = rn.unsignedIntValue ? rn.unsignedIntValue : tcps;
+    if (rn.unsignedIntValue && tcps && rn.unsignedIntValue != tcps)
+        return [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ reflects %u control points and its module reads %u", vf->_fname, rn.unsignedIntValue, tcps];
+    if (!n || n > 32)
+        return [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ has no fixed control-point count in 1..32 (%u)", vf->_fname, n];
+    if (!tr) nvlog("tess pipeline: %s has no reflection - its instance_id Location is inferred from the interface", vf->_fname.UTF8String ?: "?");
+    float mf = (float)NVMTL_SINCE(10.12, NSUInteger, d.maxTessellationFactor, 16); if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
+    *td = (nvk_tess_desc){ tpt, n, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationPartitionMode, 0), (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationOutputWindingOrder, 0),
+        (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorStepFunction, 0), NVMTL_SINCE(10.12, BOOL, d.isTessellationFactorScaleEnabled, NO) ? 1u : 0u, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationControlPointIndexType, 0),
+        mf, rl ? rl.intValue : -1 };
+    return nil;
+}
 void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, NSString *why, uint64_t ns);
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)err {
     if (err) *err = nil;
@@ -2611,8 +2635,16 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
     // one that needs a SPIR-V rewrite of its stages, or one NVK will not make, takes the SPIR-V road below, unchanged.
     { NSString *nirWhy = nil; const uint64_t t0 = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       const BOOL amplified = rt.view_mask != 0 || ([d respondsToSelector:@selector(maxVertexAmplificationCount)] && d.maxVertexAmplificationCount > 1);
-      const BOOL onNir = nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, &nirWhy) &&
-                         !nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, &ps->_p, &nirWhy);
+      // a post-tessellation vertex function, as its reflection says (the frontend's for one made without the translator,
+      // the translator's otherwise): the pipeline's tessellation as the SPIR-V road makes it below, or that road's refusal
+      NSDictionary *vtr = nvmtl_function_reflection(vf)[@"tessellation"];
+      const BOOL tess = [vtr isKindOfClass:[NSDictionary class]];
+      const uint32_t vpt = !tess ? 0 : [vtr[@"domain"] isEqual:@"Quad"] ? 2 : [vtr[@"domain"] isEqual:@"Triangle"] ? 1 : 0;
+      nvk_tess_desc rtd; memset(&rtd, 0, sizeof rtd);
+      NSString *tessNo = !tess ? nil : vpt ? nvmtl_tess_desc_make(vf, d, vpt, 0, &rtd) : @"a patch domain the plugin does not draw";
+      const BOOL onNir = nvmtl_air_nir_render_wanted(vf, ff, noFrag, a8mask, amplified, samplePayload, tess, &nirWhy) &&
+                         (!tessNo || (nirWhy = tessNo, NO)) &&
+                         !nvmtl_air_nir_render_pipeline(vf, ff, &rt, vin.nattr ? &vin : NULL, rsc, vdesc, tess ? &rtd : NULL, &ps->_p, &nirWhy);
       nvmtl_air_nir_render_note(vf, noFrag ? nil : ff, onNir, onNir ? nil : nirWhy, clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - t0);
       if (onNir) {
           ps->_road = 1;
@@ -2633,24 +2665,9 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {
-        if (NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorFormat, MTLTessellationFactorFormatHalf) != MTLTessellationFactorFormatHalf)
-            return nvmtl_fail(err, @"tess pipeline: REFUSED - tessellationFactorFormat is not Half");
-        NSDictionary *tr = nvmtl_function_reflection(vf)[@"tessellation"]; if (![tr isKindOfClass:[NSDictionary class]]) tr = nil;
-        NSNumber *rn = [tr[@"control_point_count"] isKindOfClass:[NSNumber class]] ? tr[@"control_point_count"] : nil;
-        NSNumber *ra = [tr[@"amplification_count"] isKindOfClass:[NSNumber class]] ? tr[@"amplification_count"] : nil;
-        NSDictionary *ri = [tr[@"instance_id"] isKindOfClass:[NSDictionary class]] ? tr[@"instance_id"] : nil;
-        NSNumber *rl = [ri[@"location"] isKindOfClass:[NSNumber class]] ? ri[@"location"] : nil;
-        if (ra.unsignedIntValue > 1) return nvmtl_fail(err, @"tess pipeline: REFUSED - vertex amplification with tessellation is not carried");
-        uint32_t n = rn.unsignedIntValue ? rn.unsignedIntValue : tcps;
-        if (rn.unsignedIntValue && tcps && rn.unsignedIntValue != tcps)
-            return nvmtl_fail(err, [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ reflects %u control points and its module reads %u", vf->_fname, rn.unsignedIntValue, tcps]);
-        if (!n || n > 32)
-            return nvmtl_fail(err, [NSString stringWithFormat:@"tess pipeline: REFUSED - %@ has no fixed control-point count in 1..32 (%u)", vf->_fname, n]);
-        if (!tr) nvlog("tess pipeline: %s has no reflection - its instance_id Location is inferred from the interface", vf->_fname.UTF8String ?: "?");
-        float mf = (float)NVMTL_SINCE(10.12, NSUInteger, d.maxTessellationFactor, 16); if (mf > 64.0f) mf = 64.0f; if (mf < 1.0f) mf = 1.0f;
-        nvk_tess_desc td = { tpt, n, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationPartitionMode, 0), (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationOutputWindingOrder, 0),
-            (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationFactorStepFunction, 0), NVMTL_SINCE(10.12, BOOL, d.isTessellationFactorScaleEnabled, NO) ? 1u : 0u, (uint32_t)NVMTL_SINCE(10.12, NSUInteger, d.tessellationControlPointIndexType, 0),
-            mf, rl ? rl.intValue : -1 };
+        nvk_tess_desc td;
+        NSString *tno = nvmtl_tess_desc_make(vf, d, tpt, tcps, &td);
+        if (tno) return nvmtl_fail(err, tno);
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, &td, &ps->_p);
     } else {
         prc = nvmtl_vk_pipeline_create_rt(vf->_spirv.bytes, vf->_spirv.length, fsb, fsl, &rt, vin.nattr ? &vin : NULL, rsc, NULL, &ps->_p);

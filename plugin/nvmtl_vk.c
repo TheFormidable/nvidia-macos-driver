@@ -6889,8 +6889,33 @@ int nvmtl_vk_compute_pipeline_create_nir(void *nir, const struct nvmtl_air_nir_r
 // it off), set 2 the heap or an empty layout, and the same fetch masks drive the draw. None of the SPIR-V road's
 // rewrites applies: the plugin sends a pipeline that needs one (A8 targets, framebuffer fetch by copies, stencil export,
 // multiview, tessellation, the GL uniform buffer) down that road instead.
+// A post-tessellation stage's inputs as the frontend lists them (result.tess_*), in the form nvt_scan_tese reads the
+// translator's module into: what nvmtl_tess_make_tcs writes. 0, or -1 and why when the result has none or its patch id is
+// not at the Location after every other input (where nvmtl_tess_patch_tese puts it).
+static int nvmtl_air_nir_tese(const struct nvmtl_air_nir_result *r, nvt_tese *t, const char **why)
+{
+    memset(t, 0, sizeof *t);
+    if (r->size < offsetof(struct nvmtl_air_nir_result, tess_inputs) + sizeof r->tess_inputs || !r->tess_domain || r->tess_domain > 2 ||
+        r->tess_input_count > NVMTL_AIR_NIR_TESS_INPUTS) { *why = "the frontend's result describes no tessellation inputs"; return -1; }
+    _Static_assert(NVMTL_AIR_NIR_TESS_INPUTS == sizeof t->in / sizeof t->in[0], "a result lists as many inputs as nvt_tese holds");
+    t->model = 2; t->domain = r->tess_domain == 2 ? 24 : 22; t->pid_kind = NVT_U;
+    for (uint32_t i = 0; i < r->tess_input_count; i++) {
+        const uint32_t k = r->tess_inputs[i].kind, c = r->tess_inputs[i].components;
+        if (k < 1 || k > 3 || c < 1 || c > 4) { *why = "a tessellation input of the frontend's result has no kind the control stage writes"; return -1; }
+        nvt_in *e = &t->in[t->nin++];
+        e->loc = r->tess_inputs[i].location; e->patch = r->tess_inputs[i].patch != 0; e->comps = c;
+        e->kind = k == 1 ? NVT_F : k == 2 ? NVT_I : NVT_U; e->arrlen = e->patch ? 0 : r->tess_inputs[i].array_length;
+        if (!t->has_loc || e->loc > t->maxloc) t->maxloc = e->loc;
+        t->has_loc = 1;
+    }
+    if (r->tess_patch_id_location != ~0u && r->tess_patch_id_location != (t->has_loc ? t->maxloc + 1 : 0)) {
+        *why = "the frontend's patch id is not at the Location after every other input"; return -1; }
+    return 0;
+}
+
 int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *vres, void *fnir, const struct nvmtl_air_nir_result *fres,
-                                 const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, nvk_pipeline *out_)
+                                 const nvk_rt *rt, const nvk_vertex_input *vin, uint32_t samples, const nvk_tess_desc *td,
+                                 nvk_pipeline *out_)
 {
     if (!vnir || !fnir || !vres || !fres || !rt || !out_ || !pnvk_air_to_nir || rt->ncol > NVMTL_NCOL) return -1;
     if (nvmtl_vk_init() || ensure_descriptors()) return -1;
@@ -6904,8 +6929,26 @@ int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *
     for (uint32_t l = 0; l < 32; l++) kind[l] = ((vres->vertex_inputs >> l) & 1u) ? vres->vertex_input_kind[l] : 0;
     VkVertexInputBindingDescription vib[NVMTL_NVIN]; VkVertexInputAttributeDescription via[NVMTL_NVIN]; uint32_t nvib = 0, nvia = 0;
     VkVertexInputBindingDivisorDescriptionKHR vdiv[NVMTL_NVIN]; uint32_t ndiv = 0;
-    if (nvmtl_vertex_input_build(vin, kind, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
+    // a tessellation pipeline has no vertex input: its control stage pulls the vertex buffers (as on the SPIR-V road)
+    if (!td && nvmtl_vertex_input_build(vin, kind, vib, &nvib, via, &nvia, vdiv, &ndiv, &out->vin_mask, &out->vin_dyn, out->vin_stride)) return -1;
     if (out->vin_dyn && !pvkCmdBindVertexBuffers2) return -1;
+    uint32_t *tcs = NULL, *tvs = NULL; size_t tcn = 0, tvn = 0;
+    if (td) {
+        // the SPIR-V road's control and vertex stages (nvmtl_vk_pipeline_create_impl_lifetime_body), from the inputs the
+        // frontend's evaluation stage declares instead of those nvt_scan_tese reads of the translator's module
+        if (!g_tess) { nvlog("tess pipeline REFUSED: this device reports no tessellationShader"); return -1; }
+        nvt_tese t0; const char *why = NULL; char why2[256] = ""; uint32_t nvb = 0;
+        if (nvmtl_air_nir_tese(vres, &t0, &why)) { nvlog("tess pipeline (AIR to NIR) not made: %s", why); return -1; }
+        const uint32_t pidloc = vres->tess_patch_id_location;
+        tcs = nvmtl_tess_make_tcs(&t0, td, vin, pidloc, out->tess_vb, &nvb, &tcn, why2, sizeof why2);
+        tvs = tcs ? nvmtl_tess_make_vs(&tvn) : NULL;
+        if (!tcs || !tvs) { nvlog("tess pipeline REFUSED: %s", tcs ? "out of memory building the tessellation vertex stage" : why2); free(tcs); return -1; }
+        out->tess = 1; out->tess_n = td->n; out->tess_cpidx = td->cpidx; out->tess_nvb = nvb;
+        nvlog("tess pipeline (AIR to NIR): %s patch, %u control points, partition %u, winding %u, factor step %u, scale %u, cp index %u, "
+              "max %.0f, %u vertex buffer(s) pulled, patch_id at Location %d, instance_id Location %d",
+              td->patch_type == 2 ? "quad" : "triangle", td->n, td->partition, td->winding, td->stepfn, td->scale_en, td->cpidx,
+              (double)td->maxf, nvb, (int)pidloc, (int)td->inst_loc);
+    }
     const int hasDepth = rt->dfmt != 0;
     out->has_depth = hasDepth; out->dfmt = rt->dfmt; out->cfmt = rt->ncol ? rt->cfmt[0] : 0u; out->samples = samples;
     out->ncol = rt->ncol; memcpy(out->cfmts, rt->cfmt, sizeof out->cfmts);
@@ -6914,38 +6957,55 @@ int nvmtl_vk_pipeline_create_nir(void *vnir, const struct nvmtl_air_nir_result *
     for (uint32_t i = 0; samples > 1 && i < rt->ncol; i++) if (rt->cfmt[i]) out->rmask |= 1u << i;
     if (nvmtl_air_nir_masks(vres, out->gmask[0], &out->stex_hi[0], out->tbm[0]) ||
         nvmtl_air_nir_masks(fres, out->gmask[1], &out->stex_hi[1], out->tbm[1])) {
-        nvlog("vk: AIR-to-NIR result names a texel buffer that is no texture - not used"); return -1; }
+        nvlog("vk: AIR-to-NIR result names a texel buffer that is no texture - not used"); free(tcs); free(tvs); return -1; }
     memcpy(out->gmask2, out->gmask, sizeof out->gmask2);
     out->gmask_ok = out->gmask2_ok = 1;
     out->tbany = 0; for (int k = 0; k < 4; k++) out->tbany |= (out->tbm[0][k] | out->tbm[1][k]) != 0;
     // [[color(n)]] inputs: the fetch masks and set 3 as the SPIR-V road makes them of its module's bindings 192 + n
     const uint32_t cin = fres->size >= offsetof(struct nvmtl_air_nir_result, resource_flags) ? fres->color_inputs & ((1u << NVMTL_NCOL) - 1u) : 0;
-    if (cin && nvmtl_fetch_copy_on()) { nvlog("vk: AIR-to-NIR fragment reads [[color(n)]] while fetch is emulated by copies - not used"); return -1; }
+    if (cin && nvmtl_fetch_copy_on()) { nvlog("vk: AIR-to-NIR fragment reads [[color(n)]] while fetch is emulated by copies - not used"); free(tcs); free(tvs); return -1; }
     out->fetch_mask = nvmtl_fbfetch_on() ? cin : 0;
     out->fetch_zero = nvmtl_fbfetch_on() ? 0 : cin;
     VkDescriptorSetLayout sl2[4] = { g_setLayout, g_setLayout, g_heapLayout, VK_NULL_HANDLE };
     uint32_t nsl = g_heapSet ? 3 : 2;
     if (cin) {
         pthread_mutex_lock(&g_desc_lock); const int fl = nvmtl_fetch_layouts_locked(); pthread_mutex_unlock(&g_desc_lock);
-        if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - AIR-to-NIR pipeline not used"); return -1; }
+        if (fl) { nvlog("vk: framebuffer fetch layouts could not be made - AIR-to-NIR pipeline not used"); free(tcs); free(tvs); return -1; }
         if (!g_heapSet) sl2[2] = g_emptyLayout;
         sl2[3] = g_fetchLayout; nsl = 4;
     }
     VkRenderPass pass = VK_NULL_HANDLE;
     VkResult r = nvmtl_make_render_pass(out, 0, &pass);
-    if (r != VK_SUCCESS) { nvlog("vk: vkCreateRenderPass(AIR-to-NIR) -> %d", r); return -1; }
+    if (r != VK_SUCCESS) { nvlog("vk: vkCreateRenderPass(AIR-to-NIR) -> %d", r); free(tcs); free(tvs); return -1; }
     out->rp = pass;
-    VkPushConstantRange pc = { VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
-    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2,
-                                        g_sample_locations ? 1u : 0u, g_sample_locations ? &pc : NULL };
+    // the control stage's push range (factors, control-point index and patch index addresses, the vertex buffers) before
+    // the fragment stage's sample positions, as the SPIR-V road's layout has them
+    VkPushConstantRange pc[2]; uint32_t npc = 0;
+    if (td) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0, NVMTL_TESS_PC_BYTES };
+    if (g_sample_locations) pc[npc++] = (VkPushConstantRange){ VK_SHADER_STAGE_FRAGMENT_BIT, NVMTL_SAMPLE_POSITION_OFFSET, NVMTL_SAMPLE_POSITION_BYTES };
+    VkPipelineLayoutCreateInfo plci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, nsl, sl2, npc, npc ? pc : NULL };
+    VkShaderModule tvm = VK_NULL_HANDLE, tcm = VK_NULL_HANDLE;
     r = nvmtl_opaque_CreatePipelineLayout(g_dev, &plci, NULL, &out->layout);
+    if (r == VK_SUCCESS && td) {
+        VkShaderModuleCreateInfo tvi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, tvn * 4, tvs };
+        VkShaderModuleCreateInfo tci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, tcn * 4, tcs };
+        r = pvkCreateShaderModule(g_dev, &tvi, NULL, &tvm);
+        if (r == VK_SUCCESS) r = pvkCreateShaderModule(g_dev, &tci, NULL, &tcm);
+        if (r != VK_SUCCESS) nvlog("vk: vkCreateShaderModule(tessellation, AIR to NIR) -> %d", r);
+    }
     if (r == VK_SUCCESS) {
         nvmtl_nir_stage_info vi = { NVMTL_STYPE_NIR_STAGE, NULL, vnir }, fi = { NVMTL_STYPE_NIR_STAGE, NULL, fnir };
-        VkPipelineShaderStageCreateInfo stages[2] = {
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &vi, 0, VK_SHADER_STAGE_VERTEX_BIT, VK_NULL_HANDLE, "main", NULL },
-            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &fi, 0, VK_SHADER_STAGE_FRAGMENT_BIT, VK_NULL_HANDLE, "main", NULL } };
-        r = nvmtl_graphics_pipeline_make(out, stages, 2, vib, nvib, via, nvia, vdiv, ndiv, NULL, rt, samples, hasDepth);
+        VkPipelineShaderStageCreateInfo stages[4] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &vi, 0, td ? VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT : VK_SHADER_STAGE_VERTEX_BIT,
+              VK_NULL_HANDLE, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, &fi, 0, VK_SHADER_STAGE_FRAGMENT_BIT, VK_NULL_HANDLE, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, tvm, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, tcm, "main", NULL } };
+        r = nvmtl_graphics_pipeline_make(out, stages, td ? 4 : 2, vib, nvib, via, nvia, vdiv, ndiv, td, rt, samples, hasDepth);
     }
+    if (tcm) pvkDestroyShaderModule(g_dev, tcm, NULL);
+    if (tvm) pvkDestroyShaderModule(g_dev, tvm, NULL);
+    free(tcs); free(tvs);
     if (r != VK_SUCCESS || !out->pipe) {
         nvlog("vk: vkCreateGraphicsPipelines(AIR-to-NIR) -> %d", r);
         nvmtl_failed_pipeline(&pending); memset(out_, 0, sizeof *out_); return -1;

@@ -39,6 +39,7 @@ static char g_air_nir_llvm[PATH_MAX];              // air-runtime/libLLVM.dylib 
 static int g_air_nir_v5;                           // the NVK reads version 5: the reflection and the samplers' state
 static int g_air_nir_v6;                           // the NVK reads version 6: [[color(n)]] inputs (framebuffer fetch)
 static int g_air_nir_v7;                           // the NVK reads version 7: argument buffers, the heap's typed dummies
+static int g_air_nir_v8;                           // the NVK reads version 8: post-tessellation vertex functions
 static NSString *g_air_nir_ids;                    // this NVK's and this LLVM's identity, in every cache key
 
 // The log of this road: the plugin's log file, never the system log (a refusal message names what the frontend does not
@@ -200,6 +201,7 @@ static int nvmtl_air_nir_on(void)
             g_air_nir_v5 = nvmtl_vk_air_nir_version() >= 5;
             g_air_nir_v6 = nvmtl_vk_air_nir_version() >= 6;
             g_air_nir_v7 = nvmtl_vk_air_nir_version() >= 7;
+            g_air_nir_v8 = nvmtl_vk_air_nir_version() >= 8;
             g_air_nir_ids = [NSString stringWithFormat:@"nvk %s llvm %llu.%ld.%llu", uuid, (unsigned long long)st.st_size,
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
             if (nvmtl_air_nir_off_listed_here(g_air_nir_ids.UTF8String))
@@ -282,7 +284,8 @@ static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
          | (g_air_nir_v6 ? NVMTL_AIR_NIR_TEXTURE_ARRAYS : 0) | (g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0)
          | (g_air_nir_v7 && nvmtl_vk_bindless_heap_bindings() == 5 ? NVMTL_AIR_NIR_ARGBUF : 0)
          | (g_air_nir_v7 && nvmtl_typed_dummies_wanted() ? NVMTL_AIR_NIR_TYPED_DUMMIES : 0)
-         | (getenv("NVMTL_NO_PIXEL_HW_FILTER") ? NVMTL_AIR_NIR_NO_PIXEL_HW : 0) | extra;   // as the translator reads it
+         | (getenv("NVMTL_NO_PIXEL_HW_FILTER") ? NVMTL_AIR_NIR_NO_PIXEL_HW : 0)   // as the translator reads it
+         | (render && g_air_nir_v8 ? NVMTL_AIR_NIR_TESS : 0) | extra;   // version 8: a post-tessellation vertex function
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's
@@ -307,7 +310,7 @@ static void nvmtl_air_nir_local(NVMTLFunction *f, uint32_t local[3])
 // *res (with NVMTL_AIR_NIR_REFLECT, res->reflection is the caller's to free())
 static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32_t flags, const uint32_t local[3],
                                    NSDictionary<NSString *, NSNumber *> *varyings, NSDictionary *samplers,
-                                   uint32_t descriptors, struct nvmtl_air_nir_result *res)
+                                   uint32_t descriptors, const uint32_t *tess, struct nvmtl_air_nir_result *res)
 {
     memset(res, 0, sizeof *res); res->size = sizeof *res;
     const char *text = f->_air.UTF8String;
@@ -361,6 +364,7 @@ static int nvmtl_air_nir_translate(NVMTLFunction *f, NSDictionary *tgLen, uint32
     if (at) req.flags |= NVMTL_AIR_NIR_SAMPLER_STATES;
     req.sampler_state_count = (uint32_t)at; req.sampler_state_slots = ss.bytes; req.sampler_state_words = sw.bytes;
     req.descriptor_buffers = descriptors;   /* read with NVMTL_AIR_NIR_DESCRIPTORS only */
+    if (tess) { req.tess_spacing = tess[0]; req.tess_order = tess[1]; }   /* read with NVMTL_AIR_NIR_TESS only */
     return pnvk_air_to_nir((void *)g_dev, &req, res);
 }
 
@@ -387,7 +391,7 @@ static void nvmtl_air_nir_key(NVMTLFunction *f, NSDictionary *tgLen, uint32_t fl
 {
     *path = nil; *memoKey = nil;
     NVMTLAirDigest *ad = nvmtl_air_state(f->_air);
-    NSMutableDictionary *k = [@{ @"abi": @7, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
+    NSMutableDictionary *k = [@{ @"abi": @8, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
                          @"size": @[ @(local[0]), @(local[1]), @(local[2]) ], @"flags": @(flags), @"ids": g_air_nir_ids ?: @"" } mutableCopy];
     if (varyings) { k[@"varyings"] = varyings; [k addEntriesFromDictionary:stageKey ?: @{}]; }
     if (samplers.count) k[@"samplers"] = samplers;
@@ -421,7 +425,10 @@ static int nvmtl_air_nir_shader_with(NVMTLFunction *f, NSDictionary *tgLen, uint
         }
         nvlog("air-nir: a cached shader of %s does not read back - translated again", f->_fname.UTF8String ?: "?");
     }
-    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, varyings, samplers, descriptors, res);
+    // a post-tessellation vertex stage's spacing and vertex order are in its key (stageKey "tess")
+    NSArray *tk = [stageKey[@"tess"] isKindOfClass:[NSArray class]] && [stageKey[@"tess"] count] == 2 ? stageKey[@"tess"] : nil;
+    const uint32_t tess[2] = { [tk[0] unsignedIntValue], [tk[1] unsignedIntValue] };
+    const int st = nvmtl_air_nir_translate(f, tgLen, flags, local, varyings, samplers, descriptors, tk ? tess : NULL, res);
     if (st != NVMTL_AIR_NIR_OK) {
         *why = @(res->message[0] ? res->message : "the frontend said no");
         if (st == NVMTL_AIR_NIR_UNSUPPORTED || st == NVMTL_AIR_NIR_BAD_AIR) nvmtl_air_nir_store(*path, *memoKey, st, res, NULL, 0);
@@ -745,7 +752,7 @@ void nvmtl_air_nir_gpu_fault(const char *what)
 // Whether newRenderPipelineState asks the road for the pipeline of vf and ff; NO with *why left nil when the road is off
 // for the process. Every pipeline whose stages the SPIR-V road rewrites goes that road.
 BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFrag, uint32_t a8mask, BOOL amplified,
-                                 id samplePayload, NSString **why)
+                                 id samplePayload, BOOL tess, NSString **why)
 {
     if (!vf || !nvmtl_air_nir_on()) return NO;
     if (noFrag || !ff) { *why = @"it has no fragment function (the SPIR-V road's empty one stands in)"; return NO; }
@@ -755,10 +762,11 @@ BOOL nvmtl_air_nir_render_wanted(NVMTLFunction *vf, NVMTLFunction *ff, BOOL noFr
     if (a8mask) { *why = @"it renders to an A8 target (its fragment stage is the translator's A8 variant)"; return NO; }
     if (amplified) { *why = @"vertex amplification (its stages are the translator's multiview variants)"; return NO; }
     // A stage newFunctionWithName: made without the translator (phase 4) has no SPIR-V to read: the frontend translated it,
-    // and it refuses a post-tessellation vertex function and [[stencil]] outputs, and [[color(n)]] inputs unless it was
-    // asked for them (nvmtl_air_nir_fetch_ok), so none applies.
-    uint32_t tpt = 0, tcps = 0;
-    if (!vf->_spirvLazy && nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) { *why = @"tessellation"; return NO; }
+    // and it refuses [[stencil]] outputs, and [[color(n)]] inputs unless it was asked for them (nvmtl_air_nir_fetch_ok), so
+    // neither applies. A post-tessellation vertex function (tess: the caller read it from the reflection, as the SPIR-V
+    // road's module says it) takes the road with an NVK of version 8: its evaluation stage the frontend's, the control
+    // and vertex stages the SPIR-V road's (nvmtl_vk_pipeline_create_nir).
+    if (tess && !g_air_nir_v8) { *why = @"tessellation (this NVK's frontend is older than version 8)"; return NO; }
     if (nvmtl_gl_uniform_index(vf) < 32 || nvmtl_gl_uniform_index(ff) < 32) { *why = @"the GL uniform buffer"; return NO; }
     if (!ff->_spirvLazy && nvmtl_spirv_fetch_mask(ff->_spirv.bytes, ff->_spirv.length) && !nvmtl_air_nir_fetch_ok()) {
         *why = g_air_nir_v6 ? @"it reads [[color(n)]] and framebuffer fetch is emulated by copies here (NVMTL_FETCH_COPY)"
@@ -799,8 +807,15 @@ static NSDictionary *nvmtl_air_nir_varyings(NVMTLFunction *f, const uint32_t *re
 // The pipeline of vf and ff from their NIR into *out, or -1 and why not. Render stages promise no buffer alignment
 // above 4 bytes (NVMTL_AIR_NIR_ALIGN4), as the SPIR-V road builds every render module whose accesses promise more SAFE.
 int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
-                                  uint32_t samples, NSString *vdesc, nvk_pipeline *out, NSString **why)
+                                  uint32_t samples, NSString *vdesc, const nvk_tess_desc *td, nvk_pipeline *out, NSString **why)
 {
+    // a post-tessellation stage's spacing and vertex order: the execution modes the SPIR-V road sets on its module
+    // (nvmtl_vk_pipeline_create_impl_lifetime_body), NVMTL_TESS_ORDER_FLIP included
+    NSMutableDictionary *vkey = [@{ @"stage": @"vertex", @"vertex_descriptor": vdesc ?: @"" } mutableCopy];
+    if (td) {
+        const char *flip = getenv("NVMTL_TESS_ORDER_FLIP"); const int fl = flip && *flip == '1';
+        vkey[@"tess"] = @[ @(td->partition == 2 ? 3u : td->partition == 3 ? 2u : 1u), @(((td->winding == 0) != fl) ? 5u : 4u) ];
+    }
     uint32_t remap[128]; uint8_t have[128];
     const int link = nvmtl_varying_remap(vf, ff, remap, have, NULL);
     NSDictionary *vv = nvmtl_air_nir_varyings(vf, NULL, why), *fv = vv ? nvmtl_air_nir_varyings(ff, link > 0 ? remap : NULL, why) : nil;
@@ -808,7 +823,7 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
     const uint32_t one[3] = { 1, 1, 1 };
     struct nvmtl_air_nir_result vres, fres; void *vn = NULL, *fn = NULL; NSString *path = nil, *memoKey = nil; BOOL vhit = NO, fhit = NO;
     NSString *stageWhy = nil;
-    if (nvmtl_air_nir_shader(vf, nil, NVMTL_AIR_NIR_ALIGN4, one, vv, @{ @"stage": @"vertex", @"vertex_descriptor": vdesc ?: @"" },
+    if (nvmtl_air_nir_shader(vf, nil, NVMTL_AIR_NIR_ALIGN4, one, vv, vkey,
                              vf->_samplerStates, &vres, &vn, &stageWhy, &path, &memoKey, &vhit)) {
         *why = [NSString stringWithFormat:@"vertex %@: %@", vf->_fname, stageWhy ?: @"?"]; return -1; }
     if (nvmtl_air_nir_shader(ff, nil, NVMTL_AIR_NIR_ALIGN4, one, fv, @{ @"stage": @"fragment" },
@@ -818,6 +833,8 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
     int rc = -1;
     if (vres.stage != NVMTL_AIR_NIR_STAGE_VERTEX || fres.stage != NVMTL_AIR_NIR_STAGE_FRAGMENT)
         *why = @"a stage is not the function the descriptor names it as";
+    else if ((td != NULL) != (vres.tess_domain != 0) || (td && (vres.tess_domain != td->patch_type || vres.tess_control_points != td->n)))
+        *why = @"the vertex stage's tessellation is not the pipeline's";
     else {
         rc = 0;
         NVMTLFunction *fs[2] = { vf, ff }; const struct nvmtl_air_nir_result *rs[2] = { &vres, &fres };
@@ -831,7 +848,7 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
             }
         }
         if (!rc) nvmtl_air_nir_ws_arm();
-        if (!rc && nvmtl_vk_pipeline_create_nir(vn, &vres, fn, &fres, rt, vin, samples, out)) {
+        if (!rc && nvmtl_vk_pipeline_create_nir(vn, &vres, fn, &fres, rt, vin, samples, td, out)) {
             *why = @"NVK would not make a pipeline of the two stages' NIR"; rc = -1; }
     }
     pnvk_air_nir_free(vn); pnvk_air_nir_free(fn);
@@ -938,7 +955,7 @@ static NSDictionary *nvmtl_air_nir_function_reflection(NVMTLFunction *f, NSStrin
     // a kernel as nvmtl_air_nir_make asks; a render stage with the device's robustness and no buffer alignment above 4,
     // as nvmtl_air_nir_render_pipeline asks, but with its own Locations (the pipeline hands it the linked ones)
     const uint32_t flags = kernel ? nvmtl_air_nir_flags(0, NO) : (nvmtl_air_nir_flags(NVMTL_AIR_NIR_ALIGN4, YES) & ~NVMTL_AIR_NIR_VARYINGS);
-    NSDictionary *k = @{ @"abi": @7, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"stage": f->_stage ?: @"",
+    NSDictionary *k = @{ @"abi": @8, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"stage": f->_stage ?: @"",
                          @"ids": g_air_nir_ids ?: @"", @"flags": @(flags) };
     NSData *tail = [NSJSONSerialization dataWithJSONObject:k options:NSJSONWritingSortedKeys error:NULL];
     NSString *path = ad && tail ? nvmtl_spvcache_path_air(ad, tail, @"nrf1") : nil;
@@ -964,7 +981,7 @@ static NSDictionary *nvmtl_air_nir_function_reflection(NVMTLFunction *f, NSStrin
     uint32_t local[3] = { 1, 1, 1 };
     if (kernel) { local[0] = 64; }
     struct nvmtl_air_nir_result res;
-    const int st = nvmtl_air_nir_translate(f, nil, flags | NVMTL_AIR_NIR_REFLECT, local, nil, nil, 0, &res);
+    const int st = nvmtl_air_nir_translate(f, nil, flags | NVMTL_AIR_NIR_REFLECT, local, nil, nil, 0, NULL, &res);
     NSString *kpath = nil, *kmemo = nil;
     if (kernel) nvmtl_air_nir_key(f, nil, flags, local, nil, nil, nil, 0, &kpath, &kmemo);
     NSDictionary *d = nil;

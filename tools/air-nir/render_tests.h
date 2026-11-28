@@ -34,7 +34,23 @@ struct rrun {
    uint32_t idx[1000];
    uint8_t abt[12][16 * 16 * 4];                  /* r_argbuf's textures */
    char pre[192];                                 /* what a setup found wrong before the draw (r_argbuf_reuse) */
+   id<MTLLibrary> lib;                            /* the test's library (a setup's kernels) */
+   id<MTLBuffer> tfac;                            /* a tessellation pipeline's factors (setTessellationFactorBuffer:) */
+   id<MTLComputePipelineState> tfac_cps;          /* ... written by this kernel first, one thread per patch, when set */
+   id<MTLBuffer> tfac_in;                         /* its buffer(1) */
+   float tcp[9 * 8];                              /* r_tess_tri's control points */
    char why[256];
+};
+
+/* a post-tessellation vertex function's pipeline (round 10): drawn with drawPatches, the factors from setup */
+struct rtess {
+   unsigned patches, cps, instances;
+   MTLTessellationPartitionMode part;
+   MTLWinding wind;
+   float factor;                     /* every edge and inside factor (a quad patch's), as the setup writes them */
+   unsigned segments;                /* what the tessellator makes of it on each edge: integer spacing's segments */
+   bool fractional;                  /* fractional spacing: segments of two lengths, placed symmetrically */
+   int front;                        /* what [[front_facing]] reads over the patches: 1 true, -1 false */
 };
 
 struct rtest {
@@ -52,6 +68,8 @@ struct rtest {
    bool fc_both;                     /* the vertex function is made with the constants too */
    const char *linked_air, *linked_fn; /* a visible function of another library, linked into the fragment stage */
    const char *road_only;            /* why the SPIR-V road makes no pipeline of it: skipped there */
+   bool road;                        /* with the road on, it must take it: the SPIR-V road's pipeline is a failure */
+   const struct rtess *tess;         /* a tessellation pipeline */
 };
 
 static id<MTLBuffer>
@@ -1451,6 +1469,275 @@ rsr_check(struct rrun *r)
 
 #define F32 MTLPixelFormatRGBA32Float
 #define NOC MTLPixelFormatInvalid
+/* ---- r_tess (round 10): post-tessellation vertex functions ---------------------------------------------------------
+ *
+ * Two quad patches side by side (control points pulled per control point, a tint per patch, the patch id), every
+ * factor the same. Their corners map (u, v) onto the screen affinely, so a varying that is f(u) + g(v) is, after the
+ * rasterizer, the piecewise-linear interpolation of f and g at the tessellator's vertices whatever triangles it makes
+ * of them: with integer spacing and n segments, the nodes i/n exactly (tq_check); with fractional spacing, nodes of two
+ * lengths placed symmetrically, which a function symmetric about 1/2 shows (tq_frac_check). The triangle patches'
+ * factors come from a kernel, one patch at 0 (not drawn); their varyings are affine in the barycentrics, exact. */
+
+struct tq_cpv { float pos[4], st[2], pad[2]; };
+static const unsigned tq_x0[2] = { 8, 34 }, tq_x1[2] = { 30, 56 }, tq_y0 = 8, tq_y1 = 56;   /* pixels: [x0, x1) x [y0, y1) */
+
+static void
+tq_vdesc(MTLVertexDescriptor *vd)
+{
+   vd.attributes[0].format = MTLVertexFormatFloat4;
+   vd.attributes[0].offset = 0;
+   vd.attributes[0].bufferIndex = 0;
+   vd.attributes[1].format = MTLVertexFormatFloat2;
+   vd.attributes[1].offset = 16;
+   vd.attributes[1].bufferIndex = 0;
+   vd.layouts[0].stride = sizeof(struct tq_cpv);
+   vd.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+   vd.attributes[2].format = MTLVertexFormatFloat4;
+   vd.attributes[2].offset = 0;
+   vd.attributes[2].bufferIndex = 2;
+   vd.layouts[2].stride = 16;
+   vd.layouts[2].stepFunction = MTLVertexStepFunctionPerPatch;
+}
+
+static void
+tq_setup(struct rrun *r)
+{
+   struct tq_cpv cp[8];
+   float tint[2][4];
+   for (unsigned p = 0; p < 2; p++) {
+      const float x0 = tq_x0[p] / 32.0f - 1, x1 = tq_x1[p] / 32.0f - 1, yb = 1 - tq_y1 / 32.0f, yt = 1 - tq_y0 / 32.0f;
+      const float c[4][2] = { { x0, yb }, { x1, yb }, { x1, yt }, { x0, yt } }, st[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+      for (unsigned k = 0; k < 4; k++)
+         cp[4 * p + k] = (struct tq_cpv){ { c[k][0], c[k][1], 0.0f, 1.0f }, { st[k][0], st[k][1] }, { 0, 0 } };
+      tint[p][0] = 0.25f + 0.5f * p;
+      tint[p][1] = tint[p][2] = tint[p][3] = 0;
+   }
+   r->vbuf[0] = rbuf(cp, sizeof cp);
+   r->vbuf[2] = rbuf(tint, sizeof tint);
+   const uint16_t f = half_bits(r->t->tess->factor);
+   uint16_t fac[2][6];
+   for (unsigned p = 0; p < 2; p++)
+      for (unsigned k = 0; k < 6; k++)
+         fac[p][k] = f;
+   r->tfac = rbuf(fac, sizeof fac);
+}
+
+/* the piecewise-linear interpolation of the function at nodes i/n */
+static float tq_sq(float x) { return x * x; }
+static float tq_cube(float x) { return x * x * x; }
+static float tq_mid(float x) { return (x - 0.5f) * (x - 0.5f); }
+static float
+tq_pl(float (*f)(float), unsigned n, float x)
+{
+   unsigned k = (unsigned)floorf(x * n);
+   if (k >= n)
+      k = n - 1;
+   const float a = (float)k / n, b = (float)(k + 1) / n;
+   return f(a) + (f(b) - f(a)) * (x - a) * n;
+}
+
+/* the patch pixel (px, py) is in, -1 outside both by more than 1.5 pixels, -2 near an edge; its (u, v) */
+static int
+tq_where(unsigned px, unsigned py, float *u, float *v)
+{
+   const float x = px + 0.5f, y = py + 0.5f;
+   for (int p = 0; p < 2; p++) {
+      if (x > tq_x0[p] - 1.5f && x < tq_x1[p] + 1.5f && y > tq_y0 - 1.5f && y < tq_y1 + 1.5f) {
+         if (x < tq_x0[p] + 1.5f || x > tq_x1[p] - 1.5f || y < tq_y0 + 1.5f || y > tq_y1 - 1.5f)
+            return -2;
+         *u = (x - tq_x0[p]) / (float)(tq_x1[p] - tq_x0[p]);
+         *v = (tq_y1 - y) / (float)(tq_y1 - tq_y0);
+         return p;
+      }
+   }
+   return -1;
+}
+
+static bool
+tq_common(struct rrun *r, int p, unsigned px, unsigned py, float u, float v)
+{
+   const struct rtess *ts = r->t->tess;
+   const float *a = rcol(r, 0, px, py), *b = rcol(r, 1, px, py);
+   const float tint = 0.25f + 0.5f * p + (float)p;
+   if (fabsf(a[2] - tint) > 1e-6f || a[3] != (float)ts->front) {
+      snprintf(r->why, sizeof r->why, "patch %d pixel (%u,%u): tint and patch id %.7g (want %.7g), front_facing %g (want %d)", p, px,
+               py, a[2], tint, a[3], ts->front);
+      return false;
+   }
+   const float uv[2] = { u, v };
+   for (unsigned c = 0; c < 2; c++)
+      if (fabsf(b[2 + c] - uv[c]) > 2e-5f) {
+         snprintf(r->why, sizeof r->why, "patch %d pixel (%u,%u): %s %.7g, want %.7g (the position in the patch, interpolated)", p, px, py,
+                  c ? "v" : "u", b[2 + c], uv[c]);
+         return false;
+      }
+   return true;
+}
+
+static bool
+tq_check(struct rrun *r)
+{
+   const unsigned n = r->t->tess->segments;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         float u = 0, v = 0;
+         const int p = tq_where(px, py, &u, &v);
+         if (p == -2)
+            continue;
+         if (p < 0) {
+            if (!rwant(r, 0, px, py, clear_col, 4, 0) || !rwant(r, 1, px, py, clear_col, 4, 0))
+               return false;
+            continue;
+         }
+         if (!tq_common(r, p, px, py, u, v))
+            return false;
+         const float a[2] = { tq_pl(tq_sq, n, u), tq_pl(tq_cube, n, v) }, b[2] = { tq_pl(tq_mid, n, u), tq_pl(tq_mid, n, v) };
+         if (!rwant(r, 0, px, py, a, 2, 2e-5f) || !rwant(r, 1, px, py, b, 2, 2e-5f))
+            return false;
+      }
+   return true;
+}
+
+/* fractional spacing: each patch's (u - 1/2)^2 and (v - 1/2)^2 the same at mirrored pixels (the tessellator's nodes are
+ * symmetric), and not the uniform subdivision of the factor rounded up (the shorter segments are there) */
+static bool
+tq_frac_check(struct rrun *r)
+{
+   const unsigned n = r->t->tess->segments;
+   float apart = 0;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         float u = 0, v = 0;
+         const int p = tq_where(px, py, &u, &v);
+         if (p == -2)
+            continue;
+         if (p < 0) {
+            if (!rwant(r, 0, px, py, clear_col, 4, 0) || !rwant(r, 1, px, py, clear_col, 4, 0))
+               return false;
+            continue;
+         }
+         if (!tq_common(r, p, px, py, u, v))
+            return false;
+         const unsigned mx = tq_x0[p] + tq_x1[p] - 1 - px, my = tq_y0 + tq_y1 - 1 - py;
+         const float *b = rcol(r, 1, px, py), *bx = rcol(r, 1, mx, py), *by = rcol(r, 1, px, my);
+         if (fabsf(b[0] - bx[0]) > 2e-5f || fabsf(b[1] - by[1]) > 2e-5f) {
+            snprintf(r->why, sizeof r->why, "patch %d pixel (%u,%u): (u-1/2)^2 %.7g at its mirror (%u,%u) %.7g, (v-1/2)^2 %.7g at (%u,%u) "
+                     "%.7g: the segments are not symmetric", p, px, py, b[0], mx, py, bx[0], b[1], px, my, by[1]);
+            return false;
+         }
+         apart = fmaxf(apart, fabsf(b[0] - tq_pl(tq_mid, n, u)));
+      }
+   if (apart < 1e-3f) {
+      snprintf(r->why, sizeof r->why, "the image is the uniform subdivision in %u segments (%.3g at most from it): no fractional spacing", n, apart);
+      return false;
+   }
+   return true;
+}
+
+struct tt_cpv { float pos[2], pad[2], col[4]; };
+static const float tt_lv[3] = { 2.0f, 5.0f, 0.0f };   /* the kernel's factors: patch 2 at 0 is not drawn */
+
+static void
+tt_vdesc(MTLVertexDescriptor *vd)
+{
+   vd.attributes[0].format = MTLVertexFormatFloat2;
+   vd.attributes[0].offset = 0;
+   vd.attributes[0].bufferIndex = 0;
+   vd.attributes[1].format = MTLVertexFormatFloat4;
+   vd.attributes[1].offset = 16;
+   vd.attributes[1].bufferIndex = 0;
+   vd.layouts[0].stride = sizeof(struct tt_cpv);
+   vd.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+}
+
+/* patch k, instance i: the pixels (4 + 20k, 4 + 32i), (20 + 20k, 4 + 32i), (4 + 20k, 28 + 32i) */
+static void
+tt_corner(unsigned k, unsigned c, float px[2])
+{
+   px[0] = 4.0f + 20.0f * k + (c == 1 ? 16.0f : 0.0f);
+   px[1] = 4.0f + (c == 2 ? 24.0f : 0.0f);
+}
+
+static void
+tt_setup(struct rrun *r)
+{
+   struct tt_cpv cp[9];
+   for (unsigned k = 0; k < 3; k++)
+      for (unsigned c = 0; c < 3; c++) {
+         float px[2];
+         tt_corner(k, c, px);
+         cp[3 * k + c] = (struct tt_cpv){ { px[0] / 32.0f - 1, 1 - px[1] / 32.0f }, { 0, 0 },
+                                          { rndf(0, 1), rndf(0, 1), rndf(0, 1), rndf(0, 1) } };
+      }
+   r->vbuf[0] = rbuf(cp, sizeof cp);
+   static const float shift[2][4] = { { 0, 0, 0, 0 }, { 0, -1, 0, 0 } };
+   r->vbuf[1] = rbuf(shift, sizeof shift);
+   r->tfac = rbuf(NULL, 3 * 8);
+   memset(r->tfac.contents, 0xff, 3 * 8);   /* the kernel writes every factor */
+   r->tfac_in = rbuf(tt_lv, sizeof tt_lv);
+   NSError *e = nil;
+   id<MTLFunction> kf = [r->lib newFunctionWithName:@"tt_factors"];
+   r->tfac_cps = kf ? [dev newComputePipelineStateWithFunction:kf error:&e] : nil;
+   [kf release];
+   if (!r->tfac_cps)
+      snprintf(r->pre, sizeof r->pre, "no pipeline of the factor kernel tt_factors: %s", e.localizedDescription.UTF8String ?: "?");
+   _Static_assert(sizeof cp == sizeof r->tcp, "the control points kept for the check");
+   memcpy(r->tcp, cp, sizeof cp);
+}
+
+static bool
+tt_check(struct rrun *r)
+{
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
+   const struct tt_cpv *cp = (const struct tt_cpv *)r->tcp;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         int hit = -1, near = 0;
+         float bary[3], hb[3];
+         unsigned hk = 0, hi = 0;
+         for (unsigned i = 0; i < 2; i++)
+            for (unsigned k = 0; k < 3; k++) {
+               float s[3][2];
+               for (unsigned c = 0; c < 3; c++) {
+                  tt_corner(k, c, s[c]);
+                  s[c][1] += 32.0f * i;
+               }
+               const int w = tri_where(s, px, py, bary);
+               if (w == 1) {
+                  hit = 1, hk = k, hi = i;
+                  memcpy(hb, bary, sizeof hb);
+               } else if (w == 0)
+                  near = 1;
+            }
+         if (near)
+            continue;
+         if (hit < 0 || hk == 2) {   /* outside every patch, or in the one whose factors are 0 */
+            if (!rwant(r, 0, px, py, clear_col, 4, 0))
+               return false;
+            continue;
+         }
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = cp[3 * hk].col[c] * hb[0] + cp[3 * hk + 1].col[c] * hb[1] + cp[3 * hk + 2].col[c] * hb[2];
+         want[3] += 10.0f * hk + 100.0f * hi;
+         if (!rwant(r, 0, px, py, want, 4, 1e-4f)) {
+            snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (patch %u, instance %u)", hk, hi);
+            return false;
+         }
+      }
+   return true;
+}
+
+static const struct rtess tq_int = { 2, 4, 1, MTLTessellationPartitionModeInteger, MTLWindingClockwise, 4.0f, 4, false, 1 };
+static const struct rtess tq_pow2 = { 2, 4, 1, MTLTessellationPartitionModePow2, MTLWindingClockwise, 3.0f, 4, false, 1 };
+static const struct rtess tq_fodd = { 2, 4, 1, MTLTessellationPartitionModeFractionalOdd, MTLWindingClockwise, 2.5f, 3, true, 1 };
+static const struct rtess tq_feven = { 2, 4, 1, MTLTessellationPartitionModeFractionalEven, MTLWindingClockwise, 3.5f, 4, true, 1 };
+static const struct rtess tq_ccw = { 2, 4, 1, MTLTessellationPartitionModeInteger, MTLWindingCounterClockwise, 4.0f, 4, false, -1 };
+static const struct rtess tt_kern = { 3, 3, 2, MTLTessellationPartitionModeInteger, MTLWindingClockwise, 0.0f, 0, false, 1 };
+
 static const struct rtest rtests[] = {
    { "r_stage_in", "r_stage_in", "rs_vs", "rs_fs", { F32, F32, F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL,
      rs_vdesc, rs_setup, rs_check, "1e-4" },
@@ -1549,6 +1836,22 @@ static const struct rtest rtests[] = {
    { "r_argbuf_reuse", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rsr_setup,
      rsr_check, "4e-5; r_argbuf after six samplers of other states held heap slots and were released: no slot changes its "
      "sampler state", false, false, NULL, NULL },
+   { "r_tess_quad", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
+     tq_check, "2e-5; quad patches, integer spacing, factor 4: s^2, t^3 and (s-1/2)^2 piecewise linear at i/4, the tint per "
+     "patch and the patch id flat", false, false, NULL, NULL, NULL, true, &tq_int },
+   { "r_tess_pow2", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
+     tq_check, "2e-5; r_tess_quad with pow2 spacing at factor 3: 4 segments", false, false, NULL, NULL, NULL, true, &tq_pow2 },
+   { "r_tess_fodd", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
+     tq_frac_check, "2e-5; fractional odd spacing at 2.5: symmetric segments, not 3 equal ones", false, false, NULL, NULL, NULL,
+     true, &tq_fodd },
+   { "r_tess_feven", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
+     tq_frac_check, "2e-5; fractional even spacing at 3.5: symmetric segments, not 4 equal ones", false, false, NULL, NULL, NULL,
+     true, &tq_feven },
+   { "r_tess_ccw", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
+     tq_check, "2e-5; r_tess_quad with counter-clockwise output: the other face", false, false, NULL, NULL, NULL, true, &tq_ccw },
+   { "r_tess_tri", "r_tess", "tt_vs", "tt_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tt_vdesc, tt_setup,
+     tt_check, "1e-4; triangle patches, two instances (instance_id), factors from a kernel per patch (one 0: not drawn), the "
+     "patch id, a buffer at the instance", false, false, NULL, NULL, NULL, true, &tt_kern },
 };
 #undef F32
 #undef NOC

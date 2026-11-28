@@ -131,6 +131,18 @@
                                                  * descriptor buffer what the two access forms of the translator do not
                                                  * agree on (a 64-bit component, a store, an access below its natural
                                                  * alignment, the pointer as a value) is refused with it. */
+/* Since version 8: */
+#define NVMTL_AIR_NIR_TESS          (1u << 17)  /* a post-tessellation vertex function ([[patch(triangle|quad, n)]]) is
+                                                 * translated as the tessellation evaluation stage the plugin's
+                                                 * tessellation path makes of the translator's TessellationEvaluation
+                                                 * module (nvmtl_tess_patch_tese): its spacing and vertex order are
+                                                 * tess_spacing and tess_order, its control points arrays of n at the
+                                                 * Locations of their fields, its patch inputs per-patch inputs at theirs,
+                                                 * [[instance_id]] a per-patch input after them, [[position_in_patch]]
+                                                 * the tessellation coordinate, and [[patch_id]] a per-patch input at the
+                                                 * Location after every other (result.tess_*: what the plugin's
+                                                 * tessellation control stage writes). Without it such a function is
+                                                 * refused, as before. */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
@@ -215,11 +227,20 @@ struct nvmtl_air_nir_request {
     * storage-buffer descriptor in the translator's module as the plugin lowers it (NVMTL_AIR_NIR_DESCRIPTORS) */
    uint32_t descriptor_buffers;
    uint32_t reserved7;
+
+   /* Since version 8, read only with NVMTL_AIR_NIR_TESS and a size that reaches them: a post-tessellation vertex
+    * function's spacing and vertex order, the SPIR-V execution modes the plugin sets on the translator's module
+    * (SpacingEqual 1, SpacingFractionalEven 2, SpacingFractionalOdd 3; VertexOrderCw 4, VertexOrderCcw 5); 0 takes the
+    * translator's own (SpacingEqual, VertexOrderCcw) */
+   uint32_t tess_spacing;
+   uint32_t tess_order;
 };
 #define NVMTL_AIR_NIR_REQUEST_V1_SIZE 176u   /* the request without the fc_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V3_SIZE 208u   /* the request without the varying_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V4_SIZE 232u   /* the request without the sampler_state_* fields */
 #define NVMTL_AIR_NIR_REQUEST_V5_SIZE 256u   /* the request without descriptor_buffers */
+#define NVMTL_AIR_NIR_REQUEST_V7_SIZE 264u   /* the request without tess_spacing */
+#define NVMTL_AIR_NIR_TESS_INPUTS   40u      /* the inputs a tessellation evaluation stage lists (nvmtl_vk.c nvt_tese) */
 
 struct nvmtl_air_nir_result {
    uint32_t size;                    /* sizeof(struct nvmtl_air_nir_result), set by the caller */
@@ -279,6 +300,21 @@ struct nvmtl_air_nir_result {
    uint32_t descriptor_wanted;       /* refused without NVMTL_AIR_NIR_DESCRIPTORS: the buffers it indexes with a value read
                                       * from memory (the translator may keep any of them a descriptor); the plugin asks
                                       * again with descriptor_buffers */
+
+   /* Since version 8, written when the caller's size reaches them: a post-tessellation vertex function (stage
+    * NVMTL_AIR_NIR_STAGE_VERTEX, a MESA_SHADER_TESS_EVAL shader, NVMTL_AIR_NIR_TESS), the interface the plugin's
+    * tessellation control stage writes, as nvt_scan_tese reads the translator's module: */
+   uint32_t tess_domain;             /* 0 not one; 1 triangle, 2 quad (MTLPatchType) */
+   uint32_t tess_control_points;     /* the n of [[patch(..., n)]] */
+   uint32_t tess_patch_id_location;  /* [[patch_id]]'s per-patch input (a 32-bit unsigned integer); ~0u: not read */
+   uint32_t tess_input_count;
+   struct {
+      uint32_t location;
+      uint32_t patch;                /* 1: per patch; 0: an array of array_length control points */
+      uint32_t kind;                 /* of its 32-bit components: 1 float, 2 signed, 3 unsigned integer */
+      uint32_t components;
+      uint32_t array_length;
+   } tess_inputs[NVMTL_AIR_NIR_TESS_INPUTS];   /* every input but the patch id, in the order they are declared */
 };
 #define NVMTL_AIR_NIR_RES_HEAP      (1u << 0)   /* the bindless heap (set 2) and the table's texture slots */
 #define NVMTL_AIR_NIR_RES_DESCRIPTORS (1u << 1) /* storage-buffer descriptors (descriptor_mask) */
@@ -288,6 +324,7 @@ struct nvmtl_air_nir_result {
 #define NVMTL_AIR_NIR_RESULT_V4_SIZE 1192u   /* the result up to reflection */
 #define NVMTL_AIR_NIR_RESULT_V5_SIZE 1336u   /* the result up to color_inputs */
 #define NVMTL_AIR_NIR_RESULT_V6_SIZE 1344u   /* the result up to descriptor_mask */
+#define NVMTL_AIR_NIR_RESULT_V7_SIZE 1352u   /* the result up to tess_domain */
 
 #ifdef __cplusplus
 extern "C" {
@@ -310,9 +347,10 @@ typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data,
  * plugin then neither leaves the translator out nor hands it a sampler's state). A version-5 NVK ignores
  * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs; one older than version 7 ignores NVMTL_AIR_NIR_ARGBUF,
  * NVMTL_AIR_NIR_TYPED_DUMMIES and NVMTL_AIR_NIR_DESCRIPTORS, refuses argument buffers, and refuses a vertex or fragment
- * function that indexes a buffer with a value read from memory without saying so in descriptor_wanted. */
+ * function that indexes a buffer with a value read from memory without saying so in descriptor_wanted; one older than
+ * version 8 ignores NVMTL_AIR_NIR_TESS and refuses a post-tessellation vertex function. */
 typedef int (*nvmtl_air_nir_version_v1_fn)(void);
-#define NVMTL_AIR_NIR_VERSION 7
+#define NVMTL_AIR_NIR_VERSION 8
 #ifdef __cplusplus
 }
 #endif
