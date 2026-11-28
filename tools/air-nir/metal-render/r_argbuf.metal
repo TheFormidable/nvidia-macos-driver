@@ -6,7 +6,8 @@
 // fragment function samples a texture with a sampler of one, reads an array of textures by an index that changes from
 // pixel to pixel, samples a texture of the array with an element of an array of samplers chosen per pixel, a nested
 // argument buffer with its own texture, sampler and buffer, a palette buffer, and an array of argument buffers indexed
-// per pixel
+// per pixel. The indices chosen at run time come from the instance and the pixel's position (r_argbuf_data: from a
+// buffer, which makes the translator keep the argument buffer a bounds-checked descriptor, and the frontend refuse)
 #include <metal_stdlib>
 using namespace metal;
 
@@ -27,10 +28,11 @@ struct VItem {
 };
 struct VOut { float4 pos [[position]]; float2 uv; float4 vc [[flat]]; };
 
-vertex VOut rab_vs(uint vid [[vertex_id]], constant VArgs &va [[buffer(0)]], constant VItem *vitems [[buffer(1)]],
-                   constant uint *sel [[buffer(2)]])
+vertex VOut rab_vs(uint vid [[vertex_id]], uint iid [[instance_id]], constant VArgs &va [[buffer(0)]],
+                   constant VItem *vitems [[buffer(1)]])
 {
    VOut o;
+   const uint sel[2] = { iid + 1u, iid + 1u };   /* instance 0: 1 */
    const float2 p = va.pos[vid] * va.scale;
    o.pos = float4(p, 0, 1);
    o.uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
@@ -59,13 +61,13 @@ struct FItem {
    device const float4 *v [[id(1)]];
 };
 
-fragment float4 rab_fs(VOut in [[stage_in]], constant FArgs &fa [[buffer(0)]], constant FItem *items [[buffer(1)]],
-                       constant uint *sel [[buffer(2)]])
+fragment float4 rab_fs(VOut in [[stage_in]], constant FArgs &fa [[buffer(0)]], constant FItem *items [[buffer(1)]])
 {
    const uint2 px = uint2(in.pos.xy);
    const uint k = (px.x + px.y) & 1u;
+   const uint sel[3] = { 2u - k * 2u, k * 2u, 1u };   /* sel[k]: 2 or 0 (r_argbuf_data's { 2, 0, 1 }), sel[2] 1 */
    float4 c = fa.tex.sample(fa.smp, in.uv);
-   c += fa.texs[sel[k]].read(px / 4) * 2.0;
+   c += fa.texs[sel[0]].read(px / 4) * 2.0;
    c += fa.texs[1].sample(fa.smps[k], in.uv * 1.5);
    c += fa.inner->t.sample(fa.inner->s, in.uv * 2.0 - 0.5) * 0.5 + fa.inner->data[px.x & 7u];
    c += fa.pal[px.y & 3u];

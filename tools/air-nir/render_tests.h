@@ -1484,6 +1484,9 @@ static const struct rtest rtests[] = {
    { "r_argbuf", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rab_setup, rab_check,
      "4e-5 (sums of nearest samples and buffer values); argument buffers in both stages: fields, arrays of textures and "
      "samplers indexed at run time, nested ones, arrays of them", false, false, NULL, NULL },
+   { "r_argbuf_data", "r_argbuf_data", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rab_setup,
+     rab_check, "4e-5; r_argbuf indexed by values read from buffers: an argument buffer the translator keeps a descriptor, "
+     "the SPIR-V road's", true, false, NULL, NULL },
 };
 #undef F32
 #undef NOC
