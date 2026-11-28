@@ -40,6 +40,7 @@
 #include <dlfcn.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -415,7 +416,13 @@ main(int argc, char **argv)
                   req.fc_payloads = fc_pay;
                }
                struct nvmtl_air_nir_result res = { sizeof res };
+               /* round 12, AIRSWEEP_TIME=1: the time of the first request, and of the descriptor retry (the translator's
+                * module, its lowering and the second request) when one follows: "TIME<TAB>function<TAB>first ms<TAB>retry ms" */
+               struct timespec t0, t1, t2;
+               clock_gettime(CLOCK_MONOTONIC, &t0);
                int st = to_nir(dev, &req, &res);
+               clock_gettime(CLOCK_MONOTONIC, &t1);
+               t2 = t1;
                if (res.nir)
                   free_nir(res.nir);
                const bool render = l > 0;
@@ -467,7 +474,11 @@ main(int argc, char **argv)
                         free_nir(res.nir);
                      printf("%#x\t%d\n", kept, st);
                   }
+                  clock_gettime(CLOCK_MONOTONIC, &t2);
                }
+               if (getenv("AIRSWEEP_TIME"))
+                  printf("TIME\t%s\t%.3f\t%.3f\n", name, (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6,
+                         (t2.tv_sec - t1.tv_sec) * 1e3 + (t2.tv_nsec - t1.tv_nsec) / 1e6);
                uint8_t *j = NULL;
                size_t jn = 0;
                char e[512] = { 0 };

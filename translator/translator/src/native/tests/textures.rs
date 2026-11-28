@@ -5796,6 +5796,54 @@ declare void @air.write_imageblock_slice_to_texture_2d.v4f16(ptr addrspace(1), p
 }
 
 #[test]
+fn native_multisampled_tile_function_reads_its_samples_in_a_loop() {
+    // Round 12: a tile function that loops over its samples (Apple's compiler gives the rate, then the sample index at
+    // run time) and asks the sample count makes a library function; before, it failed ("unrecognized AIR intrinsic
+    // family: air.get_imageblock_samples", then "requires a constant imageblock data rate")
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+%"struct.metal::_imageblock_base" = type { ptr addrspace(4) }
+
+define void @tile_ms(%"struct.metal::_imageblock_base" %block, <2 x i16> %tid) {
+entry:
+  %n = call i16 @air.get_imageblock_samples()
+  %none = icmp eq i16 %n, 0
+  br i1 %none, label %done, label %loop
+loop:
+  %s = phi i16 [ 0, %entry ], [ %next, %loop ]
+  %color = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %tid, i32 2, i16 %s)
+  call void @air.store.implicit_imageblock.v4f16(<4 x half> %color, i32 0, <2 x i16> %tid, i32 2, i16 %s)
+  %next = add nuw i16 %s, 1
+  %end = icmp eq i16 %next, %n
+  br i1 %end, label %done, label %loop
+done:
+  ret void
+}
+
+declare i16 @air.get_imageblock_samples()
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16)
+
+!air.kernel = !{!0}
+!0 = !{ptr @tile_ms, !1, !2}
+!1 = !{}
+!2 = !{!3, !5}
+!3 = !{i32 0, !"air.imageblock", !"implicit", !"air.struct_type_info", !4, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"imageblock<Pm, layout_implicit>", !"air.arg_name", !"ib"}
+!4 = !{i32 0, i32 8, i32 0, !"half4", !"c", !"air.render_target", i32 0}
+!5 = !{i32 1, !"air.thread_position_in_threadgroup", !"air.arg_type_name", !"ushort2", !"air.arg_name", !"tid"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_tile_ms_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpImageRead"), "{asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
+}
+
+#[test]
 fn native_implicit_imageblock_uses_indexed_storage_attachment_planes() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"

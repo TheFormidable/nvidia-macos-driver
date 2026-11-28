@@ -1589,6 +1589,20 @@ pub(in crate::passes) fn lower_one(
     if name == "air.get_imageblock_width" || name == "air.get_imageblock_height" {
         return lower_get_imageblock_extent(ctx, name, res, rty);
     }
+    if name == "air.get_imageblock_samples" {
+        // the library function of a multisampled tile function: never dispatched (its pipeline runs the tile rewrite,
+        // which gives the pass's sample count, native/tile_imageblock.rs); one sample, its placeholder plane's
+        let res = res.ok_or_else(|| format!("{name} has no result"))?;
+        let rty = rty.ok_or_else(|| format!("{name} has no result type"))?;
+        let uint = ctx.ty_uint();
+        let one = ctx.const_uint(1);
+        return Ok(vec![Instruction::new(
+            if rty == uint { Op::CopyObject } else { Op::UConvert },
+            Some(rty),
+            Some(res),
+            vec![Operand::IdRef(one)],
+        )]);
+    }
 
     if name == "air.get_read_sampler" {
         return lower_get_read_sampler(ctx, res);

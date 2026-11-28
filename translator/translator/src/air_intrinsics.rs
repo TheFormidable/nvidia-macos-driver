@@ -522,6 +522,7 @@ pub fn air_intrinsic_disposition(name: &str) -> Option<AirIntrinsicDisposition> 
             | "air.get_sample_position.v2f32"
             | "air.get_imageblock_width"
             | "air.get_imageblock_height"
+            | "air.get_imageblock_samples"
             | "air.get_read_sampler"
             | "air.get_instance_count_instance_acceleration_structure"
             | "air.get_primitive_acceleration_structure_instance_acceleration_structure"

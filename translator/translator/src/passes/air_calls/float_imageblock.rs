@@ -34,7 +34,8 @@ pub(in crate::passes) fn lower_implicit_imageblock_load(
     ctx.image_dims.insert(image, (Dim::Dim2D, true));
     ctx.image_comp.insert(image, comp);
     ctx.image_storage.insert(image);
-    let coord = build_fetch_coord(ctx, Dim::Dim2D, true, args[1], Some(args[2]), &mut out)?;
+    let index = implicit_imageblock_index(ctx, args);
+    let coord = build_fetch_coord(ctx, Dim::Dim2D, true, args[1], Some(index), &mut out)?;
     let read_result = if conversion != ImageblockConversion::None || lanes != 4 {
         ctx.module.fresh_id()
     } else {
@@ -130,14 +131,8 @@ pub(in crate::passes) fn lower_implicit_imageblock_store(
     ctx.image_dims.insert(image, (Dim::Dim2D, true));
     ctx.image_comp.insert(image, comp);
     ctx.image_storage.insert(image);
-    let coord = build_fetch_coord(
-        ctx,
-        Dim::Dim2D,
-        true,
-        abi_args[1],
-        Some(abi_args[2]),
-        &mut out,
-    )?;
+    let index = implicit_imageblock_index(ctx, abi_args);
+    let coord = build_fetch_coord(ctx, Dim::Dim2D, true, abi_args[1], Some(index), &mut out)?;
     let value = if conversion != ImageblockConversion::None {
         let storage_value_ty = if lanes == 1 {
             match conversion {
@@ -224,9 +219,26 @@ fn implicit_imageblock_constants(
 ) -> Result<(u32, u32), String> {
     let attachment = constant_u32(ctx, args[0])
         .ok_or_else(|| format!("{name} requires a constant render-target attachment"))?;
-    let data_rate = constant_u32(ctx, args[3])
-        .ok_or_else(|| format!("{name} requires a constant imageblock data rate"))?;
+    let data_rate = match constant_u32(ctx, args[3]) {
+        Some(rate) => rate,
+        // A multisampled tile function that reads its samples in a loop gives the sample index last, at run time, and
+        // the rate before it (Apple's compiler: `i32 2, i16 %sample`). This library function is never dispatched (a tile
+        // pipeline runs the tile rewrite, native/tile_imageblock.rs, which reads the attachment's samples), so the
+        // placeholder plane of that rate stands in, its layer the sample index (implicit_imageblock_index).
+        None => constant_u32(ctx, args[2])
+            .ok_or_else(|| format!("{name} requires a constant imageblock data rate"))?,
+    };
     Ok((attachment, data_rate))
+}
+
+/// The plane (2D-array layer) an implicit imageblock call reads in the library function: its third operand, or the
+/// sample index when that is the one given at run time (implicit_imageblock_constants)
+fn implicit_imageblock_index(ctx: &Ctx, args: &[Word]) -> Word {
+    if constant_u32(ctx, args[3]).is_none() {
+        args[3]
+    } else {
+        args[2]
+    }
 }
 
 fn implicit_imageblock_format(

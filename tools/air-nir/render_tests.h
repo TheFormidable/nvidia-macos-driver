@@ -1961,6 +1961,46 @@ rtile_setup(struct rrun *r)
       snprintf(r->pre, sizeof r->pre, "no tile pipeline of rt_tile: %s", e.localizedDescription.UTF8String ?: "?");
 }
 
+/* r_tile_ms (round 12): the multisampled tile function and its tile pipeline for 4 samples are made (not dispatched) */
+static void
+rtms_setup(struct rrun *r)
+{
+   setup_quad(r);
+   NSError *e = nil;
+   id<MTLFunction> kf = [r->lib newFunctionWithName:@"rtm_tile"];
+   if (!kf) {
+      snprintf(r->pre, sizeof r->pre, "newFunctionWithName: rtm_tile gave nothing");
+      return;
+   }
+   MTLTileRenderPipelineDescriptor *td = [MTLTileRenderPipelineDescriptor new];
+   td.tileFunction = kf;
+   td.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+   td.rasterSampleCount = 4;
+   td.threadgroupSizeMatchesTileSize = YES;
+   id<MTLRenderPipelineState> tp = [dev newRenderPipelineStateWithTileDescriptor:td options:MTLPipelineOptionNone reflection:nil error:&e];
+   if (!tp)
+      snprintf(r->pre, sizeof r->pre, "no 4-sample tile pipeline of rtm_tile: %s", e.localizedDescription.UTF8String ?: "?");
+   [tp release];
+   [td release];
+   [kf release];
+}
+
+static bool
+rtms_check(struct rrun *r)
+{
+   if (r->pre[0]) {
+      snprintf(r->why, sizeof r->why, "%s", r->pre);
+      return false;
+   }
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float want[4] = { (px + 0.5f) / 64.0f, (py + 0.5f) / 64.0f, 0.25f, 1 };
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
 /* the road each compute pipeline the plugin made of the tile function took (its pipelines by tile size, _tileCps):
  * 1 when all took the road, 0 when one did not, -1 when there is none */
 static int
@@ -2348,6 +2388,9 @@ static const struct rtest rtests[] = {
      rtile_setup, rtile_check, "exact; a tile function over 16x16 tiles after the draw (red times setTileBytes' 2, the second "
      "attachment plus one, a BGRA8Unorm third's red inverted), its compute kernel on the road", false, false, NULL, NULL, NULL, true, NULL, NULL,
      "NVMTL_TILE_SHADING" },
+   { "r_tile_ms", "r_tile_ms", "rtm_vs", "rtm_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL,
+     rtms_setup, rtms_check, "1e-6; a multisampled tile function that loops over its samples: it and its 4-sample tile "
+     "pipeline are made (round 12: newFunctionWithName failed on both roads), not dispatched; the quad drawn as r_tile's" },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
      "value per level", false, false, NULL, NULL, NULL, true, NULL },
