@@ -918,7 +918,8 @@ rob2_setup(struct rrun *r)
    uint32_t idx[2 * RW * RH];
    for (unsigned i = 0; i < RW * RH; i++) {
       idx[i] = (i % 5) == 2 ? 0x10000000u * (1 + i % 15) + i % (ROB_PAL + 4) : (i % 9) == 4 ? ROB_PAL + i % 300 : i % ROB_PAL;
-      idx[RW * RH + i] = i % 23;   /* 0 to 22: past both buffers' ends from 16 and 6 on */
+      idx[RW * RH + i] = (i * 7u) % 23u;   /* 0 to 22: past both buffers' ends from 16 and 6 on (the pixel
+                                           * PLUGIN_RUN_CORRUPT changes reads a known one) */
    }
    r->fbuf[3] = rbuf(idx, sizeof idx);
    uint8_t b8[ROB2_B8];

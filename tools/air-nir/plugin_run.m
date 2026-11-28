@@ -725,6 +725,15 @@ run_align_test(void)
 { @autoreleasepool {
    const char *name = "align_misaligned";
    char path[2048], why[256] = "";
+   if (getenv("NVMTL_COMPUTE_ROBUST") && !strcmp(getenv("NVMTL_COMPUTE_ROBUST"), "1")) {
+      /* with buffer robustness the SPIR-V road keeps align_copy's buffers bounds-checked descriptors, which cannot be
+       * bound at offset 4 or 8 (NVK's 16-byte storage-buffer alignment: the plugin binds the dummy), and its SAFE build
+       * keeps them so (only without robustness does it read every buffer through its address); the road takes the
+       * SPIR-V road for this kernel there (a store to a kept buffer) */
+      printf("%-16s SKIPPED  with NVMTL_COMPUTE_ROBUST=1 a misaligned binding of a bounds-checked descriptor reads the dummy\n", name);
+      fprintf(tsv, "%s\tnone\tSKIPPED\t\t\t\t\t\t0\twith NVMTL_COMPUTE_ROBUST=1\n", name);
+      return SKIPPED;
+   }
    snprintf(path, sizeof path, "%s/align_guard.metallib", air_dir);
    NSError *e = nil;
    id<MTLLibrary> lib = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&e];
