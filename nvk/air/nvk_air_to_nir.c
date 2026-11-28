@@ -2728,8 +2728,12 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       if (a->location_unknown && air_fc_arg_present(t, a) != 0)
          unsupported(t, "argument %u's index is %s, which depends on a function constant %s", i, a->location_unknown,
                      air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");
-      if (a->raster_order_group)
-         unsupported(t, "argument %u is in a raster order group", i);
+      /* a raster order group on a [[color(n)]] input, a texture or a buffer: the translator binds the argument as one
+       * without it (no fragment shader interlock: the group is read only of a fragment imageblock's members, which are
+       * refused here), and so does this */
+      if (a->raster_order_group && strcmp(a->kind, "air.render_target") && strcmp(a->kind, "air.texture") &&
+          strcmp(a->kind, "air.buffer"))
+         unsupported(t, "argument %u (%s) is in a raster order group", i, a->kind);
       if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && air_bind_stage_input(t, a, i))
          continue;
       /* an argument buffer (version 7): a buffer whose fields the shader reads, handles among them */
@@ -2776,6 +2780,19 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
       } else if (!strcmp(a->kind, "air.sampler")) {
          struct air_val *v = air_set(t, a->param, NULL, AIR_SAMPLER, 1);
          v->res = air_bind_sampler(t, a, i);
+      } else if (!strcmp(a->kind, "air.imageblock")) {
+         /* an imageblock (round 10, kept refused): an implicit one is a tile function's view of the colour attachments,
+          * which the plugin runs only through the translator's rewrite of its AIR (NVMTL_TILE_SHADING, tile_imageblock.rs),
+          * a module that stays on the SPIR-V road; an explicit one (imageblock_data, write_imageblock_slice_to_texture)
+          * the translator stages in a workgroup array whose width, capacity and cell scale its IR analysis infers
+          * (native/ir: the cross-coordinate cells, the APV extent, threads_per_threadgroup, the lane scales) and copies
+          * through its slice writer, none of which this frontend has */
+         LLVMValueRef *ops;
+         const unsigned c = air_md_operands(a->node, &ops, t->mem);
+         const char *layout = c > 2 ? air_md_string(ops[2]) : NULL;
+         unsupported(t, "an %s imageblock (%s)", layout && !strcmp(layout, "implicit") ? "implicit" : "explicit",
+                     layout && !strcmp(layout, "implicit") ? "a tile function: the translator's rewrite of it stays on the SPIR-V road" :
+                     "the translator's cell staging and slice writer are not ported");
       } else if (!strcmp(a->kind, "air.threadgroup")) {
          if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL)
             unsupported(t, "a threadgroup argument of a vertex or fragment function");

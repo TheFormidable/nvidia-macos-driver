@@ -1731,6 +1731,39 @@ tt_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_rog (round 10): raster order groups on a colour input, a written texture and a device buffer ---------------- */
+
+static const float rrog_k[2][4] = { { 0.0625f, 0.125f, 0, 0.25f }, { 0.5f, 0.0f, 0.375f, 0.0f } };
+
+static void
+rrog_setup(struct rrun *r)
+{
+   setup_quad(r);
+   r->fbuf[0] = rbuf(rrog_k, sizeof rrog_k);
+   MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:RW height:RH mipmapped:NO];
+   td.usage = MTLTextureUsageShaderWrite;
+   td.storageMode = MTLStorageModePrivate;
+   r->ftex[0] = [dev newTextureWithDescriptor:td];
+}
+
+static bool
+rrog_check(struct rrun *r)
+{
+   const bool off = rfetch_off(), copies = rfetch_mode() == 2;
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float src0[4] = { px_u(px), px_w(py), 0.25f, 1 }, src1[4] = { px_u(px), px_w(py), 0.75f, 1 };
+         float want[4];
+         for (unsigned c = 0; c < 4; c++) {
+            const float c1 = (off ? 0.0f : clear_col[c]) * 0.5f + src0[c] * 0.5f + rrog_k[0][c];
+            want[c] = (off ? 0.0f : copies ? clear_col[c] : c1) * 0.5f + src1[c] * 0.5f + rrog_k[1][c];
+         }
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
 static const struct rtess tq_int = { 2, 4, 1, MTLTessellationPartitionModeInteger, MTLWindingClockwise, 4.0f, 4, false, 1 };
 static const struct rtess tq_pow2 = { 2, 4, 1, MTLTessellationPartitionModePow2, MTLWindingClockwise, 3.0f, 4, false, 1 };
 static const struct rtess tq_fodd = { 2, 4, 1, MTLTessellationPartitionModeFractionalOdd, MTLWindingClockwise, 2.5f, 3, true, 1 };
@@ -1836,6 +1869,9 @@ static const struct rtest rtests[] = {
    { "r_argbuf_reuse", "r_argbuf", "rab_vs", "rab_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rsr_setup,
      rsr_check, "4e-5; r_argbuf after six samplers of other states held heap slots and were released: no slot changes its "
      "sampler state", false, false, NULL, NULL },
+   { "r_rog", "r_rog", "rrog_vs", "rrog_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, rrog_setup, rrog_check,
+     "1e-6; raster order groups on [[color(0)]], a written texture and a device buffer (WindowServer's inplace_copy): "
+     "bound as without them, no interlock, on both roads", false, false, NULL, NULL, NULL, true, NULL },
    { "r_tess_quad", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
      tq_check, "2e-5; quad patches, integer spacing, factor 4: s^2, t^3 and (s-1/2)^2 piecewise linear at i/4, the tint per "
      "patch and the patch id flat", false, false, NULL, NULL, NULL, true, &tq_int },
