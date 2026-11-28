@@ -7052,9 +7052,18 @@ air_fc_specialize(struct air_tr *t, LLVMContextRef ctx)
          continue;
       any = true;
       const uint8_t *payload = air_fc_given(t, index, &size);
-      if (!payload)
-         continue;
       LLVMTypeRef vty = L.LLVMGlobalGetValueType(g);
+      if (!payload) {
+         /* Round 12: a constant the request does not give reads 0, as the translator's: its specialization leaves the
+          * global undef (fc_air_specialize.rs), the module declares it a Private variable initialized with
+          * OpConstantNull, and the static initializer it runs at the entry reads that 0 (is_function_constant_defined
+          * of it is false, integer_simd.rs). CoreAnimation leaves optional constants unset (fixed_vert_*_gen's
+          * fc_texcoord_count0/1), which sent its pipelines to the SPIR-V road. */
+         L.LLVMSetInitializer(g, L.LLVMConstNull(vty));
+         L.LLVMSetExternallyInitialized(g, 0);
+         L.LLVMSetGlobalConstant(g, 1);
+         continue;
+      }
       uint64_t want = L.LLVMStoreSizeOfType(t->layout, vty);
       if (size != want)
          air_refuse(t, NVMTL_AIR_NIR_BAD_REQUEST, "function constant %u has %u bytes, its type %llu", index, size,

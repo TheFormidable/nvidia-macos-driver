@@ -628,8 +628,25 @@ rq_check(struct rrun *r)
 /* the constants: fci_col true, fci_junk false (its attribute and its varying do not exist) */
 static const struct fcset fc_fcin = { 2, { { 0, 1, { 1 } }, { 1, 1, { 0 } } } };
 /* r_fcin_missing: fci_col not given at all. The translator reads a constant left out as 0 (the input and the output it
- * guards do not exist); the frontend cannot know that the pipeline means 0 and must refuse (SPIR-V road only) */
+ * guards do not exist); since round 12 the frontend does too (the request carries every constant the function was made
+ * with, the same set the translator specializes), so it takes the road */
 static const struct fcset fc_fcin_missing = { 1, { { 1, 1, { 0 } } } };
+/* r_fcopt, r_fcopt_gen (round 12): fco_count is never given (CoreAnimation's optional constants), fco_gen false or true */
+static const struct fcset fc_fcopt = { 1, { { 0, 1, { 0 } } } };
+static const struct fcset fc_fcopt_gen = { 1, { { 0, 1, { 1 } } } };
+
+static bool
+rfop_check(struct rrun *r)
+{
+   /* fco_count reads 0, is_function_constant_defined false (fco_n 5), fco_has_col false: no tint */
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float want[4] = { px_u(px), px_v(py), 0.625f, 0 };
+         if (!rwant(r, 0, px, py, want, 4, 1e-4f))
+            return false;
+      }
+   return true;
+}
 
 static void
 rfi_vdesc(MTLVertexDescriptor *vd)
@@ -2243,8 +2260,14 @@ static const struct rtest rtests[] = {
    { "r_fcin", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin,
      rfi_vdesc, rfi_setup, rfi_check, "1e-4", false, true },
    { "r_fcin_missing", "r_fcin", "rfi_vs", "rfi_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcin_missing,
-     rfi_vdesc, rfi_setup, rfi_missing_check, "1e-4; a constant guarding a stage input not given: the translator reads 0, "
-     "the frontend must refuse", true, true },
+     rfi_vdesc, rfi_setup, rfi_missing_check, "1e-4; a constant guarding a stage input not given: read as 0, as the "
+     "translator reads it, on both roads since round 12", false, true, NULL, NULL, NULL, true },
+   { "r_fcopt", "r_fcopt", "rfop_vs", "rfop_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcopt,
+     rfi_vdesc, rfi_setup, rfop_check, "1e-4; an optional constant never given, read straight, through "
+     "is_function_constant_defined and in a computed predicate of a stage input (round 12)", false, true, NULL, NULL, NULL, true },
+   { "r_fcopt_gen", "r_fcopt", "rfop_vs", "rfop_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, &fc_fcopt_gen,
+     rfi_vdesc, rfi_setup, rfi_check, "1e-4; r_fcopt with the computed predicate true: the attribute and its varying "
+     "exist (round 12)", false, true, NULL, NULL, NULL, true },
    { "r_rleblit", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatBGRA8Unorm, MTLPixelFormatBGRA8Unorm }, NOC,
      MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0, NULL, NULL, rbl_setup, rbl_check,
      "bgra8 1 LSB; CoreAnimation's buffer-to-image blit, a fragment byte read at buffer(9)" },

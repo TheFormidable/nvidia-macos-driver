@@ -1490,11 +1490,36 @@ agg_ops_check(struct run *r)
    return ok;
 }
 
+/* --- fc_refuse (round 12: no constant given; use_scale reads 0, as the translator reads it: a[i] + 1) ------- */
+
+static void
+fc_refuse_setup(struct run *r)
+{
+   float *a = slot(r, 0, r->threads * 4), *keep = slot(r, 30, r->threads * 4);
+   for (unsigned i = 0; i < r->threads; i++)
+      keep[i] = a[i] = rndf(-8, 8);
+}
+
+static bool
+fc_refuse_check(struct run *r)
+{
+   unsigned n = r->threads;
+   const float *before = S(r, 30);
+   float *want = calloc(n, 4);
+   for (unsigned i = 0; i < n; i++)
+      want[i] = before[i] + 1.0f;
+   static const float zero[1] = { 0 };
+   bool ok = check_f32(r, "a", S(r, 0), want, n, 1, zero, zero);
+   free(want);
+   return ok;
+}
+
 /* --- fc_kernel ------------------------------------------------------------------------------------------------ */
 
 #define FC_F32(f) { (uint8_t)(f), (uint8_t)((f) >> 8), (uint8_t)((f) >> 16), (uint8_t)((f) >> 24) }
 /* set A: every constant given; set B leaves out scale (read only under use_scale, which is false) and bias (it has a
- * default); set C leaves out scale while use_scale is true: the frontend must refuse it */
+ * default); set C leaves out scale while use_scale is true: scale reads 0, as the translator reads a constant left out
+ * (round 12; it was refused before) */
 static const struct fcset fc_a = { 5, { { 0, 1, { 1 } }, { 1, 4, FC_F32(0x40200000u) /* 2.5 */ }, { 2, 4, { 1 } },
                                         { 3, 4, { 7 } }, { 4, 1, { 1 } } } };
 static const struct fcset fc_b = { 3, { { 0, 1, { 0 } }, { 2, 4, { 2 } }, { 4, 1, { 0 } } } };
@@ -3249,16 +3274,40 @@ fc_texture_expect(struct run *r, const struct nvmtl_air_nir_result *res)
    return true;
 }
 
+/* fc_texture_none (round 12): tex_base not given reads 0, as the translator reads it: texture(1) */
+static void
+fc_texture_none_setup(struct run *r)
+{
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 1);
+   float *in = slot(r, 0, 64 * 4);
+   slot(r, 1, 64 * 2 * 16);
+   for (unsigned i = 0; i < 64; i++)
+      in[i] = rndf(-4, 4);
+}
+
 static bool
-fc_texture_check(struct run *r)
+fc_texture_none_expect(struct run *r, const struct nvmtl_air_nir_result *res)
+{
+   if (res->texture_mask[0] != 1u << 1)
+      return FAILF(r, "texture mask 0x%x: expected texture 1 alone (0x2)", res->texture_mask[0]);
+   return true;
+}
+
+static bool fc_texture_read_check(struct run *r, unsigned tex);
+static bool fc_texture_check(struct run *r) { return fc_texture_read_check(r, 3); }
+static bool fc_texture_none_check(struct run *r) { return fc_texture_read_check(r, 1); }
+
+static bool
+fc_texture_read_check(struct run *r, unsigned tex)
 {
    const float *in = S(r, 0), *got = S(r, 1);
    for (unsigned y = 0; y < 8; y++) {
       for (unsigned x = 0; x < 8; x++) {
          unsigned i = y * 8 + x;
          for (unsigned c = 0; c < 4; c++) {
-            if (fabsf(got[i * 8 + c] - rgba8_at(r, 3, 0, (int)x, (int)y, 0, c)) > 1e-6f)
-               return FAILF(r, "read, thread %u lane %u = %g, expected %g", i, c, got[i * 8 + c], rgba8_at(r, 3, 0, (int)x, (int)y, 0, c));
+            if (fabsf(got[i * 8 + c] - rgba8_at(r, tex, 0, (int)x, (int)y, 0, c)) > 1e-6f)
+               return FAILF(r, "read, thread %u lane %u = %g, expected %g", i, c, got[i * 8 + c], rgba8_at(r, tex, 0, (int)x, (int)y, 0, c));
          }
          float ws = sinf(in[i]), wc = cosf(in[i]);
          if (fabsf(got[i * 8 + 4] - ws) > 2e-5f || fabsf(got[i * 8 + 5] - wc) > 2e-5f)
@@ -3546,13 +3595,13 @@ static const struct test tests[] = {
    { "atomic_float", NULL, "atomic_float", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, atomic_float_setup, atomic_float_check },
    { "grid3d", NULL, "grid3d", { 4, 4, 4 }, { 4, 2, 2 }, { 0 }, 0, NULL, grid3d_setup, grid3d_check },
    { "agg_ops", NULL, "agg_ops", { 64, 1, 1 }, { 64, 1, 1 }, { 0 }, 0, NULL, agg_ops_setup, agg_ops_check },
-   { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "fc_refuse", NULL, "fc_refuse", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, fc_refuse_setup, fc_refuse_check },
    { "ib_refuse", NULL, "ib_refuse", { 16, 16, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
    { "fc_kernel_a", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_a, fc_kernel_setup, fc_kernel_check },
    { "fc_argindex", NULL, "fc_argindex", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_argidx, fc_argindex_setup, fc_argindex_check },
    { "fc_kernel_b", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, 0, &fc_b, fc_kernel_setup, fc_kernel_check },
-   { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, &fc_c, NULL, NULL },
-   { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "fc_kernel_c", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, MUST_ROAD, &fc_c, fc_kernel_setup, fc_kernel_check },
+   { "fc_kernel_none", "fc_kernel", "fc_kernel", { 64, 1, 1 }, { 16, 1, 1 }, { 0 }, MUST_ROAD, NULL, fc_kernel_setup, fc_kernel_check },
    { "tex_read", NULL, "tex_read", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_read_setup, tex_read_check },
    { "tex_write", NULL, "tex_write", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_write_setup, tex_write_check },
    { "tex_array3d", NULL, "tex_array3d", { 8, 8, 1 }, { 1, 1, 4 }, { 0 }, 0, NULL, tex_array3d_setup, tex_array3d_check },
@@ -3588,7 +3637,8 @@ static const struct test tests[] = {
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
    { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,
      fc_texture_expect },
-   { "fc_texture_none", "fc_texture", "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, MUST_REFUSE, NULL, NULL, NULL },
+   { "fc_texture_none", "fc_texture", "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, fc_texture_none_setup,
+     fc_texture_none_check, fc_texture_none_expect },
    { "tex_pixel_array", NULL, "tex_pixel_array", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_array_setup,
      tex_pixel_array_check },
    { "tex_intsample", NULL, "tex_intsample", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_intsample_setup,

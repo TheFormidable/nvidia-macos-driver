@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// Function constants: their values come with the pipeline's specialization, which the request cannot carry yet, so
-// the frontend must refuse this kernel rather than take the placeholders' contents (0 or undef) as the values.
+// Function constants, none given (newFunctionWithName: without values): the translator reads each as 0, and since
+// round 12 so does the frontend (rounds 1 to 11 refused it), so use_scale is false and a[i] gains 1.
 #include <metal_stdlib>
 using namespace metal;
 
