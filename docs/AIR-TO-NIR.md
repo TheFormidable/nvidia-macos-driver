@@ -1494,6 +1494,166 @@ matching those inferences exactly is a port of that analysis, not done here.
   translator's rewrite from the pipeline's layout), raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a multiple of 4 (or
   of 8 for 64-bit elements).
 
+## Constants left out, kept buffers decided by the frontend, cubes, choices of handles and a crash on the SPIR-V road (round 12)
+
+Package: 3.0.30 holds the round (NVK's AIR-to-NIR ABI is version 10: the plugin and NVK change together).
+
+Part A of round 12 (3.0.29, the desktop since its boot at 17:06:56Z, read only): the installed files are the signed
+03d3da2c package's; the four counters 0; no Xid, channel recovery, device loss or "AIR to NIR off in", no fallback
+list; WindowServer's crash marker set at 17:07:09Z and cleared after 60 s, no GPU error. The SPIR-V road took
+WindowServer 3 of 128 render pipelines (2 of 64 at 17:07:58Z), SecurityAgent 2 of 32, iconservicesagent 1 of 256
+(the counts are logged at powers of two). Release builds write no line that names a pipeline's reason, and
+WindowServer's caches are its own; offline, the two that account for them: CoreAnimation's `fixed_vert_*_gen` vertex
+functions (paired with `fixed_frag_lpf_cpf`) read function constants CoreAnimation leaves unset (`fc_texcoord_count0/1`,
+`fc_base_color` in some sets), which the frontend refused, and RenderBox's `primitive_custom_vertex/fragment` in
+iconservicesagent had no AIR at reflection (17:07:58Z and 17:08:24Z), which keeps a pipeline off the road. Of 324
+nir1 entries since the boot 63 are refusals, every one the descriptor retry's first request. One crash, at 17:25:10Z
+(below); the shutdown-stall report of 17:06:35Z is the restart's, as at every earlier restart.
+
+**System Information crashed in NAK on the SPIR-V road (not found, not fixed).** `com.apple.SystemProfiler` died
+13 s after its launch with a bad access at address 0 in `nak_rs::legalize::cse_block_imm_copies` (the fork's immcse
+pass, `nvk/nvk-macos.patch`, b72), called from `vk_common_CreateGraphicsPipelines` for `nvmtl_vk_pipeline_create_rt`:
+a CoreAnimation pipeline (`CA::OGL::MetalContext::create_pipeline_state`) on the SPIR-V road. The disassembly shows
+`Op::srcs_as_slice` returning a NULL pointer with 5 sources: the instruction's 16-byte `Op` (its tag and its `Box`)
+was all zero. NAK's IR is safe Rust, the pass has no unwrap, and nothing in it can make a zero `Op`: memory NAK owned
+had been zeroed. At that instant the fc warm-up's thread 6 was in `_nanov2_free` → `bzero` (the allocator's
+zero-on-free) dropping a translator `TirBlock`, which points to one nano block with two owners: something in that
+process freed a block twice or wrote past one earlier. Not reproduced: CoreAnimation's own pipelines
+(`fixed_vert_lpf_gen` with the 34 recorded `fixed_frag_lpf_cpf` sets, RenderBox's primitive pairs with theirs, 1 to 8
+threads at once, a fresh private cache seeded with the user's `.fcwarm.v1` so the warm-up's translations, take-overs
+and joins and the fc1 writes race the NAK compiles: `r12/crash/qcpipes.m`) and CARenderer (`ca_probe2.m`), with the nano
+allocator 14 times, with the scalable zone and `MallocErrorAbort=1`, with MallocScribble and guard edges, with the ASan
+runtime injected (its allocator reports any double or invalid free, from any code), and with an ASan-built plugin and
+an ASan-built NVK (`out/nvk-build/mesa/build-asan`: all of NVK's and NIR's C code; NAK's and the translator's Rust are
+covered by the allocator only), plus every plugin_run test on both roads on those ASan builds: no crash, no malloc
+error, no ASan report, the counters 0. The code that runs on those paths was read for an ownership slip and none was
+found (the translator's outputs, cache-file buffers, the warm-up's jobs and take-or-join, the single-flight table,
+`gTranslateFailures`, runtime `setenv`). No earlier crash report of the owner's has our libraries in its faulting thread.
+A compile crash in an ordinary app would repeat at every launch today (the fallback list takes GPU faults, the crash
+marker only WindowServer); a per-process marker around road compiles would not have covered this one, a SPIR-V-road
+compile with no road to fall back to, so none was added. Since this round CoreAnimation's `fixed_*` pipelines take the
+road (below), which takes the SPIR-V road and its warm-up out of that path.
+
+**A function constant the request does not give reads 0, as the translator reads it.** The translator's
+specialization leaves such a constant undef (`fc_air_specialize.rs`), its module declares it a Private variable with
+an `OpConstantNull` initializer, and the static initializer it runs at the entry reads that 0;
+`is_function_constant_defined` of it is false (`integer_simd.rs`). The frontend refused every function that read one
+or a value computed from one; it now gives the global a zero initializer before it runs the static initializer, so
+the predicates and gates computed from it are known as the translator's module computes them. The request carries
+every constant the function was made with, the same set the translator specializes. Over CoreAnimation's and
+RenderBox's recorded constant sets (`r12/b1/ca-fc.txt`, the vertex functions given their fragments' sets) the 35
+refusals are gone (they translate; their reflections stay the translator's where a gate is computed by the static
+initializer), 119 reflections equal as before, none different. `r_fcin_missing`, `fc_refuse`, `fc_kernel_c`,
+`fc_kernel_none` and `fc_texture_none`, which had to be refused, take the road and check the translator's values.
+
+**Kept buffers the frontend is sure of (ABI version 10, `NVMTL_AIR_NIR_KEPT_SELF`).** Without the translator's
+module, the frontend decides which buffers the translator's wrapper keeps as descriptors when its rule
+(`buffer_addresses.rs` `kept_roots`) is sure to give the same answer on the module as the request gives it: an
+unsized device buffer whose pointers reach only GEPs of the argument itself, casts, loads and stores as the address,
+nothing stored through it and every load of 32-bit components; kept when such a GEP's first index (the runtime
+array's) is computed from a load through a buffer and its elements are bytes or one 32-bit type (read as with
+`NVMTL_AIR_NIR_DESCRIPTORS`, element bits 32, no guarded store), not kept when every access is a field of the first
+element. Anything else is refused with `descriptor_wanted` and the plugin asks the translator's module as before.
+`airsweep` compares every such decision with the translator's lowered module (`KSELF` lines). Over the AIR cache:
+3 decided, 3 the same, 0 different, of 433 functions asked about (the first rule decided one wrongly, RenderBox's
+`lightfield_frag`, whose block the translator types without a runtime array; the first-index and element-type
+conditions came from it). The rule decides little: most of the asked buffers are typed or used in ways only the
+translator's module settles (structures indexed inside a member array, byte and half loads, pointers through phis and
+calls), and those keep the retry. The road's translation of the decided ones, the first request against the first
+request, the translator's module, its lowering and the second request: `bufferFragment2DDepth` 0.38 ms against
+3.12 ms, `lightfield_frag` 0.99 ms against 15.87 ms (`AIRSWEEP_TIME=1`, 5 runs each; NAK's compile is the same either
+way).
+
+**Cubes read and written by texel.** A `read_write` `texturecube` is a 2D-array image read and written at
+(x, y, face), as the translator makes a cube it never samples by direction (`discovery.rs`), as round 11's write-only
+ones; a written or `read_write` `texturecube_array` stays a cube-array storage image at (x, y, slice * 6 + face)
+(`combine_cube_array_layer`), its size (width, height, cubes). A sampled `texturecube` read by texel stays refused:
+the SPIR-V road reads it through a 2D-array view of the heap's cube view and gets 0 (`tex_cube_rd`, measured: 0 for
+0.478).
+
+**Run-time choices of texture handles and null `texture_buffer`s.** A select or a phi of texture arguments and null
+placeholders is a choice: every call made on it is made on each arm and the results chosen by the arm's index, as
+the translator lowers it (`selected_load.rs`, `query_select.rs`: both fetches, then `OpSelect`); `is_null_texture` of a
+choice is false, as the translator's (`OpCopyObject false`); a write or an atomic through one stays refused. A null
+`texture_buffer` is a uniform texel buffer placeholder at the first free texture binding, as the translator's; nothing
+is bound there, so it reads the plugin's zero dummy and its width is the dummy's (64).
+
+**A texture handle held as an integer (SceneKit).** SceneKit's lighting fragments store a texture handle into a
+structure as an integer (`VFXShaderLightingContribution`: `ptrtoint`, `store i64`); once SROA has removed the
+structure the call reads the argument itself and the integer is left unused, which the frontend refused. It now
+leaves it unused; the translator reads the argument's heap entry. The AIR cache's eight such functions (seven
+`commonprofile_frag*`, `avt_composite_debug_fragment`) translate with reflections equal to the translator's; 3.0.29's
+NVK refuses all eight (`r12/b7/check-b7.sh`). Apple's compiler removes the pattern from any MSL or hand-written LLVM
+text this harness can build (`metal -c` of a `.ll` too), so the check is offline.
+
+**Multisampled tile functions (translator).** The translator's library lowering of `air.load/store.implicit_imageblock`
+took the fourth operand for the data rate and required it constant; a tile function that reads its samples in a loop
+gives the rate third and the sample index fourth, at run time (`i32 2, i16 %s`), and `air.get_imageblock_samples` was an
+unknown intrinsic there, so `newFunctionWithName` failed on both roads. The library function is never dispatched (a tile
+pipeline runs the tile rewrite, `native/tile_imageblock.rs`, which reads the pass's samples): with a run-time sample index
+the rate is the third operand and the sample the placeholder plane's layer, and the sample count reads 1; a constant
+fourth operand is read as before. The function and its 4-sample tile pipeline are made on both roads (`r_tile_ms`). Its
+dispatch over multisampled attachments is not tested here (the harness draws single-sample passes), and the rewrite's
+`texture2d_ms` `read_write` attachments stay refused on the road, so that kernel takes the SPIR-V road.
+
+**Left refused, with the reason.** Explicit imageblocks (the translator's cell analysis and staging, not ported); kernels
+with `stage_in` (the translator reads the pipeline's stage-input layout, formats, step functions and index buffers
+through `nvmtl_translate_set_kernel_stage_in`, not ported); a sampled cube read by texel (the SPIR-V road reads 0);
+the rewrite's multisampled tile attachments; RenderBox's `primitive_custom_*` without AIR (its cause not found:
+neither the linked path nor the A8 or amplification variants explains both stages at once).
+
+### Tested (round 12)
+
+| test | what | tolerance |
+|---|---|---|
+| r_fcopt, r_fcopt_gen | an optional constant never given: read straight (0), through `is_function_constant_defined` (false) and in a computed predicate of a stage input and a varying, false and true | 1e-4 |
+| r_fcin_missing, fc_refuse, fc_kernel_c, fc_kernel_none, fc_texture_none | constants left out, refused until round 12, on the road with the translator's values | 1e-4 / exact |
+| tex_cube_rwk, tex_cube_arrw | a `read_write` R32Uint cube read and written back; a written RGBA16Float cube array of two cubes; their sizes | exact |
+| tex_cube_rd | a sampled cube read by texel: refused (the SPIR-V road reads 0) | - |
+| tex_choice, tex_choice_null, tex_null_tbuf | a select of two textures by data; a phi of a null texture and an argument (reads, `is_null_texture`, width); a null `texture_buffer` | exact |
+| r_tile_ms | (`NVMTL_TILE_SHADING=1`) a multisampled tile function looping over its samples and its 4-sample tile pipeline made | 1e-6 |
+| translator: native_multisampled_tile_function_reads_its_samples_in_a_loop | the library function translates | - |
+
+Each new plugin_run test fails with 3.0.29's NVK (the SPIR-V road taken where the road must take it; `r_tile_ms` with
+3.0.29's translator, where `newFunctionWithName` gives nothing).
+
+- `sweep.py --reflect` over the AIR cache (`r12/sweeps.sh`: round 5's list, the final NVK and this round's translator):
+  of 10,814 functions the frontend translates 5,919 (5,910 after round 11), every reflection equal to the translator's
+  (different 0, not reflected 0), the same two MPS modules crashing the translator's reflection. Kept buffers: 433
+  functions asked about, 3 decided by the frontend (all as the translator's module), 406 translate after the retry,
+  27 refused after it; no kept buffer left unasked. The refusals that are not a missing function-constant value went
+  from 102 to 92: implicit imageblocks 26, a kernel's `stage_in` 17, `amplification_id` 14, an instance acceleration
+  structure 13, explicit imageblocks 7, visible function tables 4, a `[[stencil]]` output 2, the rgb unpack 2, and
+  single ones. WindowServer's functions on disk: 179 of 211 equal (as round 11), their constant variants 12 equal and
+  14 not reflected as before.
+- On the card (`r12/final-runs.sh`, then `r12/final-runs2.sh`: the development plugin, this tree's NVK, this round's
+  translator through `PLUGIN_RUN_INSTALLED=r12/inst`, `MESA_SHADER_CACHE_DISABLE=true`; the four fault counters 0
+  before and after every run; WindowServer logged no GPU error): with `NVMTL_AIR_NIR=1` 141 pass twice and once with
+  the first run's caches (135 on the road; `tex_cube_rd` and `r_primid` take the SPIR-V road as they must; `ib_refuse`,
+  `tex_pixborder`, `mad_sat_v` and `tex_depth_asize` are refused by both), `grid2d_base`, `oob_kernel`, `r_tile` and
+  `r_tile_ms` skipped (the two tile tests need `NVMTL_TILE_SHADING=1`); with `NVMTL_AIR_NIR=0` 140 pass twice,
+  `r_handlechoice` skipped as well. (The first road, SPIR-V and warm runs were made again, `final-runs2.sh`, after
+  `r_tile_ms` was given that opt-in: it had run without it and failed for want of it.) `PLUGIN_RUN_CORRUPT=1`: every
+  test that dispatches or draws fails on both roads, the five refusals pass. Compute with `NVMTL_COMPUTE_ROBUST=1`: 85
+  pass on each road. Framebuffer fetch off and by copies 4 of 4, the pixel-coordinate tests without the hardware
+  filter 8 of 8, the argument-buffer tests 50 times each 150 of 150, on each road; the dumped attachments of the
+  tessellation, kept-buffer and other round-10/11 render tests are equal on both roads (19 of 19), and with
+  `NVMTL_TILE_SHADING=1` `r_tile` and `r_tile_ms` pass on both roads with equal attachments (4 of 4); the `ws_marker`
+  trio passes. `airrun` (NVK directly): 7 pass, 56 refused, 0 fail (the four constant tests are refused there now: its
+  request gives no function-constant values). On AddressSanitizer builds of 03d3da2c's plugin and NVK (`r12/run-asan.sh`):
+  133 pass on the road and 132 on the SPIR-V road (the round-11 set), no ASan report.
+- The translator's tests (`r12/ttests.sh`, `--no-fail-fast`): 2,600 pass and 26 fail, exactly the 26 that round 11's
+  tree fails; the new one passes.
+- Host: `test_air_nir_plugin.py`, `test_switch_registry.py` and `test_refusal_reasons.py` pass;
+  `test_nvk_nak_switch_key.py` fails as at 03d3da2c (the frontend's `NVMTL_AIR_NIR_DEBUG`, `_DUMP` and `_DUMP_FC`
+  reads are in neither its key table nor its exempt list; the kept-buffer decision's diagnostic is one more
+  `NVMTL_AIR_NIR_DEBUG` read).
+- Left: explicit imageblocks; kernels' `stage_in`; a sampled cube read by texel (and the SPIR-V road's 0 there); the
+  multisampled tile rewrite's attachments on the road and its dispatch over multisampled attachments in a test; the
+  kept-buffer decisions the frontend is not sure of (430 of 433 in the cache); RenderBox's `primitive_custom_*` without
+  AIR; the System Information crash on 3.0.29; raster order group ordering (no interlock in NVK); a kept buffer at an
+  offset that is not a multiple of 4 (or of 8 for 64-bit elements).
+
 ## Phases
 
 1. The frontend and its Linux test; then its test on the card (round 1), function constants and textures (round 2).

@@ -2390,7 +2390,8 @@ static const struct rtest rtests[] = {
      "NVMTL_TILE_SHADING" },
    { "r_tile_ms", "r_tile_ms", "rtm_vs", "rtm_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL,
      rtms_setup, rtms_check, "1e-6; a multisampled tile function that loops over its samples: it and its 4-sample tile "
-     "pipeline are made (round 12: newFunctionWithName failed on both roads), not dispatched; the quad drawn as r_tile's" },
+     "pipeline are made (round 12: newFunctionWithName failed on both roads), not dispatched; the quad drawn as r_tile's",
+     false, false, NULL, NULL, NULL, false, NULL, NULL, "NVMTL_TILE_SHADING" },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
      "value per level", false, false, NULL, NULL, NULL, true, NULL },

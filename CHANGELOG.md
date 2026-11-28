@@ -1,5 +1,51 @@
 # Changelog
 
+## 3.0.30
+
+**AIR to NIR, round 12** (not released; packaged and signed for the owner's RTX 5050). On top of 3.0.29. CoreAnimation's
+`fixed_*` pipelines take the road (they read function constants CoreAnimation leaves unset), and with them the
+desktop's own SPIR-V-road pipelines; more of the AIR cache takes the road as the translator makes it; a multisampled
+tile function translates. NVK's AIR-to-NIR ABI is version 10: the plugin and NVK change together.
+
+### What changed
+
+- A function constant the pipeline does not give reads 0 on the road, as the translator reads it (and
+  `is_function_constant_defined` false): CoreAnimation's `fixed_vert_*_gen` vertex functions and their pipelines,
+  which went to the SPIR-V road on the desktop, take the road. Tests: `r_fcopt`, `r_fcopt_gen`; `r_fcin_missing`,
+  `fc_refuse`, `fc_kernel_c`, `fc_kernel_none`, `fc_texture_none` (refused before) take the road.
+- The road decides itself which buffers the translator keeps bounds-checked, when it is sure of the translator's
+  answer (ABI version 10); otherwise it asks the translator's module as before. Over the AIR cache it decides 3 of 433,
+  all as the translator; those translate in 0.4 to 1 ms instead of 3 to 16 ms.
+- On the road, as the translator makes them: `read_write` cube textures and written cube arrays; run-time choices of
+  texture handles (a select or a phi, a null texture against an argument); a null `texture_buffer`; a texture handle
+  held as an integer (SceneKit's lighting fragments). Tests: `tex_cube_rwk`, `tex_cube_arrw`, `tex_choice`,
+  `tex_choice_null`, `tex_null_tbuf`.
+- **Fixed on both roads (translator): a multisampled tile function that loops over its samples could not be made**
+  (`newFunctionWithName` gave nothing). It and its tile pipeline are made now. Test: `r_tile_ms`.
+- Still refused, with the reason: explicit imageblocks, kernels with `stage_in`, a sampled cube read by texel (the
+  SPIR-V road reads 0 there), a multisampled tile function's attachments on the road.
+- Not found: System Information's crash on 3.0.29 (17:25Z on 2026-11-28, NAK's legalize pass reading an instruction
+  whose memory another owner had zeroed, on the SPIR-V road). Every reproduction offline, AddressSanitizer builds of
+  the plugin and NVK included, came out clean. Since 3.0.30 CoreAnimation's pipelines in that path take the road.
+
+### What ran where
+
+On the RTX 5050 (2026-11-28, macOS 26.7.3, the development plugin and this tree's NVK and translator, 3.0.29
+installed; the four fault counters 0 before and after every run): with the road on 141 tests pass twice and once from
+the first run's caches (135 on the road), on the SPIR-V road 140 pass twice; with corrupted outputs every test that
+dispatches or draws fails on both roads; compute with buffer robustness 85 on each road; the attachments are equal on
+both roads byte for byte (19 of 19, the tile tests' 4); each new test fails with 3.0.29's NVK (or translator). Offline,
+the AIR cache: 5,919 of 10,814 functions translate with reflections equal to the translator's, 0 different;
+WindowServer's 179 of 211 as before. The translator's tests: the same 26 failures as round 11's tree. Details:
+`docs/AIR-TO-NIR.md`, round 12.
+
+### The ways back
+
+| Way back | Kind | What it does |
+|---|---|---|
+| `NVMTL_AIR_NIR=0` | settings file | Every compute and render pipeline is made from the translator's SPIR-V, as in 3.0.20 |
+| `NVMTL_TILE_SHADING` unset (the default) | environment | A tile pipeline is refused with its reason, as before 3.0.29 |
+
 ## 3.0.29
 
 **AIR to NIR, round 11 continued** (not released; packaged and signed for the owner's RTX 5050). On top of 3.0.28, which
