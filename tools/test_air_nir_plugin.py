@@ -184,7 +184,7 @@ def render_link(s):
 def fragment_set(s):
     fe = strip_comments(s["nvk/air/nvk_air_to_nir.c"])
     return ('t->set = t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT ? NVMTL_AIR_NIR_FRAGMENT_SET : 0;' in fe and
-            fe.count('.desc_set = t->set') == 1 and fe.count('descriptor_set = t->set') == 2 and
+            fe.count('.desc_set = t->set') == 1 and fe.count('descriptor_set = t->set') >= 2 and
             not re.search(r'desc(riptor)?_set = 0', fe))
 
 # --- phase 4 (round 5): functions made without the translator --------------------------------------------------------

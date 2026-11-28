@@ -38,6 +38,7 @@ static _Thread_local int g_air_nir_hit;           // the last shader nvmtl_air_n
 static char g_air_nir_llvm[PATH_MAX];              // air-runtime/libLLVM.dylib beside this plugin
 static int g_air_nir_v5;                           // the NVK reads version 5: the reflection and the samplers' state
 static int g_air_nir_v6;                           // the NVK reads version 6: [[color(n)]] inputs (framebuffer fetch)
+static int g_air_nir_v7;                           // the NVK reads version 7: argument buffers, the heap's typed dummies
 static NSString *g_air_nir_ids;                    // this NVK's and this LLVM's identity, in every cache key
 
 // The log of this road: the plugin's log file, never the system log (a refusal message names what the frontend does not
@@ -198,6 +199,7 @@ static int nvmtl_air_nir_on(void)
             nvmtl_air_nir_image_uuid((const void *)pnvk_air_to_nir, uuid);
             g_air_nir_v5 = nvmtl_vk_air_nir_version() >= 5;
             g_air_nir_v6 = nvmtl_vk_air_nir_version() >= 6;
+            g_air_nir_v7 = nvmtl_vk_air_nir_version() >= 7;
             g_air_nir_ids = [NSString stringWithFormat:@"nvk %s llvm %llu.%ld.%llu", uuid, (unsigned long long)st.st_size,
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
             if (nvmtl_air_nir_off_listed_here(g_air_nir_ids.UTF8String))
@@ -269,11 +271,17 @@ static int nvmtl_air_nir_fetch_ok(void) { return g_air_nir_v6 && !nvmtl_vk_fetch
 // buffer robustness when compute pipelines are made so
 static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
 {
-    // version 6: arrays of textures (an element chosen at run time through the bindless heap, as the translator reads it)
+    // version 6: arrays of textures (an element chosen at run time through the bindless heap, as the translator reads it);
+    // version 7: argument buffers, with the heap's five bindings (sampled and storage images, samplers, texel buffers),
+    // and the typed dummies the translator is told of (nvmtl_translate_set_caps bit 3, NVMTLLibraryLoad.m)
+    extern int nvmtl_typed_dummies_wanted(void);
+    extern int nvmtl_vk_bindless_heap_bindings(void);
     return NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_FC_VALUES | NVMTL_AIR_NIR_TG_DEFAULT
          | (nvmtl_table_ubo() ? 0 : NVMTL_AIR_NIR_TABLE_SSBO) | (g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)
          | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | (render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0)
-         | (g_air_nir_v6 ? NVMTL_AIR_NIR_TEXTURE_ARRAYS : 0) | (g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0) | extra;
+         | (g_air_nir_v6 ? NVMTL_AIR_NIR_TEXTURE_ARRAYS : 0) | (g_air_nir_v6 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_HEAP : 0)
+         | (g_air_nir_v7 && nvmtl_vk_bindless_heap_bindings() == 5 ? NVMTL_AIR_NIR_ARGBUF : 0)
+         | (g_air_nir_v7 && nvmtl_typed_dummies_wanted() ? NVMTL_AIR_NIR_TYPED_DUMMIES : 0) | extra;
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's
@@ -377,7 +385,7 @@ static void nvmtl_air_nir_key(NVMTLFunction *f, NSDictionary *tgLen, uint32_t fl
 {
     *path = nil; *memoKey = nil;
     NVMTLAirDigest *ad = nvmtl_air_state(f->_air);
-    NSMutableDictionary *k = [@{ @"abi": @6, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
+    NSMutableDictionary *k = [@{ @"abi": @7, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"threadgroup": tgLen ?: @{},
                          @"size": @[ @(local[0]), @(local[1]), @(local[2]) ], @"flags": @(flags), @"ids": g_air_nir_ids ?: @"" } mutableCopy];
     if (varyings) { k[@"varyings"] = varyings; [k addEntriesFromDictionary:stageKey ?: @{}]; }
     if (samplers.count) k[@"samplers"] = samplers;
@@ -895,7 +903,7 @@ static NSDictionary *nvmtl_air_nir_function_reflection(NVMTLFunction *f, NSStrin
     // a kernel as nvmtl_air_nir_make asks; a render stage with the device's robustness and no buffer alignment above 4,
     // as nvmtl_air_nir_render_pipeline asks, but with its own Locations (the pipeline hands it the linked ones)
     const uint32_t flags = kernel ? nvmtl_air_nir_flags(0, NO) : (nvmtl_air_nir_flags(NVMTL_AIR_NIR_ALIGN4, YES) & ~NVMTL_AIR_NIR_VARYINGS);
-    NSDictionary *k = @{ @"abi": @6, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"stage": f->_stage ?: @"",
+    NSDictionary *k = @{ @"abi": @7, @"entry": f->_fname ?: @"", @"constants": f->_fc ?: @{}, @"stage": f->_stage ?: @"",
                          @"ids": g_air_nir_ids ?: @"", @"flags": @(flags) };
     NSData *tail = [NSJSONSerialization dataWithJSONObject:k options:NSJSONWritingSortedKeys error:NULL];
     NSString *path = ad && tail ? nvmtl_spvcache_path_air(ad, tail, @"nrf1") : nil;

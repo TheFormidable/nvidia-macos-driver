@@ -238,10 +238,14 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
         cached = objc_getAssociatedObject(fn, &nvmtl_embedded_plan_key);
         if (cached) return cached;
         NSMutableArray *plans = [NSMutableArray new];
-        // the SPIR-V's declared bindings, read only when there is an argument-buffer resource to route (a function made
-        // without the translator has none: the frontend refuses argument buffers)
+        // the SPIR-V's declared bindings, read only when there is an argument-buffer resource to route. A function made
+        // without the translator (its SPIR-V not made yet) is not translated for this: its pipelines on the road read
+        // every argument-buffer texture through the heap but a written one that is one field (not an array), which the
+        // frontend binds at the embedded binding as the translator does (nvk_air_to_nir.c air_handle_texture); a SPIR-V
+        // module made later for it binds the same, and leaves at their own bindings only textures it never reads.
         NSArray *embedded = nvmtl_embedded_bindings(fn);
-        uint64_t decl[2][8]; const BOOL haveDecl = embedded.count && nvmtl_spirv_declared(nvmtl_function_spirv(fn, "argument-buffer routing"), decl); unsigned heapRouted = 0;
+        const BOOL road = fn->_spirvLazy;
+        uint64_t decl[2][8]; const BOOL haveDecl = embedded.count && !road && nvmtl_spirv_declared(nvmtl_function_spirv(fn, "argument-buffer routing"), decl); unsigned heapRouted = 0;
         for (NSDictionary *entry in embedded) {
             NSDictionary *src = entry[@"embedded_source"];
             NSNumber *slotNum = entry[@"metal_index"];
@@ -259,6 +263,8 @@ static NSArray<NVMTLEmbeddedPlan *> *nvmtl_embedded_plan(NVMTLFunction *fn) {
               plan->dbinding = [binding respondsToSelector:@selector(unsignedIntValue)] ? [binding unsignedIntValue] : UINT32_MAX; }
             if (haveDecl && !plan->wantSampler && plan->dset < 2 && plan->dbinding < 512 &&
                 !((decl[plan->dset][plan->dbinding >> 6] >> (plan->dbinding & 63)) & 1)) { heapRouted++; continue; }
+            if (road && !plan->wantSampler && !(plan->storage && ![entry[@"texture_shape"][@"array_length"] isKindOfClass:[NSNumber class]])) {
+                heapRouted++; continue; }
             [plans addObject:plan];
         }
         { static _Atomic unsigned said; if (heapRouted && atomic_fetch_add(&said, 1) < 8)

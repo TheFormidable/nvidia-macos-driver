@@ -292,7 +292,21 @@ struct air_val {
    uint32_t align;    /* known alignment of a pointer, in bytes */
    unsigned num_elems;
    struct air_val **elems;   /* AIR_AGGREGATE */
-   void *res;                /* AIR_TEXTURE, AIR_SAMPLER, AIR_TEXARRAY */
+   void *res;                /* AIR_TEXTURE, AIR_SAMPLER, AIR_TEXARRAY; a handle loaded from memory: its texture or
+                              * sampler once a call reads it (struct air_texture or air_sampler) */
+   /* A device or constant pointer the translator reads through a device address (one loaded from memory, made from an
+    * integer, or chosen by a phi or select): the pointer as it was loaded, made or chosen. A load through it, or through
+    * a pointer derived from it, reads 0 when it is 0 (the translator's null_bda_load_helper); a store or an atomic is not
+    * guarded (nor is the translator's). NULL for a pointer an argument gives. */
+   nir_def *nbase;
+   /* A pointer loaded from memory: the 32 bits at the same address, loaded beside it and unguarded, as the translator
+    * loads a texture or sampler handle in an argument buffer (its low word, the heap slot) */
+   nir_def *hword;
+   /* A device or constant pointer at an offset known here into an argument's buffer (an argument buffer bound
+    * directly): the parameter + 1 and the offset; 0 for any other. A value loaded from such a place: from_param and
+    * from_off say where (an embedded binding of the translator's is found by them). */
+   uint16_t ab_param, from_param;
+   uint32_t ab_off, from_off;
 };
 
 #define AIR_MAX_ELEMS 256    /* of one structure or array held as a value */
@@ -311,6 +325,36 @@ struct air_phi {
    uint8_t kind;
    uint8_t depth;                  /* an element of an aggregate phi: the indices down to it */
    uint16_t path[AIR_MAX_DEPTH];
+};
+
+/* Argument buffers (version 7, NVMTL_AIR_NIR_ARGBUF): what the translator's meta::embedded finds in the arguments'
+ * air.struct_type_info (detect_embedded_textures, _samplers, _arguments), for the embedded bindings, the reflection
+ * and argument_buffer_fields. */
+struct air_ab_tex {
+   uint32_t param, buffer_index, field_offset, field_ordinal, argument_index, syn;
+   const char *type_name;        /* its air.arg_type_name (texture_shape_from_name) */
+   bool have_len;                /* array_length: the name's array<..., N>, or a C array's member count */
+   uint32_t len;
+   bool writable;                /* storage_format is Some: bound at 480 + syn */
+   nir_variable *var;            /* its per-draw binding (a written field, not an array), made at its first use */
+};
+struct air_ab_samp {
+   uint32_t param, buffer_index, field_offset, field_ordinal, argument_index, syn;
+   nir_variable *var, *shadow_var;
+};
+struct air_ab_field {
+   uint32_t param, buffer_index, field_offset, field_ordinal, argument_index;
+   bool is_buffer, have_space, have_size;
+   uint32_t space, size;
+   const char *access;           /* declared_buffer_access, a buffer's */
+};
+/* a variable of the bindless heap: binding, shape */
+struct air_heap_var {
+   unsigned binding;
+   enum glsl_sampler_dim dim;
+   bool array, shadow;
+   enum glsl_base_type base;
+   nir_variable *var;
 };
 
 struct air_tr {
@@ -362,6 +406,11 @@ struct air_tr {
    uint32_t vertex_inputs, varyings, color_outputs, fragment_flags;
    uint32_t color_inputs;       /* [[color(n)]] inputs declared (since version 6, NVMTL_AIR_NIR_COLOR_INPUTS) */
    bool heap_textures;          /* an array<texture, N> element is read through the bindless heap (version 6) */
+   /* argument buffers (version 7, NVMTL_AIR_NIR_ARGBUF) */
+   struct util_dynarray ab_texs, ab_samps, ab_fields;   /* struct air_ab_tex, air_ab_samp, air_ab_field */
+   bool ab_texcalls;            /* the module names an image intrinsic (meta::embedded::body_uses_texture_intrinsic) */
+   bool ab_samplers_per_draw;   /* every sampler a call reads from memory is an embedded sampler field: bound per draw */
+   struct util_dynarray heap_vars;   /* struct air_heap_var */
    uint8_t vertex_input_kind[32];
    unsigned next_varying;       /* the translator's own Locations: the next one in order */
    nir_variable *sysval[8];     /* the system values read, one variable each */
@@ -569,6 +618,37 @@ static struct air_val *
 air_set(struct air_tr *t, LLVMValueRef v, nir_def *def, enum air_kind kind, uint32_t align)
 {
    return air_set_val(t, v, air_make(t, def, kind, align));
+}
+
+/* A pointer derived from base by a GEP adding off (NULL: a cast) inherits its null guard, and the place in an argument's
+ * buffer it is at while the offset stays known. */
+static struct air_val *
+air_derive(struct air_val *r, const struct air_val *base, nir_def *off)
+{
+   r->nbase = base->nbase;
+   if (base->ab_param && (!off || nir_src_is_const(nir_src_for_ssa(off)))) {
+      r->ab_param = base->ab_param;
+      r->ab_off = base->ab_off + (off ? (uint32_t)nir_src_as_uint(nir_src_for_ssa(off)) : 0);
+   }
+   return r;
+}
+
+/* the pointer off bytes past ptr, of the same kind and guard */
+static struct air_val *
+air_ptr_at(struct air_tr *t, nir_builder *b, const struct air_val *ptr, uint64_t off, uint32_t align)
+{
+   nir_def *d = off ? nir_iadd_imm(b, ptr->def, off) : ptr->def;
+   return air_derive(air_make(t, d, ptr->kind, align), ptr, off ? nir_imm_intN_t(b, off, ptr->def->bit_size) : NULL);
+}
+
+/* A NIR block of its own after the others (the CFG is unstructured until nir_lower_goto_ifs) */
+static nir_block *
+air_new_block(struct air_tr *t)
+{
+   nir_block *nb = nir_block_create(t->impl);
+   exec_list_push_tail(&t->impl->body, &nb->cf_node.node);
+   nb->cf_node.parent = &t->impl->cf_node;
+   return nb;
 }
 
 /* Structures and arrays held as values (insertvalue and extractvalue, loads, stores, phis and selects of them): a tree
@@ -930,7 +1010,7 @@ air_gep(struct air_tr *t, nir_builder *b, LLVMValueRef gep, LLVMValueRef result_
    nir_def *off = air_gep_offset(t, b, gep, L.LLVMGetGEPSourceElementType(gep), 1,
                                  (unsigned)L.LLVMGetNumOperands(gep), bits, &align);
    nir_def *addr = off ? nir_iadd(b, base->def, off) : base->def;
-   return air_set(t, result_key, addr, base->kind, align);
+   return air_derive(air_set(t, result_key, addr, base->kind, align), base, off);
 }
 
 static struct air_val *
@@ -943,7 +1023,10 @@ air_constant_expr(struct air_tr *t, LLVMValueRef c)
       struct air_val *src = air_get(t, L.LLVMGetOperand(c, 0));
       struct air_val *r = air_set(t, c, src->def, src->kind, src->align);
       r->res = src->res;
-      return r;
+      r->hword = src->hword;
+      r->from_param = src->from_param;
+      r->from_off = src->from_off;
+      return air_derive(r, src, NULL);
    }
    default:
       unsupported(t, "a constant expression with LLVM opcode %d", L.LLVMGetConstOpcode(c));
@@ -966,6 +1049,25 @@ air_global_align(struct air_tr *t, uint32_t align)
    return align;
 }
 
+/* A load through a pointer the translator reads as a device address: 0 when that address is 0, as its
+ * null_bda_load_helper reads (passes/../native/emitter/memory/device_addr.rs) */
+static nir_def *
+air_guarded_load(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
+{
+   nir_builder *b = &t->b;
+   const enum glsl_base_type base = bits == 64 ? GLSL_TYPE_UINT64 : bits == 16 ? GLSL_TYPE_UINT16 :
+                                    bits == 8 ? GLSL_TYPE_UINT8 : GLSL_TYPE_UINT;
+   nir_variable *v = nir_local_variable_create(t->impl, glsl_vector_type(base, components), "nullguard");
+   nir_store_var(b, v, nir_imm_zero(b, components, bits), BITFIELD_MASK(components));
+   nir_block *live = air_new_block(t), *join = air_new_block(t);
+   nir_goto_if(b, live, nir_ine_imm(b, ptr->nbase, 0), join);
+   b->cursor = nir_after_block(live);
+   nir_store_var(b, v, nir_load_global(b, components, bits, ptr->def, .align_mul = align), BITFIELD_MASK(components));
+   nir_goto(b, join);
+   b->cursor = nir_after_block(join);
+   return nir_load_var(b, v);
+}
+
 static nir_def *
 air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigned bits, uint32_t align)
 {
@@ -976,6 +1078,8 @@ air_load_mem(struct air_tr *t, struct air_val *ptr, unsigned components, unsigne
    switch (ptr->kind) {
    case AIR_GLOBAL:
       align = air_global_align(t, align);
+      if (ptr->nbase)
+         return air_guarded_load(t, ptr, components, bits, align);
       return nir_load_global(b, components, bits, ptr->def, .align_mul = align);
    case AIR_CONSTANT:
       return nir_load_constant(b, components, bits, ptr->def, .base = 0, .range = ~0u, .align_mul = align);
@@ -1032,7 +1136,7 @@ air_load_val(struct air_tr *t, struct air_val *ptr, LLVMTypeRef lty, uint32_t al
       for (unsigned i = 0; i < n; i++) {
          uint64_t off = air_elem_offset(t, lty, i);
          uint32_t a = air_gcd_align(align ? align : 1, off);
-         struct air_val *at = air_make(t, off ? nir_iadd_imm(b, ptr->def, off) : ptr->def, ptr->kind, a);
+         struct air_val *at = air_ptr_at(t, b, ptr, off, a);
          r->elems[i] = air_load_val(t, at, air_elem_type(lty, i), a);
       }
       return r;
@@ -1043,7 +1147,18 @@ air_load_val(struct air_tr *t, struct air_val *ptr, LLVMTypeRef lty, uint32_t al
    if (ty.is_pointer) {
       nir_def *v = air_load_mem(t, ptr, 1, 64, align);
       enum air_kind k = air_kind_of_space(ty.address_space);
-      return air_make(t, k == AIR_GLOBAL ? v : nir_u2u32(b, v), k, 1);
+      struct air_val *r = air_make(t, k == AIR_GLOBAL ? v : nir_u2u32(b, v), k, 1);
+      if (k == AIR_GLOBAL) {
+         /* a device address the translator reads through (guarded), and, should a texture or sampler call take it, a
+          * handle: its low word, loaded here unguarded as the translator loads it, and where it lies */
+         r->nbase = v;
+         struct air_val word = *ptr;
+         word.nbase = NULL;
+         r->hword = air_load_mem(t, &word, 1, 32, align);
+         r->from_param = ptr->ab_param;
+         r->from_off = ptr->ab_off;
+      }
+      return r;
    }
    if (ty.bits == 1) {
       nir_def *v = air_load_mem(t, ptr, ty.components, 8, align);
@@ -1069,7 +1184,7 @@ air_store_val(struct air_tr *t, struct air_val *ptr, struct air_val *val, LLVMTy
       for (unsigned i = 0; i < n; i++) {
          uint64_t off = air_elem_offset(t, lty, i);
          uint32_t a = air_gcd_align(align ? align : 1, off);
-         struct air_val *at = air_make(t, off ? nir_iadd_imm(b, ptr->def, off) : ptr->def, ptr->kind, a);
+         struct air_val *at = air_ptr_at(t, b, ptr, off, a);
          air_store_val(t, at, val->elems[i], air_elem_type(lty, i), a);
       }
       return;
@@ -1129,6 +1244,7 @@ air_mem_copy(struct air_tr *t, LLVMValueRef call, bool set)
          v = nir_vec(b, c, comps);
       } else {
          struct air_val s = { nir_iadd_imm(b, src->def, at), src->kind, piece };
+         s.nbase = src->nbase;
          v = air_load_mem(t, &s, comps, bits, piece);
       }
       air_store_mem(t, &d, v, piece);
@@ -1323,6 +1439,7 @@ air_find_kernel(struct air_tr *t, LLVMValueRef *args_node)
 /* What one !air.kernel argument node says. */
 struct air_arg {
    LLVMValueRef param;
+   unsigned index;         /* the parameter's index */
    const char *kind;
    uint64_t location, space, align, size;
    LLVMValueRef fc_node;   /* an argument that exists only under a function constant: its {global, type, name} */
@@ -1349,6 +1466,7 @@ air_read_arg(struct air_tr *t, LLVMValueRef node, unsigned i, unsigned params)
    if (!a.kind || !air_md_int(ops[0], &index) || index >= params)
       air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "argument %u of the kernel has malformed metadata", i);
    a.param = L.LLVMGetParam(t->function, (unsigned)index);
+   a.index = (unsigned)index;
    /* an argument that exists only when a function constant is true: {index, "air.function_constant", constant, kind,
     * ...}; it is bound as its kind says (a kernel that reads the constant itself is refused where it does) */
    unsigned first = 2;
@@ -2004,7 +2122,9 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          unsupported(t, "argument %u is in a raster order group", i);
       if (t->stage != NVMTL_AIR_NIR_STAGE_KERNEL && air_bind_stage_input(t, a, i))
          continue;
-      if (!strcmp(a->kind, "air.buffer")) {
+      /* an argument buffer (version 7): a buffer whose fields the shader reads, handles among them */
+      const bool argbuf = !strcmp(a->kind, "air.indirect_buffer") && (t->req->flags & NVMTL_AIR_NIR_ARGBUF);
+      if (!strcmp(a->kind, "air.buffer") || argbuf) {
          if (!air_fc_arg_present(t, a)) {
             /* a function constant leaves it out: nothing is bound at its slot, and what read it was folded away */
             air_set(t, a->param, nir_imm_int64(&t->top, 0), AIR_GLOBAL, 16);
@@ -2016,8 +2136,9 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
             unsupported(t, "buffer argument %u in address space %llu", i, (unsigned long long)a->space);
          if (L.LLVMGetTypeKind(L.LLVMTypeOf(a->param)) != TY_POINTER)
             unsupported(t, "buffer argument %u is not a pointer", i);
-         air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
-                 a->align ? MIN2((uint32_t)a->align, 16) : 4);
+         struct air_val *v = air_set(t, a->param, air_table_entry(t, (unsigned)a->location), AIR_GLOBAL,
+                                     a->align ? MIN2((uint32_t)a->align, 16) : 4);
+         v->ab_param = (uint16_t)(a->index + 1);   /* its fields at known offsets: where embedded bindings are */
       } else if (!strcmp(a->kind, "air.texture")) {
          char *elem = NULL;
          unsigned count = 0;
@@ -2923,6 +3044,7 @@ struct air_texarray {
 
 struct air_sampler {
    unsigned slot;                /* binding 160 + slot */
+   nir_def *heap_slot;           /* a sampler handle read from memory (version 7): its slot in the heap's samplers */
    bool is_static, read_sampler, absent;
    bool given;                   /* an argument sampler whose state the request gives (version 5) */
    uint64_t words[2];            /* a constexpr sampler's AIR state, or the state the request gives */
@@ -3065,6 +3187,8 @@ air_bind_texarray(struct air_tr *t, const struct air_arg *a, unsigned i, const c
    return x;
 }
 
+static nir_def *air_heap_index(struct air_tr *t, nir_def *slot, enum glsl_sampler_dim dim, bool array);
+
 /* a handle loaded from an array<texture, N> argument: element ptr->def */
 static struct air_val *
 air_texarray_load(struct air_tr *t, struct air_val *ptr)
@@ -3114,7 +3238,8 @@ air_texarray_load(struct air_tr *t, struct air_val *ptr)
    struct air_texture *e = rzalloc(t->mem, struct air_texture);
    *e = x->proto;
    e->var = x->heap;
-   e->heap_slot = nir_iand_imm(b, nir_u2u32(b, word), NVMTL_AIR_NIR_HEAP_SLOTS - 1);
+   e->heap_slot = air_heap_index(t, nir_iand_imm(b, nir_u2u32(b, word), NVMTL_AIR_NIR_HEAP_SLOTS - 1), x->proto.dim,
+                                 x->proto.array);
    t->heap_textures = true;
    v->res = e;
    return v;
@@ -3235,10 +3360,18 @@ air_assign_static_samplers(struct air_tr *t)
    }
 }
 
+static nir_variable *air_heap_var(struct air_tr *t, unsigned binding, enum glsl_sampler_dim dim, bool array,
+                                  enum glsl_base_type base, bool shadow);
+
 static nir_deref_instr *
 air_sampler_deref(struct air_tr *t, struct air_sampler *s, bool shadow)
 {
    nir_variable **var = shadow ? &s->shadow_var : &s->var;
+   if (s->heap_slot)
+      return nir_build_deref_array(&t->b, nir_build_deref_var(&t->b, air_heap_var(t, NVMTL_AIR_NIR_HEAP_SAMPLERS,
+                                                                                    GLSL_SAMPLER_DIM_2D, false,
+                                                                                    GLSL_TYPE_FLOAT, shadow)),
+                                   s->heap_slot);
    if (s->read_sampler)
       unsupported(t, "a sample through the read sampler");
    if (s->absent)
@@ -3279,6 +3412,211 @@ air_texture_deref(struct air_tr *t, struct air_texture *x)
    return nir_build_deref_var(&t->b, x->var);
 }
 
+/* ---- handles in memory (version 7, NVMTL_AIR_NIR_ARGBUF): argument buffers ----
+ *
+ * A texture or sampler an argument buffer holds is its gpuResourceID (the plugin's NVMTLEmbedded.m): a texture's low
+ * 17 bits its slot in the bindless heap, a sampler's low word its slot among the heap's samplers. The translator reads
+ * it where the shader loads it (the low word, unguarded) and indexes the heap with it, non-uniform
+ * (native/emitter/body/core_inst.rs, passes/stage_input register_embedded_textures), except for a written texture that
+ * is one field (not an array) of an argument buffer bound directly, at an offset it knows, which is the embedded
+ * binding 480 + its synthetic index the plugin binds per draw from the buffer's CPU copy, and a sampler such a field
+ * when its first attempt translates the module (every sampler read from memory is one): 160 + its synthetic index.
+ * The shape of a texture read so is its call's (air.<op>_<texture|depth>_<shape>[.<u|s>].<type>); it is written or
+ * read-written when a read or write of it says so (its access operand 2 or 3), and then a storage image. */
+
+/* the heap's variable of a binding and shape: one per distinct image type, as the translator's bindless_heap_var */
+static nir_variable *
+air_heap_var(struct air_tr *t, unsigned binding, enum glsl_sampler_dim dim, bool array, enum glsl_base_type base, bool shadow)
+{
+   if (binding == NVMTL_AIR_NIR_HEAP_SAMPLERS) {
+      dim = GLSL_SAMPLER_DIM_2D;
+      array = false;
+      base = GLSL_TYPE_FLOAT;
+   } else
+      shadow = false;
+   util_dynarray_foreach(&t->heap_vars, struct air_heap_var, h) {
+      if (h->binding == binding && h->dim == dim && h->array == array && h->base == base && h->shadow == shadow)
+         return h->var;
+   }
+   const bool image = binding == NVMTL_AIR_NIR_HEAP_STORAGE || binding == NVMTL_AIR_NIR_HEAP_STEXEL;
+   const struct glsl_type *et = binding == NVMTL_AIR_NIR_HEAP_SAMPLERS ?
+                                   (shadow ? glsl_bare_shadow_sampler_type() : glsl_bare_sampler_type()) :
+                                image ? glsl_image_type(dim, array, base) : glsl_texture_type(dim, array, base);
+   nir_variable *v = nir_variable_create(t->nir, image ? nir_var_image : nir_var_uniform, glsl_array_type(et, 0, 0),
+                                         "bindless_heap");
+   v->data.descriptor_set = NVMTL_AIR_NIR_HEAP_SET;
+   v->data.binding = binding;
+   if (image)
+      v->data.image.format = PIPE_FORMAT_NONE;
+   struct air_heap_var h = { binding, dim, array, shadow, base, v };
+   util_dynarray_append(&t->heap_vars, h);
+   t->heap_textures = true;
+   return v;
+}
+
+/* A heap index as every heap access of the translator's takes it with the typed dummies (dummy_slots.rs
+ * dummy_slot_for): 0 is the reserved dummy of the image's shape; a texel buffer keeps 0 */
+static nir_def *
+air_heap_index(struct air_tr *t, nir_def *slot, enum glsl_sampler_dim dim, bool array)
+{
+   if (!(t->req->flags & NVMTL_AIR_NIR_TYPED_DUMMIES))
+      return slot;
+   unsigned dummy;
+   switch (dim) {
+   case GLSL_SAMPLER_DIM_1D: dummy = 1; break;
+   case GLSL_SAMPLER_DIM_2D: case GLSL_SAMPLER_DIM_MS: dummy = array ? 2 : 1; break;
+   case GLSL_SAMPLER_DIM_3D: dummy = 3; break;
+   case GLSL_SAMPLER_DIM_CUBE: dummy = array ? 5 : 4; break;
+   default: return slot;
+   }
+   return nir_bcsel(&t->b, nir_ieq_imm(&t->b, slot, 0), nir_imm_int(&t->b, (int)dummy), slot);
+}
+
+/* the access operand (the last) of an air.read_texture_* / air.write_texture_* call: 2 write, 3 read_write */
+static bool
+air_call_writes(LLVMValueRef call, const char *name)
+{
+   if (air_starts(name, "air.write_texture_"))
+      return true;
+   if (!air_starts(name, "air.read_texture_"))
+      return false;
+   const unsigned n = L.LLVMGetNumArgOperands(call);
+   LLVMValueRef a = n ? L.LLVMGetOperand(call, n - 1) : NULL;
+   const uint64_t access = a && L.LLVMIsAConstantInt(a) ? L.LLVMConstIntGetZExtValue(a) : 0;
+   return access == 2 || access == 3;
+}
+
+/* whether a texture handle the value v is read as storage: a read or write of it (through casts) says so */
+static bool
+air_handle_written(struct air_tr *t, LLVMValueRef v, unsigned depth)
+{
+   for (LLVMUseRef u = L.LLVMGetFirstUse(v); u && depth < 8; u = L.LLVMGetNextUse(u)) {
+      LLVMValueRef user = L.LLVMGetUser(u);
+      const int op = L.LLVMIsAConstantExpr(user) ? L.LLVMGetConstOpcode(user) : L.LLVMGetInstructionOpcode(user);
+      if (op == OP_BITCAST || op == OP_ADDRSPACECAST) {
+         if (air_handle_written(t, user, depth + 1))
+            return true;
+      } else if (op == OP_CALL) {
+         LLVMValueRef callee = L.LLVMGetCalledValue(user);
+         if (callee && L.LLVMIsAFunction(callee) && L.LLVMGetNumArgOperands(user) && L.LLVMGetOperand(user, 0) == v &&
+             air_call_writes(user, air_name(callee, NULL)))
+            return true;
+      }
+   }
+   return false;
+}
+
+/* the embedded texture the translator gives the field param, offset off, or NULL */
+static struct air_ab_tex *
+air_ab_tex_at(struct air_tr *t, unsigned param1, uint32_t off)
+{
+   if (!param1)
+      return NULL;
+   util_dynarray_foreach(&t->ab_texs, struct air_ab_tex, e) {
+      if (e->param + 1 == param1 && e->field_offset == off)
+         return e;
+   }
+   return NULL;
+}
+
+static struct air_ab_samp *
+air_ab_samp_at(struct air_tr *t, unsigned param1, uint32_t off)
+{
+   if (!param1)
+      return NULL;
+   util_dynarray_foreach(&t->ab_samps, struct air_ab_samp, e) {
+      if (e->param + 1 == param1 && e->field_offset == off)
+         return e;
+   }
+   return NULL;
+}
+
+/* A texture call's texture loaded from memory: its shape from the call, its slot from the handle's low word, or the
+ * embedded binding of a written field */
+static struct air_texture *
+air_handle_texture(struct air_tr *t, LLVMValueRef lv, struct air_val *h, const char *name)
+{
+   static const struct { const char *name; enum glsl_sampler_dim dim; bool array; } shapes[] = {
+      { "1d_array", GLSL_SAMPLER_DIM_1D, true }, { "1d", GLSL_SAMPLER_DIM_1D, false },
+      { "2d_ms_array", GLSL_SAMPLER_DIM_MS, true }, { "2d_ms", GLSL_SAMPLER_DIM_MS, false },
+      { "2d_array", GLSL_SAMPLER_DIM_2D, true }, { "2d", GLSL_SAMPLER_DIM_2D, false },
+      { "3d", GLSL_SAMPLER_DIM_3D, false }, { "cube_array", GLSL_SAMPLER_DIM_CUBE, true },
+      { "cube", GLSL_SAMPLER_DIM_CUBE, false }, { "buffer_1d", GLSL_SAMPLER_DIM_BUF, false },
+   };
+   const char *k = strstr(name, "_texture_");
+   bool depth = false;
+   if (!k) {
+      k = strstr(name, "_depth_");
+      depth = k != NULL;
+   }
+   if (!k)
+      unsupported(t, "the texture call %s on a handle read from memory", name);
+   k = strchr(k + 1, '_') + 1;
+   struct air_texture x = { 0 };
+   unsigned i;
+   for (i = 0; i < ARRAY_SIZE(shapes); i++) {
+      const size_t n = strlen(shapes[i].name);
+      if (!strncmp(k, shapes[i].name, n) && (k[n] == '.' || k[n] == 0)) {
+         x.dim = shapes[i].dim;
+         x.array = shapes[i].array;
+         break;
+      }
+   }
+   if (i == ARRAY_SIZE(shapes))
+      unsupported(t, "the texture call %s on a handle read from memory", name);
+   x.depth = depth;
+   x.base = strstr(k, ".u.") ? GLSL_TYPE_UINT : strstr(k, ".s.") ? GLSL_TYPE_INT : GLSL_TYPE_FLOAT;
+   x.storage = air_handle_written(t, lv, 0);
+   x.index = 0;
+   x.type_name = name;
+   if (x.dim == GLSL_SAMPLER_DIM_MS && (x.depth || x.storage))
+      unsupported(t, "a multisampled texture read from memory that is a depth texture or written");
+   if (x.storage && (x.dim == GLSL_SAMPLER_DIM_CUBE || x.depth))
+      unsupported(t, "a written cube or depth texture read from memory (the translator writes it through a 2D-array view)");
+   struct air_texture *r = rzalloc(t->mem, struct air_texture);
+   *r = x;
+   struct air_ab_tex *e = air_ab_tex_at(t, h->from_param, h->from_off);
+   if (x.storage && e && e->writable && !e->have_len) {
+      /* the translator's embedded binding: the plugin binds the field's texture there per draw */
+      if (e->syn >= 128)
+         unsupported(t, "an embedded texture with synthetic index %u", e->syn);
+      if (!e->var) {
+         e->var = nir_variable_create(t->nir, nir_var_image, glsl_image_type(x.dim, x.array, x.base), "embedded_texture");
+         e->var->data.descriptor_set = t->set;
+         e->var->data.binding = 480 + e->syn;
+         e->var->data.image.format = PIPE_FORMAT_NONE;
+      }
+      r->var = e->var;
+      r->index = e->syn;
+      return r;
+   }
+   if (x.dim == GLSL_SAMPLER_DIM_BUF && e && e->have_len)
+      unsupported(t, "an element of an array of texture_buffers in an argument buffer (the translator's is a descriptor "
+                  "array the plugin's bindings do not hold)");
+   const unsigned binding = x.storage ? (x.dim == GLSL_SAMPLER_DIM_BUF ? NVMTL_AIR_NIR_HEAP_STEXEL : NVMTL_AIR_NIR_HEAP_STORAGE)
+                                      : (x.dim == GLSL_SAMPLER_DIM_BUF ? NVMTL_AIR_NIR_HEAP_UTEXEL : NVMTL_AIR_NIR_HEAP_BINDING);
+   r->var = air_heap_var(t, binding, x.dim, x.array, x.base, false);
+   r->heap_slot = air_heap_index(t, nir_iand_imm(&t->b, h->hword, NVMTL_AIR_NIR_HEAP_SLOTS - 1), x.dim, x.array);
+   return r;
+}
+
+/* A sample's sampler loaded from memory: the heap's sampler at its low word, or the embedded binding of the field
+ * the translator's first attempt binds per draw */
+static struct air_sampler *
+air_handle_sampler(struct air_tr *t, struct air_val *h)
+{
+   struct air_sampler *s = rzalloc(t->mem, struct air_sampler);
+   struct air_ab_samp *e = t->ab_samplers_per_draw ? air_ab_samp_at(t, h->from_param, h->from_off) : NULL;
+   if (e) {
+      if (e->syn >= 32)
+         unsupported(t, "an embedded sampler with synthetic index %u", e->syn);
+      s->slot = e->syn;
+      return s;
+   }
+   s->heap_slot = nir_iand_imm(&t->b, h->hword, NVMTL_AIR_NIR_SAMPLER_SLOTS - 1);
+   return s;
+}
+
 static unsigned
 air_spatial(const struct air_texture *x)
 {
@@ -3298,6 +3636,7 @@ air_tex_type(const struct air_texture *x)
 struct air_tex_srcs {
    nir_def *coord, *lod, *bias, *comparator, *ddx, *ddy, *offset, *ms_index;
    nir_deref_instr *texture, *sampler;
+   bool sampler_heap;            /* the sampler is the heap's (non-uniform, as the translator's heap accesses) */
 };
 
 static nir_def *
@@ -3330,6 +3669,7 @@ air_build_tex(struct air_tr *t, nir_texop op, const struct air_texture *x, const
    tex->sampler_dim = x->dim;
    tex->is_array = x->array;
    tex->texture_non_uniform = x->heap_slot != NULL;   /* the translator's heap accesses are NonUniform */
+   tex->sampler_non_uniform = in->sampler_heap;
    tex->is_shadow = in->comparator != NULL;
    tex->is_new_style_shadow = in->comparator != NULL;
    const bool int_query = op == nir_texop_txs || op == nir_texop_query_levels || op == nir_texop_texture_samples;
@@ -3435,10 +3775,22 @@ air_texel_result(struct air_tr *t, LLVMValueRef call, nir_def *color)
    return r;
 }
 
+/* a handle loaded from memory, with argument buffers translated */
+static bool
+air_is_handle(struct air_tr *t, const struct air_val *x)
+{
+   return x->kind == AIR_GLOBAL && x->hword && (t->req->flags & NVMTL_AIR_NIR_ARGBUF);
+}
+
 static struct air_texture *
-air_texture_of(struct air_tr *t, LLVMValueRef v)
+air_texture_of(struct air_tr *t, LLVMValueRef v, const char *name)
 {
    struct air_val *x = air_get(t, v);
+   if (air_is_handle(t, x)) {
+      if (!x->res)
+         x->res = air_handle_texture(t, v, x, name);
+      return x->res;
+   }
    if (x->kind != AIR_TEXTURE)
       unsupported(t, "a texture call on a value that is not a texture argument");
    return x->res;
@@ -3448,6 +3800,11 @@ static struct air_sampler *
 air_sampler_of(struct air_tr *t, LLVMValueRef v)
 {
    struct air_val *x = air_get(t, v);
+   if (air_is_handle(t, x)) {
+      if (!x->res)
+         x->res = air_handle_sampler(t, x);
+      return x->res;
+   }
    if (x->kind != AIR_SAMPLER)
       unsupported(t, "a sample through a value that is not a sampler");
    return x->res;
@@ -3479,6 +3836,15 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (air_starts(name, queries[i]) && (strstr(name, "_texture_") || strstr(name, "_depth_")))
          query = queries[i];
    }
+   if (air_starts(name, "air.is_null_texture") && ARG(0)) {
+      /* the translator reads is_null_texture of a handle, an argument's or one in memory, as false (a null handle
+       * reads the heap's dummy) */
+      struct air_val *h = air_get(t, ARG(0));
+      if ((h->kind == AIR_TEXTURE && h->res && !((struct air_texture *)h->res)->absent) || air_is_handle(t, h)) {
+         *out = air_make(t, nir_imm_false(b), AIR_VALUE, 0);
+         return true;
+      }
+   }
    if (!read && !write && !sample && !depth_sample && !compare && !gather && !fence && !query) {
       if (air_starts(name, "air.gather_depth_") ||
           air_starts(name, "air.gather_compare_") || air_starts(name, "air.sample_texture") ||
@@ -3487,7 +3853,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          unsupported(t, "the texture call %s", name);
       return false;
    }
-   struct air_texture *x = air_texture_of(t, ARG(0));
+   struct air_texture *x = air_texture_of(t, ARG(0), name);
 
    if (fence) {
       nir_barrier(b, .execution_scope = SCOPE_NONE, .memory_scope = SCOPE_WORKGROUP,
@@ -3842,7 +4208,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (!comp || !L.LLVMIsAConstantInt(comp) || L.LLVMConstIntGetZExtValue(comp) > 3)
          unsupported(t, "a gather of a component not known here");
       struct air_tex_srcs in = { .texture = tex_deref, .sampler = air_sampler_deref(t, s, false),
-                                 .coord = coord, .offset = offset };
+                                 .coord = coord, .offset = offset, .sampler_heap = s->heap_slot != NULL };
       *out = air_texel_result(t, call, air_build_tex(t, nir_texop_tg4, x, &in, (int)L.LLVMConstIntGetZExtValue(comp)));
       return true;
    }
@@ -3850,7 +4216,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       unsupported(t, "a compare sample through a constexpr sampler without a compare function");
    struct air_tex_srcs in = { .texture = tex_deref, .sampler = air_sampler_deref(t, s, comparator != NULL),
                               .coord = coord, .lod = grad || implicit ? NULL : lod ? lod : nir_imm_float(b, 0),
-                              .bias = bias, .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset };
+                              .bias = bias, .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset,
+                              .sampler_heap = s->heap_slot != NULL };
    if (ddx && (ddx->num_components != spatial || ddy->num_components != spatial))
       unsupported(t, "gradients of %u components", ddx->num_components);
    if (ddx && ddx->bit_size != 32) {
@@ -4059,8 +4426,12 @@ air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
       unsupported(t, "a select between pointers of two kinds");
    if ((x->kind == AIR_TEXTURE || x->kind == AIR_SAMPLER) && x->res == y->res)
       return x;   /* the same handle either way */
-   if (x->kind != AIR_AGGREGATE)
-      return air_make(t, nir_bcsel(&t->b, c, air_vdef(t, x), air_vdef(t, y)), x->kind, MIN2(x->align, y->align));
+   if (x->kind != AIR_AGGREGATE) {
+      struct air_val *r = air_make(t, nir_bcsel(&t->b, c, air_vdef(t, x), air_vdef(t, y)), x->kind, MIN2(x->align, y->align));
+      if (r->kind == AIR_GLOBAL)
+         r->nbase = r->def;   /* the translator reads a chosen pointer through its device address, guarded by it */
+      return r;
+   }
    if (x->num_elems != y->num_elems)
       unsupported(t, "a select between two shapes of aggregate");
    struct air_val *r = air_aggregate(t, x->num_elems);
@@ -4171,9 +4542,14 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_BITCAST: {
       struct air_type to = air_type_of(t, lty);
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
-      if (to.is_pointer)
-         air_set(t, inst, x->def, x->kind, x->align)->res = x->res;
-      else
+      if (to.is_pointer) {
+         struct air_val *r = air_set(t, inst, x->def, x->kind, x->align);
+         r->res = x->res;
+         r->hword = x->hword;
+         r->from_param = x->from_param;
+         r->from_off = x->from_off;
+         air_derive(r, x, NULL);
+      } else
          air_set(t, inst, air_bitcast(t, air_vdef(t, x), &to), AIR_VALUE, 0);
       return;
    }
@@ -4182,7 +4558,12 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
       if (air_kind_of_space(to.address_space) != x->kind)
          unsupported(t, "a cast from one address space to another");
-      air_set(t, inst, x->def, x->kind, x->align);
+      struct air_val *r = air_set(t, inst, x->def, x->kind, x->align);
+      r->res = x->res;
+      r->hword = x->hword;
+      r->from_param = x->from_param;
+      r->from_off = x->from_off;
+      air_derive(r, x, NULL);
       return;
    }
    case OP_PTRTOINT: {
@@ -4194,7 +4575,9 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_INTTOPTR: {
       struct air_type to = air_type_of(t, lty);
       nir_def *x = air_def(t, L.LLVMGetOperand(inst, 0));
-      air_set(t, inst, air_resize(b, x, to.bits, false), air_kind_of_space(to.address_space), 1);
+      struct air_val *r = air_set(t, inst, air_resize(b, x, to.bits, false), air_kind_of_space(to.address_space), 1);
+      if (r->kind == AIR_GLOBAL)
+         r->nbase = r->def;   /* the translator reads it through that device address, guarded by it */
       return;
    }
    case OP_GEP:
@@ -4349,7 +4732,10 @@ air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
    phi->var = nir_local_variable_create(t->impl, air_glsl_type(&ty), "phi");
    phi->kind = ty.is_pointer ? air_kind_of_space(ty.address_space) : AIR_VALUE;
    util_dynarray_append(&t->phis, *phi);
-   return air_make(t, nir_load_var(&t->b, phi->var), phi->kind, 1);
+   struct air_val *r = air_make(t, nir_load_var(&t->b, phi->var), phi->kind, 1);
+   if (r->kind == AIR_GLOBAL)
+      r->nbase = r->def;   /* a pointer a phi chooses: read through its device address, guarded by it */
+   return r;
 }
 
 static void
@@ -6043,6 +6429,33 @@ air_rf_entry(struct air_tr *t)
    return found;
 }
 
+/* meta::embedded::body_uses_texture_intrinsic: the module names an image intrinsic (air_intrinsics::air_image_intrinsic),
+ * declared or called, as the text the translator reads does */
+static bool
+air_ab_texcalls(struct air_tr *t)
+{
+   static const char *const prefixes[] = {
+      "air.fence_texture", "air.sample_texture", "air.sample_depth", "air.sample_compare_depth", "air.gather_texture",
+      "air.gather_depth", "air.gather_compare_depth", "air.read_texture", "air.read_depth", "air.write_texture",
+      "air.atomic_fetch_max_explicit_texture_", "air.write_imageblock_slice_to_texture", "air.get_width_texture",
+      "air.get_height_texture", "air.get_depth_texture", "air.get_array_size_texture", "air.get_width_depth",
+      "air.get_height_depth", "air.get_depth_depth", "air.get_num_mip_levels_texture", "air.get_num_mip_levels_depth",
+      "air.get_num_samples_texture", "air.is_null_texture", "air.get_null_texture",
+   };
+   for (LLVMValueRef f = L.LLVMGetFirstFunction(t->module); f; f = L.LLVMGetNextFunction(f)) {
+      const char *name = air_name(f, NULL);
+      if (!strcmp(name, "air.get_num_samples_depth_2d_ms") || !strcmp(name, "air.get_num_samples_depth_2d_ms_array") ||
+          !strcmp(name, "air.calculate_unclamped_lod_texture_2d") || !strcmp(name, "air.calculate_clamped_lod_texture_2d") ||
+          (air_starts(name, "air.atomic_") && strstr(name, "_explicit_texture_")))
+         return true;
+      for (unsigned i = 0; i < ARRAY_SIZE(prefixes); i++) {
+         if (air_starts(name, prefixes[i]))
+            return true;
+      }
+   }
+   return false;
+}
+
 static void
 air_rf_before_passes(struct air_tr *t)
 {
@@ -6205,6 +6618,363 @@ air_rf_loc_cmp(const void *a, const void *b)
    return x < y ? -1 : x > y;
 }
 
+/* The role the translator's parse of the entry's stage gives the argument node x (NULL: none, or a texture a known-false
+ * gate leaves out), its parameter index, its slot (meta::declared_slot of air.location_index) and its first role */
+static const char *
+air_rf_arg_role(struct air_tr *t, const struct air_rf_node *x, uint32_t *idx, uint32_t *slot, const char **first_out)
+{
+   const bool kernel = t->stage == NVMTL_AIR_NIR_STAGE_KERNEL, vertex = t->stage == NVMTL_AIR_NIR_STAGE_VERTEX;
+   bool have_idx = false;
+   for (unsigned k = 0; k < x->n && !have_idx; k++)
+      have_idx = air_rf_i32(x->ops[k], idx);
+   if (!have_idx)
+      return NULL;
+   const char *roles[64];
+   const unsigned nr = air_rf_roles(t, x, roles, ARRAY_SIZE(roles));
+   if (!nr)
+      return NULL;
+   const char *first = roles[0], *primary = air_rf_primary(roles, nr);
+   *first_out = first;
+   bool global_slot = false;
+   *slot = air_rf_slot(t, x, *idx, &global_slot);
+   /* the role each stage's parse takes: a kernel's and a vertex function's promote a gated resource (not a buffer),
+    * a fragment function's take the primary role of every argument */
+   const char *role;
+   if (!kernel && !vertex)
+      role = primary;
+   else if (strcmp(first, "function_constant"))
+      role = first;
+   else if (primary && (!strcmp(primary, "texture") || !strcmp(primary, "sampler") || !strcmp(primary, "stage_in") ||
+                        !strcmp(primary, "imageblock") || !strcmp(primary, "visible_function_table") ||
+                        !strcmp(primary, "intersection_function_table") ||
+                        (vertex && (!strcmp(primary, "vertex_input") || !strcmp(primary, "patch_input")))))
+      role = primary;
+   else
+      role = first;   /* "function_constant": a gated buffer whose gate is not known is not bound */
+   if (!role)
+      return NULL;
+   /* a texture whose slot a function constant sums and whose gate is known false is absent */
+   if (!strcmp(role, "texture") && global_slot && !strcmp(first, "function_constant") && x->n &&
+       air_rf_find(x, "air.function_constant") >= 0) {
+      int g = air_rf_find(x, "air.function_constant");
+      if ((unsigned)g + 1 < x->n && air_rf_gate_value(t, x->ops[g + 1]) == 0)
+         return NULL;
+   }
+   return role;
+}
+
+/* ---- argument buffers (meta::embedded) ---- */
+
+/* collect_argument_members: every member of an argument buffer's struct node with its argument node, wrappers (a
+ * nested struct with its [[id]]) flattened into their members */
+struct air_ab_member {
+   uint32_t field_ordinal, field_offset, argument_base, depth, array_len;
+   bool in_array_wrapper;
+   LLVMValueRef node;
+};
+
+static void
+air_ab_members(struct air_tr *t, LLVMValueRef sref, uint32_t ordinal, uint32_t offset, uint32_t base, uint32_t depth,
+               bool wrapper, struct util_dynarray *out)
+{
+   if (depth > 8 || !sref || !L.LLVMIsAMDNode(sref))
+      return;
+   struct air_rf_tok *tk;
+   const unsigned n = air_rf_tokens(t, sref, &tk);
+   uint32_t field = 0;
+   for (unsigned i = 0; i < n;) {
+      LLVMValueRef nested = NULL;
+      if (air_rf_tok_is(tk, n, i, AIR_RF_STR) && !strcmp(tk[i].s, "air.struct_type_info") && air_rf_tok_is(tk, n, i + 1, AIR_RF_REF)) {
+         nested = tk[i + 1].ref;
+         i += 2;
+      }
+      if (!air_rf_tok_is(tk, n, i, AIR_RF_INT) || !air_rf_tok_is(tk, n, i + 1, AIR_RF_INT) ||
+          !air_rf_tok_is(tk, n, i + 2, AIR_RF_INT) || !air_rf_tok_is(tk, n, i + 3, AIR_RF_STR))
+         break;
+      const uint32_t off = tk[i].i, alen = tk[i + 2].i;
+      i += 5;
+      LLVMValueRef arg = NULL;
+      bool have_wid = false;
+      uint32_t wid = 0;
+      while (i < n && !air_rf_member_starts(tk, n, i)) {
+         if (air_rf_tok_is(tk, n, i, AIR_RF_STR) && !strcmp(tk[i].s, "air.indirect_argument")) {
+            if (air_rf_tok_is(tk, n, i + 1, AIR_RF_REF))
+               arg = tk[i + 1].ref;
+            else if (air_rf_tok_is(tk, n, i + 1, AIR_RF_INT)) {
+               wid = tk[i + 1].i;
+               have_wid = true;
+            }
+         }
+         i++;
+      }
+      const uint32_t outer = depth == 0 ? field : ordinal;
+      if (nested && have_wid) {
+         air_ab_members(t, nested, outer, offset + off, base + wid, depth + 1, wrapper || alen != 0, out);
+      } else if (arg) {
+         struct air_ab_member m = { outer, offset + off, base, depth, alen, wrapper, arg };
+         util_dynarray_append(out, m);
+      }
+      field++;
+   }
+}
+
+/* role_strings contains role */
+static bool
+air_ab_role(struct air_tr *t, LLVMValueRef node, const char *role)
+{
+   struct air_rf_node x = air_rf_node(t, node);
+   for (unsigned i = 0; i < x.n; i++) {
+      const char *s = air_md_string(x.ops[i]);
+      if (s && !strncmp(s, "air.", 4) && !strcmp(s + 4, role))
+         return true;
+   }
+   return false;
+}
+
+/* meta::location_index: the literal after air.location_index, else the fallback; and declared_descriptor_count: the
+ * literal after it when above 1 */
+static uint32_t
+air_ab_location(struct air_tr *t, LLVMValueRef node, uint32_t fallback, uint32_t *count)
+{
+   struct air_rf_node x = air_rf_node(t, node);
+   const int k = air_rf_find(&x, "air.location_index");
+   uint32_t v = fallback, c = 0;
+   if (k >= 0 && (unsigned)k + 1 < x.n && !air_rf_i32(x.ops[k + 1], &v))
+      v = fallback;
+   if (count) {
+      *count = 0;
+      if (k >= 0 && (unsigned)k + 2 < x.n && air_rf_i32(x.ops[k + 2], &c) && c > 1)
+         *count = c;
+   }
+   return v;
+}
+
+/* expressible_embedded_texture: the member's type name, and the array length a C array gives it */
+static bool
+air_ab_expressible_texture(struct air_tr *t, const struct air_ab_member *m, const char **type_name, bool *have_len,
+                           uint32_t *len, bool *writable)
+{
+   if (m->in_array_wrapper || !air_ab_role(t, m->node, "texture") ||
+       !(air_ab_role(t, m->node, "sample") || air_ab_role(t, m->node, "read") || air_ab_role(t, m->node, "write") ||
+         air_ab_role(t, m->node, "read_write")))
+      return false;
+   struct air_rf_node x = air_rf_node(t, m->node);
+   const char *name = air_rf_string_after(&x, "air.arg_type_name");
+   if (!name || air_rf_find(&x, "air.arg_type_name") < 0)
+      name = "";
+   struct air_rf_shape sh = air_rf_texture_shape(name);
+   *type_name = name;
+   *have_len = sh.array_length != 0;
+   *len = sh.array_length;
+   if (!*have_len && m->array_len != 0) {
+      *have_len = true;
+      *len = m->array_len;
+   }
+   *writable = sh.format != NULL;
+   return true;
+}
+
+static bool
+air_ab_expressible_sampler(struct air_tr *t, const struct air_ab_member *m)
+{
+   if (m->in_array_wrapper || m->array_len != 0)
+      return false;
+   struct air_rf_node x = air_rf_node(t, m->node);
+   if (air_rf_find(&x, "air.arg_type_name") >= 0) {
+      const char *name = air_rf_string_after(&x, "air.arg_type_name");
+      if (!name || strcmp(name, "sampler"))
+         return false;
+   }
+   return air_ab_role(t, m->node, "sampler");
+}
+
+/* the parameter and the offset known here of a pointer GEPs with constant indices and casts make of a parameter */
+static bool
+air_ab_const_place(struct air_tr *t, LLVMValueRef p, unsigned *param, uint64_t *off)
+{
+   uint64_t total = 0;
+   for (unsigned d = 0; d < 32 && p; d++) {
+      const bool ce = L.LLVMIsAConstantExpr(p) != NULL;
+      const int op = ce ? L.LLVMGetConstOpcode(p) : (L.LLVMIsAFunction(p) || L.LLVMIsAGlobalVariable(p)) ? 0 :
+                     L.LLVMGetInstructionParent(p) ? L.LLVMGetInstructionOpcode(p) : 0;
+      if (op == OP_BITCAST || op == OP_ADDRSPACECAST) {
+         p = L.LLVMGetOperand(p, 0);
+         continue;
+      }
+      if (op == OP_GEP) {
+         LLVMTypeRef ty = L.LLVMGetGEPSourceElementType(p);
+         const unsigned n = (unsigned)L.LLVMGetNumOperands(p);
+         for (unsigned i = 1; i < n; i++) {
+            LLVMValueRef index = L.LLVMGetOperand(p, i);
+            if (!L.LLVMIsAConstantInt(index))
+               return false;
+            const int64_t v = L.LLVMConstIntGetSExtValue(index);
+            if (i == 1) {
+               total += (uint64_t)v * air_size(t, ty);
+            } else if (L.LLVMGetTypeKind(ty) == TY_STRUCT) {
+               total += L.LLVMOffsetOfElement(t->layout, ty, (unsigned)v);
+               ty = L.LLVMStructGetTypeAtIndex(ty, (unsigned)v);
+            } else if (L.LLVMGetTypeKind(ty) == TY_ARRAY || L.LLVMGetTypeKind(ty) == TY_VECTOR) {
+               ty = L.LLVMGetElementType(ty);
+               total += (uint64_t)v * air_size(t, ty);
+            } else
+               return false;
+         }
+         p = L.LLVMGetOperand(p, 0);
+         continue;
+      }
+      for (unsigned k = 0; k < L.LLVMCountParams(t->function); k++) {
+         if (L.LLVMGetParam(t->function, k) == p) {
+            *param = k;
+            *off = total;
+            return true;
+         }
+      }
+      return false;
+   }
+   return false;
+}
+
+/* What meta::embedded finds in the entry's argument buffers (detect_embedded_textures, _samplers, _arguments), with
+ * the synthetic indices after the top-level textures' and samplers' slots; then whether every sampler a call reads
+ * from memory is an embedded sampler field (the translator's first attempt binds those per draw; one that is not
+ * makes it retry with every sampler read through the heap). */
+static void
+air_ab_detect(struct air_tr *t, LLVMValueRef args_node)
+{
+   LLVMValueRef *nodes = NULL;
+   const unsigned n = args_node && L.LLVMIsAMDNode(args_node) ? air_md_operands(args_node, &nodes, t->mem) : 0;
+   struct air_ab_root { uint32_t param, buffer_index; LLVMValueRef sref; } *roots = rzalloc_array(t->mem, struct air_ab_root, n + 1);
+   unsigned nroots = 0;
+   bool any_tex = false, any_samp = false;
+   uint32_t max_tex = 0, max_samp = 0;
+   for (unsigned i = 0; i < n; i++) {
+      struct air_rf_node x = air_rf_node(t, nodes[i]);
+      uint32_t idx, slot;
+      const char *first;
+      const char *role = air_rf_arg_role(t, &x, &idx, &slot, &first);
+      if (!role)
+         continue;
+      if (!strcmp(role, "texture")) {
+         max_tex = any_tex ? MAX2(max_tex, slot) : slot;
+         any_tex = true;
+      } else if (!strcmp(role, "sampler")) {
+         max_samp = any_samp ? MAX2(max_samp, slot) : slot;
+         any_samp = true;
+      } else if (!strcmp(role, "indirect_buffer")) {
+         const int k = air_rf_find(&x, "air.struct_type_info");
+         if (k >= 0 && (unsigned)k + 1 < x.n && x.ops[k + 1] && L.LLVMIsAMDNode(x.ops[k + 1])) {
+            /* ArgumentBuffers::new: by parameter index, stable */
+            unsigned at = nroots;
+            while (at > 0 && roots[at - 1].param > idx) {
+               roots[at] = roots[at - 1];
+               at--;
+            }
+            roots[at] = (struct air_ab_root){ idx, slot, x.ops[k + 1] };
+            nroots++;
+         }
+      }
+   }
+   struct util_dynarray *members = rzalloc_array(t->mem, struct util_dynarray, nroots + 1);
+   for (unsigned r = 0; r < nroots; r++) {
+      util_dynarray_init(&members[r], t->mem);
+      air_ab_members(t, roots[r].sref, 0, 0, 0, 0, false, &members[r]);
+   }
+   uint32_t syn = any_tex ? max_tex + 1 : 0;
+   for (unsigned r = 0; r < nroots && t->ab_texcalls; r++) {
+      util_dynarray_foreach(&members[r], struct air_ab_member, m) {
+         struct air_ab_tex e = { .param = roots[r].param, .buffer_index = roots[r].buffer_index,
+                                 .field_offset = m->field_offset, .field_ordinal = m->field_ordinal };
+         if (!air_ab_expressible_texture(t, m, &e.type_name, &e.have_len, &e.len, &e.writable))
+            continue;
+         e.argument_index = m->argument_base + air_ab_location(t, m->node, m->field_ordinal, NULL);
+         e.syn = syn++;
+         util_dynarray_append(&t->ab_texs, e);
+      }
+   }
+   syn = any_samp ? max_samp + 1 : 0;
+   for (unsigned r = 0; r < nroots && t->ab_texcalls; r++) {
+      util_dynarray_foreach(&members[r], struct air_ab_member, m) {
+         if (!air_ab_expressible_sampler(t, m))
+            continue;
+         struct air_ab_samp e = { .param = roots[r].param, .buffer_index = roots[r].buffer_index,
+                                  .field_offset = m->field_offset, .field_ordinal = m->field_ordinal,
+                                  .argument_index = m->argument_base + air_ab_location(t, m->node, m->field_ordinal, NULL),
+                                  .syn = syn++ };
+         util_dynarray_append(&t->ab_samps, e);
+      }
+   }
+   static const char *const resource_roles[] = { "buffer", "command_buffer", "compute_pipeline_state", "indirect_buffer",
+                                                 "intersection_function_table", "primitive_acceleration_structure",
+                                                 "render_pipeline_state", "sampler", "texture", "visible_function_table" };
+   for (unsigned r = 0; r < nroots; r++) {
+      util_dynarray_foreach(&members[r], struct air_ab_member, m) {
+         if (m->depth != 0)
+            continue;
+         const char *tn;
+         bool hl, wr;
+         uint32_t ln, elements = 1, count;
+         bool resource = false;
+         for (unsigned k = 0; k < ARRAY_SIZE(resource_roles); k++)
+            resource |= air_ab_role(t, m->node, resource_roles[k]);
+         const uint32_t index0 = m->argument_base + air_ab_location(t, m->node, m->field_ordinal, &count);
+         if (air_ab_expressible_texture(t, m, &tn, &hl, &ln, &wr))
+            elements = 1;
+         else if (m->array_len > 1 && resource)
+            elements = m->array_len;
+         else if (m->array_len == 0 && count && air_ab_role(t, m->node, "sampler"))
+            elements = count;
+         const bool is_buffer = air_ab_role(t, m->node, "buffer");
+         struct air_rf_node x = air_rf_node(t, m->node);
+         for (uint32_t e = 0; e < elements; e++) {
+            struct air_ab_field f = { .param = roots[r].param, .buffer_index = roots[r].buffer_index,
+                                      .field_offset = m->field_offset + e * 8, .field_ordinal = m->field_ordinal,
+                                      .argument_index = index0 + e, .is_buffer = is_buffer };
+            if (is_buffer) {
+               f.have_space = air_rf_i32_after(&x, "air.address_space", &f.space);
+               f.have_size = air_rf_i32_after(&x, "air.arg_type_size", &f.size);
+               f.access = air_rf_declared_access(&x);
+            }
+            util_dynarray_append(&t->ab_fields, f);
+         }
+      }
+   }
+
+   /* the samplers calls read from memory */
+   t->ab_samplers_per_draw = true;
+   for (LLVMBasicBlockRef bb = L.LLVMGetFirstBasicBlock(t->function); bb; bb = L.LLVMGetNextBasicBlock(bb)) {
+      for (LLVMValueRef inst = L.LLVMGetFirstInstruction(bb); inst; inst = L.LLVMGetNextInstruction(inst)) {
+         if (L.LLVMGetInstructionOpcode(inst) != OP_CALL)
+            continue;
+         LLVMValueRef callee = L.LLVMGetCalledValue(inst);
+         const char *name = callee && L.LLVMIsAFunction(callee) ? air_name(callee, NULL) : "";
+         if ((!air_starts(name, "air.sample_") && !air_starts(name, "air.gather_")) || L.LLVMGetNumArgOperands(inst) < 2)
+            continue;
+         LLVMValueRef sv = L.LLVMGetOperand(inst, 1);
+         while (sv && ((L.LLVMIsAConstantExpr(sv) && (L.LLVMGetConstOpcode(sv) == OP_BITCAST || L.LLVMGetConstOpcode(sv) == OP_ADDRSPACECAST)) ||
+                       (!L.LLVMIsAConstantExpr(sv) && !L.LLVMIsAFunction(sv) && !L.LLVMIsAGlobalVariable(sv) &&
+                        L.LLVMGetInstructionParent(sv) &&
+                        (L.LLVMGetInstructionOpcode(sv) == OP_BITCAST || L.LLVMGetInstructionOpcode(sv) == OP_ADDRSPACECAST))))
+            sv = L.LLVMGetOperand(sv, 0);
+         if (!sv || L.LLVMIsAConstantExpr(sv) || L.LLVMIsAFunction(sv) || L.LLVMIsAGlobalVariable(sv) ||
+             !L.LLVMGetInstructionParent(sv))
+            continue;
+         const int op = L.LLVMGetInstructionOpcode(sv);
+         if (op == OP_PHI || op == OP_SELECT) {
+            t->ab_samplers_per_draw = false;
+            continue;
+         }
+         if (op != OP_LOAD)
+            continue;
+         unsigned param;
+         uint64_t off;
+         if (!air_ab_const_place(t, L.LLVMGetOperand(sv, 0), &param, &off) || off > UINT32_MAX ||
+             !air_ab_samp_at(t, param + 1, (uint32_t)off))
+            t->ab_samplers_per_draw = false;
+      }
+   }
+}
+
 /* Writes t->rf_json, or leaves it NULL with t->rf_why. Called once the function is translated (t->statics holds the
  * module's constexpr samplers in the translator's order). */
 static void
@@ -6227,44 +6997,13 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
    }
    for (unsigned i = 0; i < n; i++) {
       struct air_rf_node x = air_rf_node(t, nodes[i]);
-      uint32_t idx;
-      bool have_idx = false;
-      for (unsigned k = 0; k < x.n && !have_idx; k++)
-         have_idx = air_rf_i32(x.ops[k], &idx);
-      if (!have_idx)
-         continue;
-      const char *roles[64];
-      const unsigned nr = air_rf_roles(t, &x, roles, ARRAY_SIZE(roles));
-      if (!nr)
-         continue;
-      const char *first = roles[0], *primary = air_rf_primary(roles, nr);
-      LLVMValueRef param = idx < L.LLVMCountParams(t->function) ? L.LLVMGetParam(t->function, idx) : NULL;
-      bool global_slot = false;
-      const uint32_t slot = air_rf_slot(t, &x, idx, &global_slot);
-      /* the role each stage's parse takes: a kernel's and a vertex function's promote a gated resource (not a buffer),
-       * a fragment function's take the primary role of every argument */
-      const char *role;
-      if (!kernel && !vertex)
-         role = primary;
-      else if (strcmp(first, "function_constant"))
-         role = first;
-      else if (primary && (!strcmp(primary, "texture") || !strcmp(primary, "sampler") || !strcmp(primary, "stage_in") ||
-                           !strcmp(primary, "imageblock") || !strcmp(primary, "visible_function_table") ||
-                           !strcmp(primary, "intersection_function_table") ||
-                           (vertex && (!strcmp(primary, "vertex_input") || !strcmp(primary, "patch_input")))))
-         role = primary;
-      else
-         role = first;   /* "function_constant": a gated buffer whose gate is not known is not bound */
+      uint32_t idx, slot;
+      const char *first;
+      const char *role = air_rf_arg_role(t, &x, &idx, &slot, &first);
       if (!role)
          continue;
-      /* a texture whose slot a function constant sums and whose gate is known false is absent */
-      if (!strcmp(role, "texture") && global_slot && !strcmp(first, "function_constant") && x.n &&
-          air_rf_find(&x, "air.function_constant") >= 0) {
-         int g = air_rf_find(&x, "air.function_constant");
-         if ((unsigned)g + 1 < x.n && air_rf_gate_value(t, x.ops[g + 1]) == 0)
-            continue;
-      }
-      if (!strcmp(role, "buffer")) {
+      LLVMValueRef param = idx < L.LLVMCountParams(t->function) ? L.LLVMGetParam(t->function, idx) : NULL;
+      if (!strcmp(role, "buffer") || (!strcmp(role, "indirect_buffer") && (t->req->flags & NVMTL_AIR_NIR_ARGBUF))) {
          air_rf_buffer(t, s, &x, idx, slot, kernel, param);
       } else if (!strcmp(role, "texture")) {
          air_rf_texture(t, s, &x, idx, slot);
@@ -6392,6 +7131,60 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
       }
       ralloc_strcat(&s->b, "}");
    }
+   /* the argument buffers' embedded resources (reflect::append_embedded_resources) */
+   util_dynarray_foreach(&t->ab_texs, struct air_ab_tex, e) {
+      const struct air_rf_shape sh = air_rf_texture_shape(e->type_name);
+      const uint32_t binding = e->writable ? (e->syn < 128 ? 480 + e->syn : 608) : (e->syn < 128 ? 32 + e->syn : 160);
+      air_rf_binding_head(s, "EmbeddedArgBufferTexture", e->syn, true, binding, e->have_len ? e->len : 1, false, 0);
+      ralloc_asprintf_append(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                             "\"type_layout\":null,\"type_name\":null,\"texture_shape\":{\"dimension\":\"%s\",\"arrayed\":%s,"
+                             "\"multisampled\":%s,\"component\":\"%s\",\"writable\":%s,\"array_ref\":%s,\"array_length\":",
+                             sh.dimension, sh.arrayed ? "true" : "false", sh.multisampled ? "true" : "false", sh.component,
+                             e->writable ? "true" : "false", e->have_len ? "true" : "false");
+      air_rf_jopt(&s->b, e->have_len, e->len);
+      ralloc_strcat(&s->b, ",\"storage_format\":");
+      air_rf_jstr(&s->b, e->writable ? sh.format : NULL);
+      ralloc_asprintf_append(&s->b, "},\"embedded_source\":{\"buffer_param_index\":%u,\"buffer_index\":%u,\"field_offset\":%u,"
+                             "\"field_ordinal\":%u,\"argument_index\":%u,\"resource_buffer_index\":null},\"access\":\"%s\","
+                             "\"static_sampler\":null}", e->param, e->buffer_index, e->field_offset, e->field_ordinal,
+                             e->argument_index, e->writable ? "Storage" : "Sampled");
+   }
+   util_dynarray_foreach(&t->ab_samps, struct air_ab_samp, e) {
+      air_rf_binding_head(s, "EmbeddedArgBufferSampler", e->syn, true, e->syn < 32 ? 160 + e->syn : 192, 1, false, 0);
+      ralloc_asprintf_append(&s->b, ",\"address_space\":null,\"declared_size\":null,\"extent\":null,\"footprint\":null,"
+                             "\"type_layout\":null,\"type_name\":null,\"texture_shape\":null,\"embedded_source\":{"
+                             "\"buffer_param_index\":%u,\"buffer_index\":%u,\"field_offset\":%u,\"field_ordinal\":%u,"
+                             "\"argument_index\":%u,\"resource_buffer_index\":null},\"access\":null,\"static_sampler\":null}",
+                             e->param, e->buffer_index, e->field_offset, e->field_ordinal, e->argument_index);
+   }
+   char *fields = ralloc_strdup(t->mem, "");
+   unsigned nfields = 0;
+   util_dynarray_foreach(&t->ab_fields, struct air_ab_field, f) {
+      ralloc_asprintf_append(&fields, "%s{\"buffer_param_index\":%u,\"buffer_index\":%u,\"field_offset\":%u,"
+                             "\"field_ordinal\":%u,\"argument_index\":%u,\"resource_buffer_index\":", nfields++ ? "," : "",
+                             f->param, f->buffer_index, f->field_offset, f->field_ordinal, f->argument_index);
+      air_rf_jopt(&fields, f->is_buffer, f->argument_index);
+      ralloc_strcat(&fields, "}");
+      if (!f->is_buffer)
+         continue;
+      air_rf_binding_head(s, "EmbeddedArgBufferBuffer", f->argument_index, false, 0, 0, false, 0);
+      ralloc_strcat(&s->b, ",\"address_space\":");
+      air_rf_jopt(&s->b, f->have_space, f->space);
+      ralloc_strcat(&s->b, ",\"declared_size\":");
+      air_rf_jopt(&s->b, f->have_size, f->size);
+      ralloc_asprintf_append(&s->b, ",\"extent\":\"%s\",\"footprint\":null,\"type_layout\":null,\"type_name\":null,"
+                             "\"texture_shape\":null,\"embedded_source\":{\"buffer_param_index\":%u,\"buffer_index\":%u,"
+                             "\"field_offset\":%u,\"field_ordinal\":%u,\"argument_index\":%u,\"resource_buffer_index\":%u},"
+                             "\"access\":", f->have_size ? "Unbounded" : "Unknown", f->param, f->buffer_index, f->field_offset,
+                             f->field_ordinal, f->argument_index, f->argument_index);
+      /* reflect::buffer_access: the declared access, or ReadOnly in the constant address space */
+      const char *access = f->access && !strcmp(f->access, "ReadWrite") ? "ReadWrite" :
+                           f->access && !strcmp(f->access, "WriteOnly") ? "WriteOnly" :
+                           f->access && !strcmp(f->access, "ReadOnly") ? "ReadOnly" :
+                           f->have_space && f->space == 2 ? "ReadOnly" : NULL;
+      air_rf_jstr(&s->b, access);
+      ralloc_strcat(&s->b, ",\"static_sampler\":null}");
+   }
    if (t->rf_computed_gate) {
       t->rf_why = "a function-constant gate the static initializer computes (the translator's evaluation may not know it)";
       return;
@@ -6399,12 +7192,77 @@ air_reflect(struct air_tr *t, LLVMValueRef args_node)
    char *j = ralloc_asprintf(t->mem, "{\"reflection_source\":\"air-to-nir\",\"stage\":\"%s\",\"entry_point\":",
                              kernel ? "Kernel" : vertex ? "Vertex" : "Fragment");
    air_rf_jstr(&j, air_name(t->function, NULL));
-   ralloc_asprintf_append(&j, ",\"bindings\":[%s],\"argument_buffer_fields\":[],\"vertex_attributes\":[%s],\"varyings\":[%s],"
+   ralloc_asprintf_append(&j, ",\"bindings\":[%s],\"argument_buffer_fields\":[%s],\"vertex_attributes\":[%s],\"varyings\":[%s],"
                           "\"tessellation\":null,\"fragment_sample_positions\":null,\"local_size\":",
-                          s->b, attrs, vary);
+                          s->b, fields, attrs, vary);
    /* a kernel's default size: the translator's (TransformOptions::default().kernel_local_size), its SpecIds' defaults */
    ralloc_strcat(&j, kernel ? "[64,1,1]}" : "null}");
    t->rf_json = j;
+}
+
+/* A fragment function whose invocations do not depend on their quad (no texture or image access, derivative, barrier,
+ * atomic, subgroup or quad operation, demote, interpolation at an offset, or helper test) and that reads or writes memory
+ * through an address: the plugin's SPIR-V road makes such a module's helper invocations return at the entry
+ * (nvmtl_independent_helpers.h, every render module after the address lowering), so a helper lane, whose varyings are
+ * extrapolated past the primitive, never reads where they point. CoreAnimation's buffer_image_blit_frag_lpf reads a
+ * byte at offset + x + y * bpr: a helper above a glyph at the start of its buffer read bpr bytes before it, unmapped, on
+ * the road (Terminal's GPU fault on 3.0.25), and returned on the SPIR-V road. The road's fragment does the same. */
+static bool
+air_helpers_independent(nir_shader *nir)
+{
+   bool global = false;
+   nir_foreach_variable_in_shader(v, nir) {
+      if (glsl_type_is_image(glsl_without_array(v->type)) || glsl_type_is_texture(glsl_without_array(v->type)) ||
+          glsl_type_is_sampler(glsl_without_array(v->type)))
+         return false;
+   }
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex)
+               return false;
+            if (instr->type != nir_instr_type_intrinsic)   /* derivatives are intrinsics: refused below */
+               continue;
+            const nir_intrinsic_instr *in = nir_instr_as_intrinsic(instr);
+            switch (in->intrinsic) {
+            case nir_intrinsic_load_global: case nir_intrinsic_load_global_constant: case nir_intrinsic_store_global:
+               global = true;
+               break;
+            case nir_intrinsic_load_input: case nir_intrinsic_load_interpolated_input: case nir_intrinsic_load_deref:
+            case nir_intrinsic_store_deref: case nir_intrinsic_copy_deref: case nir_intrinsic_load_ubo:
+            case nir_intrinsic_load_ssbo: case nir_intrinsic_load_constant: case nir_intrinsic_load_scratch:
+            case nir_intrinsic_store_scratch: case nir_intrinsic_load_frag_coord: case nir_intrinsic_load_front_face:
+            case nir_intrinsic_load_sample_id: case nir_intrinsic_load_sample_mask_in: case nir_intrinsic_load_sample_pos:
+            case nir_intrinsic_load_point_coord: case nir_intrinsic_load_layer_id: case nir_intrinsic_load_view_index:
+            case nir_intrinsic_load_primitive_id: case nir_intrinsic_load_vulkan_descriptor:
+            case nir_intrinsic_vulkan_resource_index: case nir_intrinsic_vulkan_resource_reindex:
+            case nir_intrinsic_load_barycentric_pixel: case nir_intrinsic_load_barycentric_centroid:
+            case nir_intrinsic_load_barycentric_sample: case nir_intrinsic_load_push_constant:
+            case nir_intrinsic_load_subgroup_size: case nir_intrinsic_load_subgroup_invocation:
+            case nir_intrinsic_nop:   /* the end of each block's instructions (air_terminator) */
+               break;
+            default:
+               /* anything else may depend on the quad, or is not a plain access */
+               return false;
+            }
+         }
+      }
+   }
+   return global;
+}
+
+/* the whole entry under if (!helper invocation), as the SPIR-V road's early return makes it */
+static void
+air_guard_helpers(nir_shader *nir)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_push_if(&b, nir_inot(&b, nir_load_helper_invocation(&b, 1)));
+   nir_cf_reinsert(&body, b.cursor);
+   nir_pop_if(&b, NULL);
+   nir_progress(true, impl, nir_metadata_none);
 }
 
 static nir_shader *
@@ -6452,6 +7310,8 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
    }
    t->table_type = glsl_array_type(glsl_uint64_t_type(), NVMTL_AIR_NIR_MAX_BUFFERS, 8);
 
+   if (t->req->flags & NVMTL_AIR_NIR_ARGBUF)
+      air_ab_detect(t, args_node);
    air_bind_arguments(t, args_node);
    if (t->req->flags & NVMTL_AIR_NIR_REFLECT)
       air_reflect(t, args_node);
@@ -6469,6 +7329,10 @@ air_translate(struct air_tr *t, const struct nvk_physical_device *pdev, const st
       unsupported(t, "%u bytes of threadgroup memory", t->shared_size);
 
    nir_lower_goto_ifs(t->nir);
+   if (t->stage == NVMTL_AIR_NIR_STAGE_FRAGMENT && air_helpers_independent(t->nir)) {
+      air_guard_helpers(t->nir);
+      t->fragment_flags |= NVMTL_AIR_NIR_FS_HELPERS_RETURN;
+   }
    NIR_PASS(_, t->nir, nir_lower_vars_to_ssa);
    NIR_PASS(_, t->nir, nir_opt_dce);
    if (!kernel)
@@ -6756,6 +7620,10 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    util_dynarray_init(&t->phis, t);
    util_dynarray_init(&t->statics, t);
    util_dynarray_init(&t->constant_data, t);
+   util_dynarray_init(&t->ab_texs, t);
+   util_dynarray_init(&t->ab_samps, t);
+   util_dynarray_init(&t->ab_fields, t);
+   util_dynarray_init(&t->heap_vars, t);
 
    LLVMContextRef ctx = L.LLVMContextCreate();
    /* without a handler of its own, LLVM ends the process on a bitcode error */
@@ -6788,8 +7656,10 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          air_refuse(t, NVMTL_AIR_NIR_BAD_AIR, "the bitcode does not parse%s%s", t->llvm_error[0] ? ": " : "",
                     t->llvm_error);
       bool fold = air_fc_specialize(t, ctx);
-      if (req->flags & NVMTL_AIR_NIR_REFLECT)
+      if (req->flags & (NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_ARGBUF))
          air_rf_before_passes(t);
+      if (req->flags & NVMTL_AIR_NIR_ARGBUF)
+         t->ab_texcalls = air_ab_texcalls(t);
       const char *dump_fc = getenv("NVMTL_AIR_NIR_DUMP_FC");   /* the module once the function constants are in */
       if (dump_fc && *dump_fc) {
          FILE *f = fopen(dump_fc, "w");
@@ -6867,8 +7737,9 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
          snprintf(res->reflection_why, sizeof res->reflection_why, "%s", t->rf_why ? t->rf_why : "not reflected");
    }
    if (t->out)
-      snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread",
-               t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size);
+      snprintf(message, message_len, "%s: %u instructions, buffers 0x%x, %u B threadgroup, %u B thread%s",
+               t->out->info.name, t->instructions, t->buffer_mask, t->shared_size, t->scratch_size,
+               (t->fragment_flags & NVMTL_AIR_NIR_FS_HELPERS_RETURN) ? ", helper invocations return" : "");
    ralloc_free(t);
    return res->status;
 }

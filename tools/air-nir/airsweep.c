@@ -343,10 +343,12 @@ main(int argc, char **argv)
                 * (SIGALRM): sweep.py records the file as a crash and goes on after it */
                alarm(60);
                /* as the plugin asks at newFunctionWithName: (NVMTLAirNir.m nvmtl_air_nir_flags, no varyings), with a
-                * version-6 NVK and the bindless heap: [[color(n)]] inputs, arrays of textures (round 8) */
+                * version-7 NVK and the bindless heap with its typed dummies: [[color(n)]] inputs, arrays of textures
+                * (round 8), argument buffers (round 9) */
                struct nvmtl_air_nir_request req = { sizeof req, NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_TG_DEFAULT |
                                                     NVMTL_AIR_NIR_REFLECT | NVMTL_AIR_NIR_COLOR_INPUTS |
                                                     NVMTL_AIR_NIR_TEXTURE_ARRAYS | NVMTL_AIR_NIR_HEAP |
+                                                    NVMTL_AIR_NIR_ARGBUF | NVMTL_AIR_NIR_TYPED_DUMMIES |
                                                     (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0),
                                                     llvm_path, data, size, name, { 64, 1, 1 } };
                if (fcs) {
@@ -369,7 +371,7 @@ main(int argc, char **argv)
                clean(e);
                clean(name);
                printf("RFL\t%d\t%s\t%s\t%s\t%s\t", st, path, name, lists[l][1],
-                      st ? res.message : res.reflection ? "-" : res.reflection_why);
+                      st || getenv("AIRSWEEP_MESSAGES") ? res.message : res.reflection ? "-" : res.reflection_why);
                if (res.reflection)
                   fwrite(res.reflection, 1, res.reflection_size, stdout);
                else

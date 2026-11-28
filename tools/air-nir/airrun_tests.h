@@ -1875,6 +1875,108 @@ tex_sample_check(struct run *r)
    return true;
 }
 
+/* ab_kernel: argument buffers the CPU writes as Metal lays them out (metal/ab_kernel.metal): a texture field holds the
+ * texture's gpuResourceID, a sampler field the sampler's, a pointer field the buffer's GPU address. Textures 0 to 4 and
+ * 6 to 9 rgba8, 5 rgba16f (written); sampler 0 linear clamp, 1 nearest repeat, 2 nearest clamp; slot 0 the argument
+ * buffer, 1 the output, 2 sel, 3 the array of four Items; 4 (io), 5 (Inner), 6 (Inner's data) and 7 (the Items'
+ * vectors) are reached only through addresses */
+struct ab_args { uint64_t tex, smp, io; float scale; uint32_t pad; uint64_t texs[3], smps[2], inner, wtex; };
+struct ab_inner { uint64_t data, t; uint32_t bias, pad; };
+struct ab_item { uint64_t t, v; };
+static const uint32_t ab_sel[3] = { 2, 0, 3 };
+
+static void
+ab_kernel_setup(struct run *r)
+{
+   for (unsigned i = 0; i <= 9; i++) {
+      if (i == 5)
+         continue;
+      tex_image(r, i, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+      fill_bytes(r, i);
+   }
+   tex_image(r, 5, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 1, 1, true);
+   samp_create(r, 0, VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   samp_create(r, 1, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   samp_create(r, 2, VK_FILTER_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_MIPMAP_MODE_NEAREST, 0);
+   float *io = slot(r, 4, 128 * 4);
+   for (unsigned k = 0; k < 64; k++)
+      io[k] = rndf(-8, 8);
+   float *d = slot(r, 6, 64 * 4);
+   for (unsigned k = 0; k < 64; k++)
+      d[k] = rndf(-8, 8);
+   struct ab_inner *in = slot(r, 5, sizeof *in);
+   in->data = ab_addr(r, 6, 0);
+   in->t = ab_tex(r, 4);
+   in->bias = 17;
+   struct ab_args *a = slot(r, 0, sizeof *a);
+   a->tex = ab_tex(r, 0);
+   a->smp = ab_samp(r, 0);
+   a->io = ab_addr(r, 4, 0);
+   a->scale = 2.5f;
+   for (unsigned k = 0; k < 3; k++)
+      a->texs[k] = ab_tex(r, 1 + k);
+   a->smps[0] = ab_samp(r, 1);
+   a->smps[1] = ab_samp(r, 2);
+   a->inner = ab_addr(r, 5, 0);
+   a->wtex = ab_tex(r, 5);
+   slot(r, 1, 64 * 8 * 16);
+   memcpy(slot(r, 2, sizeof ab_sel), ab_sel, sizeof ab_sel);
+   float *v = slot(r, 7, 4 * 8 * 16);
+   for (unsigned k = 0; k < 4 * 8 * 4; k++)
+      v[k] = rndf(-4, 4);
+   struct ab_item *it = slot(r, 3, 4 * sizeof *it);
+   for (unsigned k = 0; k < 4; k++) {
+      it[k].t = ab_tex(r, 6 + k);
+      it[k].v = ab_addr(r, 7, k * 128u);
+   }
+}
+
+static bool
+ab_kernel_check(struct run *r)
+{
+   float *want = calloc(64 * 32, 4), *w5 = calloc(64 * 4, 4), *io2 = calloc(64, 4);
+   const float *io = S(r, 4), *d = S(r, 6), *v = S(r, 7);
+   for (uint32_t y = 0; y < 8; y++) {
+      for (uint32_t x = 0; x < 8; x++) {
+         const unsigned i = y * 8 + x;
+         float *o = want + i * 32, s0[4], s1[4], s2[4];
+         const float u = (x + 0.5f) / 8, vv = (y + 0.5f) / 8;
+         sample_linear(r, 0, 0, (x + 0.75f) / 8, (y + 0.75f) / 8, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, s0);
+         sample_nearest(r, 1, 0, u * 1.75f, vv * 1.75f, 0,
+                        (i & 1) ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_REPEAT, s1);
+         sample_nearest(r, 3, 0, u * 1.25f, vv * 1.25f, 0, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, s2);
+         const unsigned item = (i + ab_sel[2]) & 3u;
+         for (unsigned c = 0; c < 4; c++) {
+            o[c] = s0[c];
+            o[8 + c] = rgba8_at(r, 2, 0, x, y, 0, c);
+            o[12 + c] = rgba8_at(r, 1 + ab_sel[i & 1], 0, x, y, 0, c);
+            o[16 + c] = s1[c] + s2[c];
+            o[20 + c] = rgba8_at(r, 4, 0, y, x, 0, c);
+            o[24 + c] = rgba8_at(r, 6 + item, 0, x, y, 0, c) + v[item * 32 + (i & 7u) * 4 + c];
+            w5[i * 4 + c] = rgba8_at(r, 3, 0, x, y, 0, c) * 2.0f;
+         }
+         o[4] = io[i] * 2.5f, o[5] = 2.5f, o[6] = 0, o[7] = 1;
+         o[20] += d[i], o[21] += 17.0f;
+         o[28] = (float)i, o[29] = o[30] = o[31] = 0;
+         io2[i] = io[i] + 1.0f;
+      }
+   }
+   float *g5 = calloc(64 * 4, 4);
+   for (unsigned k = 0; k < 64 * 4; k++)
+      g5[k] = h2f(((const uint16_t *)tex_at(r, 5, 0, 0, 0, 0))[k]);
+   /* the linear sample: NVIDIA's 8-bit filter weights (tex_sample) */
+   bool ok = true;
+   for (unsigned i = 0; ok && i < 64; i++)
+      ok = check_f4(r, "out (sample)", (const float *)S(r, 1) + i * 32, want + i * 32, 4, 1.0f / 128) &&
+           check_f4(r, "out", (const float *)S(r, 1) + i * 32 + 4, want + i * 32 + 4, 28, 1e-6f);
+   ok = ok && check_f4(r, "io[64..]", io + 64, io2, 64, 0) && check_f4(r, "wtex", g5, w5, 64 * 4, 2e-3f);
+   free(want);
+   free(w5);
+   free(g5);
+   free(io2);
+   return ok;
+}
+
 /* tex_cube: a cube sampled by direction (nearest), a 2D array by layer */
 static void
 tex_cube_setup(struct run *r)
@@ -2517,4 +2619,5 @@ static const struct test tests[] = {
    { "pack", NULL, "pack", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, pack_setup, pack_check },
    { "tex_ms", NULL, "tex_ms", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_ms_setup, tex_ms_check },
    { "tex_arrays", NULL, "tex_arrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_arrays_setup, tex_arrays_check },
+   { "ab_kernel", NULL, "ab_kernel", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, ab_kernel_setup, ab_kernel_check },
 };

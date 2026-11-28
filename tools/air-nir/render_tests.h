@@ -779,6 +779,54 @@ rbl_nan_check(struct rrun *r)
    return true;
 }
 
+/* the blit with its first rect at the start of a buffer whose rows are 256 MB apart, its top-left corner at an odd pixel:
+ * the helper lanes of the quads along its top edge (uv.y extrapolated to -0.5, so y = -1) read 256 MB before the buffer.
+ * The SPIR-V road's module returns its helper invocations at the entry (the plugin's nvmtl_independent_helpers.h); the
+ * road's did not before 3.0.26, and the read before a glyph at the start of its buffer was Terminal's GPU fault */
+#define RBH_BPR (256u << 20)
+static const struct rbl_rect rbh_rects[2] = {
+   { { 5, 41 }, { 5, 2 }, 0, (float)RBH_BPR },
+   { { 21, 13 }, { 7, 3 }, 64, 9 },
+};
+
+static void
+rbh_setup(struct rrun *r)
+{
+   const float mvp[16] = { 1.0f / 32, 0, 0, 0, 0, 1.0f / 32, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1 };
+   const float color[4] = { 1.0f / 255, 0.5f / 255, 0.25f / 255, 1.0f / 255 };
+   r->vbuf[1] = rbuf(rbh_rects, sizeof rbh_rects);
+   r->vbuf[2] = rbuf(mvp, sizeof mvp);
+   r->fbuf[1] = rbuf(color, sizeof color);
+   r->fbuf[9] = rbuf(NULL, RBH_BPR + 64);
+   uint8_t *b = r->fbuf[9].contents;
+   for (unsigned i = 0; i < 128; i++)
+      b[i] = rbl_byte(i);
+   for (unsigned i = 0; i < 64; i++)
+      b[RBH_BPR + i] = rbl_byte(RBH_BPR + i);
+}
+
+static bool
+rbh_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         float want = clear_col[0];
+         for (unsigned k = 0; k < 2; k++) {
+            const struct rbl_rect *q = &rbh_rects[k];
+            const int x = (int)px - (int)q->min[0], y = (int)py - (64 - (int)q->min[1]);
+            if (x >= 0 && y >= 0 && x < (int)q->size[0] && y < (int)q->size[1])
+               want = rbl_byte((unsigned)(q->offset + x + y * q->bpr)) / 255.0f;
+         }
+         const uint8_t g = ((const uint8_t *)r->back[0].contents)[(size_t)py * RW + px];
+         const int q = (int)lrintf(want * 255);
+         if (abs((int)g - q) > 1) {
+            snprintf(r->why, sizeof r->why, "r8 pixel (%u,%u): %u, want %d (1 LSB)", px, py, g, q);
+            return false;
+         }
+      }
+   return true;
+}
+
 /* ---- r_oob: a buffer read at an index the data gives, some past its end -------------------------------------------- */
 
 #define ROB_PAL 16u
@@ -1051,6 +1099,12 @@ static const struct rtest rtests[] = {
    { "r_rleblit_nan", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatR8Unorm }, NOC, MTLPrimitiveTypeTriangleStrip, 0, 4, 3, 0,
      NULL, NULL, rbl_nan_setup, rbl_nan_check,
      "r8 1 LSB; a NaN index reads byte 0 (before 3.0.24 the road read 2 GiB below the buffer: Terminal's Xid 31)" },
+   { "r_rleblit_helpers", "r_rleblit", "rbl_vs", "rbl_fs", { MTLPixelFormatR8Unorm }, NOC, MTLPrimitiveTypeTriangleStrip, 0, 4,
+     2, 0, NULL, NULL, rbh_setup, rbh_check,
+     "r8 1 LSB; helper lanes above a rect at the start of its buffer, rows 256 MB apart, read before it unless they return" },
+   { "r_qcblit_helpers", "qc_blit", "buffer_image_blit_vert_lpf", "buffer_image_blit_frag_lpf", { MTLPixelFormatR8Unorm }, NOC,
+     MTLPrimitiveTypeTriangleStrip, 0, 4, 2, 0, NULL, NULL, rbh_setup, rbh_check,
+     "r8 1 LSB; r_rleblit_helpers with QuartzCore's own two functions (Terminal's GPU fault on 3.0.25)" },
    { "r_oob", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rob_setup, rob_check,
      "exact; a read past the end gives 0; must take the SPIR-V road (a data-dependent index into a buffer)", true },
    { "r_fetch", "r_fetch", "rff_vs", "rff_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, setup_quad, rff_check,

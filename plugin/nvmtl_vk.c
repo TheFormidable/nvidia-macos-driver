@@ -6804,6 +6804,8 @@ int nvmtl_vk_air_nir_exports(void) { return pnvk_air_to_nir != NULL && g_dev != 
 int nvmtl_vk_air_nir_version(void) { return !pnvk_air_to_nir ? 0 : pnvk_air_nir_version ? pnvk_air_nir_version() : 4; }
 /* the bindless heap is set 2 of every pipeline layout (both roads): the road may read texture-array elements there */
 int nvmtl_vk_bindless_heap(void) { return !ensure_descriptors() && g_heapSet != VK_NULL_HANDLE; }
+// the heap's bindings (1, 2 or 5: sampled images, samplers, storage images, uniform and storage texel buffers), 0 for none
+int nvmtl_vk_bindless_heap_bindings(void) { return nvmtl_vk_bindless_heap() ? (int)g_heap_nbind : 0; }
 int nvmtl_vk_air_nir_size_ok(const nvk_pipeline *p, const uint32_t l[3])
 {
     return !p || !p->air_nir || nvmtl_air_nir_size_ok(l, g_lim.maxComputeWorkGroupSize, g_lim.maxComputeWorkGroupInvocations);

@@ -79,6 +79,10 @@ struct run {
    id<MTLSamplerState> samp[32];
    unsigned threads;
    char why[256];
+   /* argument buffers: the buffers, textures and samplers a test reaches only through one are made resident
+    * (useResource:usage:) and not bound (ab_addr, ab_tex, ab_samp); enc is the argument encoder ab_enc_begin made */
+   uint32_t ab_slots, ab_texs, ab_samps;
+   id<MTLArgumentEncoder> enc;
 };
 
 static struct buf
@@ -283,6 +287,58 @@ tex_ms_clear(struct run *r, unsigned i, uint32_t w, uint32_t h, unsigned samples
    [cb waitUntilCompleted];
 }
 
+/* ---- argument buffers (PLUGIN_ONLY tests): what Metal writes into one, by hand or through an MTLArgumentEncoder --- */
+
+static id<MTLFunction> cur_fn;   /* the test's function: its argument encoders */
+
+/* buffer slot i's GPU address plus off; slot i is made resident instead of bound */
+static uint64_t
+ab_addr(struct run *r, unsigned i, uint64_t off)
+{
+   r->ab_slots |= 1u << i;
+   return r->slot[i].b.gpuAddress + off;
+}
+
+/* texture i's gpuResourceID; texture i is made resident instead of bound */
+static uint64_t
+ab_tex(struct run *r, unsigned i)
+{
+   r->ab_texs |= 1u << i;
+   return r->tex[i].tex.gpuResourceID._impl;
+}
+
+/* sampler i's gpuResourceID; sampler i is not bound */
+static uint64_t
+ab_samp(struct run *r, unsigned i)
+{
+   r->ab_samps |= 1u << i;
+   return r->samp[i].gpuResourceID._impl;
+}
+
+/* the encoder of the argument buffer at [[buffer(index)]] of the test's function, writing into buffer slot dst at off
+ * (nested < 0), or the encoder of the argument buffer its member [[id(nested)]] points at; its encodedLength */
+static unsigned
+ab_enc_begin(struct run *r, unsigned index, int nested, unsigned dst, size_t off)
+{
+   id<MTLArgumentEncoder> e = nested < 0 ? [cur_fn newArgumentEncoderWithBufferIndex:index]
+                                         : [r->enc newArgumentEncoderForBufferAtIndex:(NSUInteger)nested];
+   [r->enc release];
+   r->enc = e;
+   if (!e)
+      return 0;
+   [e setArgumentBuffer:r->slot[dst].b offset:off];
+   return (unsigned)e.encodedLength;
+}
+
+static void ab_enc_tex(struct run *r, unsigned id, unsigned i) { r->ab_texs |= 1u << i; [r->enc setTexture:r->tex[i].tex atIndex:id]; }
+static void ab_enc_samp(struct run *r, unsigned id, unsigned i) { r->ab_samps |= 1u << i; [r->enc setSamplerState:r->samp[i] atIndex:id]; }
+static void ab_enc_buf(struct run *r, unsigned id, unsigned i, size_t off)
+{
+   r->ab_slots |= 1u << i;
+   [r->enc setBuffer:r->slot[i].b offset:off atIndex:id];
+}
+static void *ab_enc_const(struct run *r, unsigned id) { return [r->enc constantDataAtIndex:id]; }
+
 #include "airrun_tests.h"
 
 /* ---- NVRM's fault counters ------------------------------------------------------------------------------------- */
@@ -356,14 +412,19 @@ encode(id<MTLCommandBuffer> cb, const struct test *t, struct run *r, id<MTLCompu
 {
    id<MTLComputeCommandEncoder> ce = [cb computeCommandEncoder];
    [ce setComputePipelineState:ps];
+   /* what an argument buffer reaches is made resident, not bound (the argument buffer holds its address) */
    for (unsigned i = 0; i < NVMTL_AIR_NIR_MAX_BUFFERS; i++)
-      if (r->slot[i].b)
+      if (r->slot[i].b && ((r->ab_slots >> i) & 1))
+         [ce useResource:r->slot[i].b usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+      else if (r->slot[i].b)
          [ce setBuffer:bufs && bufs[i] ? bufs[i] : r->slot[i].b offset:0 atIndex:i];
    for (unsigned i = 0; i < 16; i++)
-      if (r->tex[i].tex)
+      if (r->tex[i].tex && ((r->ab_texs >> i) & 1))
+         [ce useResource:r->tex[i].tex usage:MTLResourceUsageRead | (r->tex[i].storage ? MTLResourceUsageWrite : 0)];
+      else if (r->tex[i].tex)
          [ce setTexture:r->tex[i].tex atIndex:i];
    for (unsigned i = 0; i < 32; i++)
-      if (r->samp[i])
+      if (r->samp[i] && !((r->ab_samps >> i) & 1))
          [ce setSamplerState:r->samp[i] atIndex:i];
    for (unsigned i = 0; i < 2; i++)
       if (t->tg_len[i])
@@ -495,7 +556,10 @@ run_test(const struct test *t)
    r.t = t;
    r.threads = t->tg[0] * t->tg[1] * t->tg[2] * t->groups[0] * t->groups[1] * t->groups[2];
    rng_state = 0x9e3779b9u ^ (uint32_t)strlen(t->name) * 2654435761u;
+   cur_fn = fn;
    t->setup(&r);
+   [r.enc release];
+   r.enc = nil;
    id<MTLBuffer> ind = nil;
    if (t->flags & GRID_INDIRECT) {
       ind = [dev newBufferWithLength:16 options:MTLResourceStorageModeShared];

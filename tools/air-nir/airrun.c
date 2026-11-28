@@ -338,6 +338,20 @@ samp_create_pixel(struct run *r, unsigned slot, VkFilter filter, VkSamplerAddres
    (void)r; (void)slot; (void)filter; (void)address;
 }
 
+/* argument buffers need the plugin's resource IDs and argument encoders: their tests are PLUGIN_ONLY */
+static uint64_t ab_addr(struct run *r, unsigned i, uint64_t off) { (void)r; (void)i; (void)off; return 0; }
+static uint64_t ab_tex(struct run *r, unsigned i) { (void)r; (void)i; return 0; }
+static uint64_t ab_samp(struct run *r, unsigned i) { (void)r; (void)i; return 0; }
+static unsigned ab_enc_begin(struct run *r, unsigned index, int nested, unsigned dst, size_t off)
+{
+   (void)r; (void)index; (void)nested; (void)dst; (void)off;
+   return 0;
+}
+static void ab_enc_tex(struct run *r, unsigned id, unsigned i) { (void)r; (void)id; (void)i; }
+static void ab_enc_samp(struct run *r, unsigned id, unsigned i) { (void)r; (void)id; (void)i; }
+static void ab_enc_buf(struct run *r, unsigned id, unsigned i, size_t off) { (void)r; (void)id; (void)i; (void)off; }
+static void *ab_enc_const(struct run *r, unsigned id) { (void)r; (void)id; return NULL; }
+
 static float h2f(uint16_t h);
 static float
 half_bits_to_float(uint16_t h)

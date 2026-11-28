@@ -95,6 +95,27 @@
                                                  * in it: a sampled array element chosen at run time is read there, as
                                                  * the translator reads it (result.resource_flags NVMTL_AIR_NIR_RES_HEAP).
                                                  * Without it such a read is refused. */
+/* Since version 7: */
+#define NVMTL_AIR_NIR_ARGBUF        (1u << 13)  /* argument buffers (air.indirect_buffer) are translated as the translator
+                                                 * reads them: the argument is a buffer (its address from the table); a
+                                                 * texture or sampler handle loaded from memory is its gpuResourceID,
+                                                 * whose low 32 bits masked to the heap's slots pick the image, texel
+                                                 * buffer or sampler at that slot of the bindless heap (set
+                                                 * NVMTL_AIR_NIR_HEAP_SET: sampled images NVMTL_AIR_NIR_HEAP_BINDING,
+                                                 * samplers NVMTL_AIR_NIR_HEAP_SAMPLERS, storage images
+                                                 * NVMTL_AIR_NIR_HEAP_STORAGE, uniform and storage texel buffers
+                                                 * NVMTL_AIR_NIR_HEAP_UTEXEL and _STEXEL), read non-uniform; a written
+                                                 * texture or texel buffer that is one field (not an array) of an
+                                                 * argument buffer argument at an offset known here is the translator's
+                                                 * embedded binding 480 + its synthetic index (storage_mask), and a
+                                                 * sampler such a field 160 + its synthetic index (sampler_mask) when
+                                                 * every sampler read from memory is one, as the plugin's embedded plans
+                                                 * bind them per draw. Without it such a function is refused. */
+#define NVMTL_AIR_NIR_TYPED_DUMMIES (1u << 14)  /* heap slots 1 to 5 hold the typed dummies (the translator's capability
+                                                 * bit 8): a heap index of 0 reads the dummy of the image's shape instead
+                                                 * (2D, also 1D and multisampled: 1; 2D array: 2; 3D: 3; cube: 4; cube
+                                                 * array: 5; a texel buffer keeps 0), as every heap access of the
+                                                 * translator's does (passes/resources/dummy_slots.rs) */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u
@@ -105,7 +126,12 @@
 #define NVMTL_AIR_NIR_FETCH_BINDING  192u        /* ... at binding 192 + n, an input attachment (the translator's band) */
 #define NVMTL_AIR_NIR_HEAP_SET       2u          /* the bindless heap (reflect::BINDLESS_HEAP_SET) */
 #define NVMTL_AIR_NIR_HEAP_BINDING   0u          /* its sampled images (reflect::BINDLESS_HEAP_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_SAMPLERS  1u          /* its samplers (reflect::BINDLESS_SAMPLER_BINDING), since version 7 */
+#define NVMTL_AIR_NIR_HEAP_STORAGE   2u          /* its storage images (reflect::BINDLESS_STORAGE_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_UTEXEL    3u          /* its uniform texel buffers (reflect::BINDLESS_UTEXEL_BINDING) */
+#define NVMTL_AIR_NIR_HEAP_STEXEL    4u          /* its storage texel buffers (reflect::BINDLESS_STEXEL_BINDING) */
 #define NVMTL_AIR_NIR_HEAP_SLOTS     131072u     /* reflect::BINDLESS_HEAP_SLOTS: a table slot is masked to it */
+#define NVMTL_AIR_NIR_SAMPLER_SLOTS  2048u       /* reflect::BINDLESS_SAMPLER_SLOTS: a sampler handle is masked to it */
 #define NVMTL_AIR_NIR_TABLE_TEXTURE0 64u         /* the table's entry of texture 0's heap slot (TEXTURE_INDEX_BASE) */
 #define NVMTL_AIR_NIR_TABLE_ENTRIES  192u        /* 32 buffers, 32 of their entries' addresses, 128 textures */
 
@@ -115,6 +141,9 @@
 #define NVMTL_AIR_NIR_FS_DISCARD      (1u << 2)  /* calls discard_fragment (a demote, as the translator's) */
 #define NVMTL_AIR_NIR_FS_EARLY_TESTS  (1u << 3)  /* [[early_fragment_tests]] */
 #define NVMTL_AIR_NIR_FS_PER_SAMPLE   (1u << 4)  /* reads [[sample_id]] or a sample-interpolated varying */
+#define NVMTL_AIR_NIR_FS_HELPERS_RETURN (1u << 5) /* since version 7: its helper invocations return at the entry, as the
+                                                 * SPIR-V road's invocation-independent physical-buffer modules'
+                                                 * (nvmtl_independent_helpers.h) */
 
 enum nvmtl_air_nir_status {
    NVMTL_AIR_NIR_OK          = 0,
@@ -249,9 +278,10 @@ typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data,
 /* Since version 5. The version of the request and result this NVK reads and writes (NVMTL_AIR_NIR_VERSION); an NVK
  * without the export is version 4 or older, and ignores NVMTL_AIR_NIR_REFLECT and NVMTL_AIR_NIR_SAMPLER_STATES (the
  * plugin then neither leaves the translator out nor hands it a sampler's state). A version-5 NVK ignores
- * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs. */
+ * NVMTL_AIR_NIR_COLOR_INPUTS and refuses [[color(n)]] inputs; one older than version 7 ignores NVMTL_AIR_NIR_ARGBUF
+ * and NVMTL_AIR_NIR_TYPED_DUMMIES and refuses argument buffers. */
 typedef int (*nvmtl_air_nir_version_v1_fn)(void);
-#define NVMTL_AIR_NIR_VERSION 6
+#define NVMTL_AIR_NIR_VERSION 7
 #ifdef __cplusplus
 }
 #endif
