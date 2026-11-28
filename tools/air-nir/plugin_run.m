@@ -972,6 +972,8 @@ run_render_test(const struct rtest *t)
    d.depthAttachmentPixelFormat = t->depth ? t->depth : MTLPixelFormatInvalid;
    if (t->prim == MTLPrimitiveTypePoint)
       d.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+   if (t->pdesc)
+      t->pdesc(d);
    if (t->tess) {
       d.tessellationPartitionMode = t->tess->part;
       d.tessellationOutputWindingOrder = t->tess->wind;

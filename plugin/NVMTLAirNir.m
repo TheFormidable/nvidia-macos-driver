@@ -804,6 +804,14 @@ static NSDictionary *nvmtl_air_nir_varyings(NVMTLFunction *f, const uint32_t *re
     return d;
 }
 
+// Whether attachment 0 blends with a second source (VK_BLEND_FACTOR_SRC1_*: 15 to 18), as newRenderPipelineState found
+static BOOL nvmtl_air_nir_dual_blend(const nvk_rt *rt)
+{
+    const nvk_blend_state *b = rt->ncol ? &rt->blend[0] : NULL;
+    BOOL (^src1)(uint32_t) = ^BOOL(uint32_t f) { return f >= 15 && f <= 18; };
+    return b && b->enabled && (src1(b->src_rgb) || src1(b->dst_rgb) || src1(b->src_alpha) || src1(b->dst_alpha));
+}
+
 // The pipeline of vf and ff from their NIR into *out, or -1 and why not. Render stages promise no buffer alignment
 // above 4 bytes (NVMTL_AIR_NIR_ALIGN4), as the SPIR-V road builds every render module whose accesses promise more SAFE.
 int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nvk_rt *rt, const nvk_vertex_input *vin,
@@ -835,6 +843,8 @@ int nvmtl_air_nir_render_pipeline(NVMTLFunction *vf, NVMTLFunction *ff, const nv
         *why = @"a stage is not the function the descriptor names it as";
     else if ((td != NULL) != (vres.tess_domain != 0) || (td && (vres.tess_domain != td->patch_type || vres.tess_control_points != td->n)))
         *why = @"the vertex stage's tessellation is not the pipeline's";
+    else if (nvmtl_air_nir_dual_blend(rt) && !(fres.fragment_flags & NVMTL_AIR_NIR_FS_DUAL_SOURCE))
+        *why = [NSString stringWithFormat:@"%@ uses a dual-source blend factor and writes no [[color(0), index(1)]]", ff->_fname];
     else {
         rc = 0;
         NVMTLFunction *fs[2] = { vf, ff }; const struct nvmtl_air_nir_result *rs[2] = { &vres, &fres };

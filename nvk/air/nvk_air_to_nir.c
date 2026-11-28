@@ -2330,12 +2330,20 @@ air_bind_outputs(struct air_tr *t)
          if (!strcmp(kind, "air.render_target")) {
             if (rt >= 8)
                unsupported(t, "[[color(%llu)]]", (unsigned long long)rt);
-            if (rt_index)
+            /* [[color(0), index(1)]]: the second source of a dual-source blend, Location 0 Index 1, as the translator
+             * decorates it (meta: render_target_dual_members, an index operand of literal 1); version 8 */
+            if (rt_index > 1 || (rt_index && rt))
                unsupported(t, "a dual-source colour output ([[color(%llu), index(%llu)]])", (unsigned long long)rt,
                            (unsigned long long)rt_index);
-            if (t->color_outputs & (1u << rt))
-               unsupported(t, "two outputs of [[color(%llu)]]", (unsigned long long)rt);
-            t->color_outputs |= 1u << rt;
+            if (rt_index) {
+               if (t->fragment_flags & NVMTL_AIR_NIR_FS_DUAL_SOURCE)
+                  unsupported(t, "two outputs of [[color(0), index(1)]]");
+               t->fragment_flags |= NVMTL_AIR_NIR_FS_DUAL_SOURCE;
+            } else {
+               if (t->color_outputs & (1u << rt))
+                  unsupported(t, "two outputs of [[color(%llu)]]", (unsigned long long)rt);
+               t->color_outputs |= 1u << rt;
+            }
             slot = FRAG_RESULT_DATA0 + (int)rt;
          } else if (!strcmp(kind, "air.depth") && ty.is_float && ty.components == 1) {
             slot = FRAG_RESULT_DEPTH;
@@ -2353,6 +2361,7 @@ air_bind_outputs(struct air_tr *t)
       }
       o->var = nir_variable_create(t->nir, nir_var_shader_out, glsl_vector_type(o->base, o->components), vname);
       o->var->data.location = slot;
+      o->var->data.index = !vs && slot >= FRAG_RESULT_DATA0 && rt_index ? 1 : 0;
       if (!vs && o->base != GLSL_TYPE_FLOAT && slot >= FRAG_RESULT_DATA0)
          o->var->data.interpolation = INTERP_MODE_FLAT;
    }

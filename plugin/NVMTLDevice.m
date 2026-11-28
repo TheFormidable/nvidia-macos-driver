@@ -2539,14 +2539,17 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
         }
         rt.cfmt[i] = svk; rt.ncol = i + 1;
     }
+    BOOL dualSrc = NO;
     for (uint32_t i = 0; i < rt.ncol; i++) {
         const nvk_blend_state *b = &rt.blend[i];
         int dual = b->enabled && ((b->src_rgb >= 15 && b->src_rgb <= 18) || (b->dst_rgb >= 15 && b->dst_rgb <= 18) ||
                                   (b->src_alpha >= 15 && b->src_alpha <= 18) || (b->dst_alpha >= 15 && b->dst_alpha <= 18));
         if (!dual) continue;
         if (i != 0) return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: colour attachment %u uses a dual-source factor; only attachment 0 may (Metal and Vulkan alike)", i]);
-        NSData *fsp1 = nvmtl_function_spirv(ff, "a dual-source blend reads its Index 1 output");
-        if (!nvmtl_spirv_has_index1(fsp1.bytes, fsp1.length))
+        // a fragment function newFunctionWithName: made without the translator has no SPIR-V yet: the road asks the
+        // frontend's result instead (NVMTL_AIR_NIR_FS_DUAL_SOURCE), and the SPIR-V road below checks the module it makes
+        dualSrc = YES;
+        if (!ff->_spirvLazy && !nvmtl_spirv_has_index1(ff->_spirv.bytes, ff->_spirv.length))
             return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ uses a dual-source blend factor and its fragment SPIR-V has no Index 1 output (the translator predates dual-source)", ff->_fname]);
         static int said; if (said++ < 4) nvlog("pipeline: par2 dual-source blending on %s", ff->_fname.UTF8String);
     }
@@ -2662,6 +2665,8 @@ void nvmtl_air_nir_render_note(NVMTLFunction *vf, NVMTLFunction *ff, BOOL road, 
     if (ffx == ff) (void)nvmtl_function_spirv(ff, "its render pipeline takes the SPIR-V road");
     if (!vsp.length || !ffx->_spirv.length)
         return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ does not translate to SPIR-V", !vsp.length ? vf->_fname : ff->_fname]);
+    if (dualSrc && !nvmtl_spirv_has_index1(ffx->_spirv.bytes, ffx->_spirv.length))
+        return nvmtl_fail(err, [NSString stringWithFormat:@"pipeline: %@ uses a dual-source blend factor and its fragment SPIR-V has no Index 1 output (the translator predates dual-source)", ff->_fname]);
     NSData *flk = nvmtl_varying_link(vf, ffx); const void *fsb = flk ? flk.bytes : ffx->_spirv.bytes; size_t fsl = flk ? flk.length : ffx->_spirv.length;
     uint32_t tpt = 0, tcps = 0; int prc;
     if (nvmtl_spirv_tess_info(vf->_spirv.bytes, vf->_spirv.length, &tpt, &tcps)) {

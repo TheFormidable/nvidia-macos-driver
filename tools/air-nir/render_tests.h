@@ -70,6 +70,7 @@ struct rtest {
    const char *road_only;            /* why the SPIR-V road makes no pipeline of it: skipped there */
    bool road;                        /* with the road on, it must take it: the SPIR-V road's pipeline is a failure */
    const struct rtess *tess;         /* a tessellation pipeline */
+   void (*pdesc)(MTLRenderPipelineDescriptor *);   /* more of the pipeline's state (blending, ...) */
 };
 
 static id<MTLBuffer>
@@ -1764,6 +1765,34 @@ rrog_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_dual (round 10): dual-source blending ---------------------------------------------------------------------- */
+
+static void
+rdual_pdesc(MTLRenderPipelineDescriptor *d)
+{
+   d.colorAttachments[0].blendingEnabled = YES;
+   d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSource1Color;
+   d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSource1Color;
+   d.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorSource1Alpha;
+   d.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSource1Alpha;
+}
+
+static bool
+rdual_check(struct rrun *r)
+{
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++) {
+         const float u = px_u(px), w = px_w(py);
+         const float c0[4] = { u, w, 0.5f, 1 }, c1[4] = { 0.25f, 0.5f, w, 0.75f };
+         float want[4];
+         for (unsigned c = 0; c < 4; c++)
+            want[c] = c0[c] * c1[c] + clear_col[c] * (1 - c1[c]);
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+      }
+   return true;
+}
+
 static const struct rtess tq_int = { 2, 4, 1, MTLTessellationPartitionModeInteger, MTLWindingClockwise, 4.0f, 4, false, 1 };
 static const struct rtess tq_pow2 = { 2, 4, 1, MTLTessellationPartitionModePow2, MTLWindingClockwise, 3.0f, 4, false, 1 };
 static const struct rtess tq_fodd = { 2, 4, 1, MTLTessellationPartitionModeFractionalOdd, MTLWindingClockwise, 2.5f, 3, true, 1 };
@@ -1872,6 +1901,9 @@ static const struct rtest rtests[] = {
    { "r_rog", "r_rog", "rrog_vs", "rrog_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, rrog_setup, rrog_check,
      "1e-6; raster order groups on [[color(0)]], a written texture and a device buffer (WindowServer's inplace_copy): "
      "bound as without them, no interlock, on both roads", false, false, NULL, NULL, NULL, true, NULL },
+   { "r_dual", "r_dual", "rdual_vs", "rdual_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, setup_quad,
+     rdual_check, "1e-6; [[color(0), index(1)]] blends attachment 0 with Source1Color and Source1Alpha", false, false,
+     NULL, NULL, NULL, true, NULL, rdual_pdesc },
    { "r_tess_quad", "r_tess", "tq_vs", "tq_fs", { F32, F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 0, 1, 0, NULL, tq_vdesc, tq_setup,
      tq_check, "2e-5; quad patches, integer spacing, factor 4: s^2, t^3 and (s-1/2)^2 piecewise linear at i/4, the tint per "
      "patch and the patch id flat", false, false, NULL, NULL, NULL, true, &tq_int },

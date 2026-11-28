@@ -171,6 +171,8 @@
 #define NVMTL_AIR_NIR_FS_HELPERS_RETURN (1u << 5) /* since version 7: its helper invocations return at the entry, as the
                                                  * SPIR-V road's invocation-independent physical-buffer modules'
                                                  * (nvmtl_independent_helpers.h) */
+#define NVMTL_AIR_NIR_FS_DUAL_SOURCE (1u << 6)  /* since version 8: writes [[color(0), index(1)]], the second source of a
+                                                 * dual-source blend (Location 0, Index 1, as the translator's) */
 
 enum nvmtl_air_nir_status {
    NVMTL_AIR_NIR_OK          = 0,
