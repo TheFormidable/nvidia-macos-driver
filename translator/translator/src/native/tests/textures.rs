@@ -419,7 +419,9 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // element 0 of each written array, a known index: that texture's own storage binding, no descriptor array
+    // (resources::split_storage_texture_arrays)
+    assert!(!asm.contains("OpTypeArray"), "{asm}");
     assert!(asm.contains("R32f"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 2, "{asm}");
     assert!(asm.contains("Binding 480"), "{asm}");
@@ -465,7 +467,11 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // an element chosen at run time: the storage heap (set 2, binding 2) at the per-draw table's slot
+    // (resources::split_storage_texture_arrays)
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 2\n"), "{asm}");
+    assert!(asm.contains("OpTypeRuntimeArray"), "{asm}");
     assert!(asm.contains("OpAccessChain"), "{asm}");
     assert!(asm.contains("OpImageWrite"), "{asm}");
     assert!(asm.contains("BuiltIn LocalInvocationIndex"), "{asm}");
@@ -512,12 +518,14 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
+    // the two known elements: textures 0 and 1 at their own storage bindings, as the host binds them (one descriptor
+    // per texture slot), no descriptor array (resources::split_storage_texture_arrays)
+    assert!(!asm.contains("OpTypeArray"), "{asm}");
     assert!(asm.contains("Rgba16f"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 2, "{asm}");
     assert!(
-        asm.contains("OpAccessChain"),
-        "expected fixed descriptor-array element accesses:\n{asm}"
+        asm.contains("Binding 480") && asm.contains("Binding 481"),
+        "expected each element at its own binding:\n{asm}"
     );
     if std::process::Command::new("spirv-val")
         .arg("--version")
@@ -779,8 +787,11 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
     let _ = std::fs::create_dir_all(&tmp);
     let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
     let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpTypeArray"), "{asm}");
-    assert!(asm.contains("Binding 480"), "{asm}");
+    // a written array in an argument buffer, its element chosen at run time: the storage heap by the element's own
+    // handle (round 9: register_embedded_textures routes a written array there; the array binding at 480 lost
+    // every element but the first against the host's one descriptor per slot)
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 2\n"), "{asm}");
     assert!(asm.contains("Rgba16f"), "{asm}");
     assert!(asm.contains("OpAccessChain"), "{asm}");
     assert_eq!(asm.matches("OpImageWrite").count(), 1, "{asm}");

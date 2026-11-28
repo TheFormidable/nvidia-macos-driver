@@ -2470,8 +2470,9 @@ declare <4 x float> @air.fast_powr.v4f32(<4 x float>, <4 x float>)
         .flat_map(|w| w.to_le_bytes())
         .collect::<Vec<_>>();
     let asm = disassemble(&out).expect("disassemble transformed");
-    assert!(asm.contains(" Asin "), "{asm}");
-    assert!(asm.contains(" Acos "), "{asm}");
+    // asin and acos as atan2 of x and sqrt(max(1 - x * x, 0)) (float_imageblock.rs lower_metal_asin_acos)
+    assert!(!asm.contains(" Asin ") && !asm.contains(" Acos "), "{asm}");
+    assert!(asm.matches(" Atan2 ").count() >= 2 && asm.contains(" Sqrt "), "{asm}");
     assert!(asm.contains(" Sinh "), "{asm}");
     assert!(asm.contains(" Cosh "), "{asm}");
     assert!(!asm.contains(" Tanh "), "{asm}");
