@@ -1326,16 +1326,26 @@ value an older frontend refuses as before), and the frontend reads and writes ea
 one value. (With the plugin's opaque-pointer AIR, a buffer stored to as floats and float2s is typed `float`, not raw:
 `r_kept_guarded` also reads half-words, which make it raw.)
 
-**Still refused: null textures and imageblocks.** `air.get_null_texture_*` is lowered by the translator to a
-placeholder sampled image at the first texture binding its module leaves free at that point
-(`default_null_image_of`), and `is_null_texture` of it to `true`, of an argument to `false`. With bindless textures the
-module often declares no binding for an argument read through the heap, so the placeholder can land on an argument's own
-binding: a kernel choosing between `texture(0)` and a null texture reads the placeholder at binding 32, which is
-`texture(0)` itself (measured offline). The reflection names it (`SynthesizedNullTexture`). The frontend would need that
-binding from the translator's module (a retry like the descriptor buffers'), which is not done yet; of the AIR cache's
-71 functions with null textures, 58 also link visible functions MPS supplies at pipeline creation (not in the cache)
-and the other 13 (VideoToolbox's composite, RenderBox's fixed fragments) need their function constants. Imageblocks:
-unchanged from round 10.
+**Null textures (after the 3.0.28 package, ABI version 9).** `air.get_null_texture_*` is lowered by the translator to a
+placeholder: a float sampled image of the call's shape at the first texture binding its module leaves free when it
+lowers the call (`default_null_image_of`, `allocate_default_texture_binding`), `is_null_texture` of it `true`, of an
+argument `false`. In its bindless-all mode every sampled texture argument is read through the heap, so the only texture
+bindings its module declares by then are read `texture_buffer` arguments, the first binding of each read texture array
+and the placeholders of earlier shapes (measured offline on eight variants): the placeholder often lands on an
+argument's own index, and reading it reads whatever is bound at that texture index (with `texture(0)` read and a null
+2D texture, the placeholder is binding 32, `texture(0)` itself). The frontend now does the same when the request has
+`NVMTL_AIR_NIR_NULL_TEXTURES` (which the plugin sets with a version-9 NVK and the bindless heap): one placeholder per
+shape, in the order the entry's calls come, at the bindings that rule gives; neither reflection names them (the
+translator's reflection is the metadata's). Still refused: a null `texture_buffer`, a null texture in a function with
+argument buffers' textures (their bindings are not followed for this), and a run-time choice between a null texture and
+another (as any choice of handles). Under the translator's development switch `NVMTL_NO_BINDLESS_ALL` its placeholders
+would land elsewhere. Of the AIR cache's 71 functions with null textures, 58 also link visible functions MPS supplies
+at pipeline creation (not in the cache) and the other 13 (VideoToolbox's composite, RenderBox's fixed fragments) need
+their function constants: with each constant all 0 and all 1, 24 variants now translate on the road (their gates are
+initializer-computed, so their reflections are not compared) and 15 are refused for other reasons. `tex_null` and
+`tex_null_tb` (compute, `MUST_ROAD`) pass on both roads, and their offline reflections equal the translator's.
+
+**Imageblocks stay refused**, as in round 10.
 
 ### Tested (round 11)
 
@@ -1385,8 +1395,7 @@ unchanged from round 10.
   `test_surfin_zero_plugin.py`, `test_zink_subdata_stage.py` pass; `test_fetch_copy.py` skips (no glslangValidator);
   `test_nvk_nak_switch_key.py` fails as it fails at 941c6185 (the frontend's `NVMTL_AIR_NIR_DEBUG` and `_DUMP` reads
   are in neither its key table nor its exempt list).
-- Left: null textures (the translator's placeholder binding, which needs the translator's module), imageblocks (its tile
-  rewrite and cell staging), raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a
+- Left: imageblocks (its tile rewrite and cell staging), null `texture_buffer`s and run-time choices of handles, raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a
   multiple of 4 (or of 8 for 64-bit elements).
 
 ## Phases

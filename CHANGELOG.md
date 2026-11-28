@@ -2,6 +2,12 @@
 
 ## Not in a package yet
 
+### AIR to NIR, after 3.0.28: null textures
+
+- Null textures (`texture2d<float>()`, MPS's and RenderBox's `air.get_null_texture_*`) take the road (NVK's frontend,
+  ABI version 9): the translator's placeholder image, at the texture binding it lands on (often an argument's own), and
+  `is_null_texture` as the translator answers it. Tests: `tex_null`, `tex_null_tb`.
+
 ### AIR to NIR, round 11: kept buffers where Metal binds them, unbound bindings, texture_buffer arrays, the raw form
 
 - **Fixed on both roads: a buffer the translator keeps bounds-checked, bound at an offset below 16 bytes, read the
