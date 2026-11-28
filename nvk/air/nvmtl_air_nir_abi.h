@@ -160,6 +160,23 @@
                                                  * Reading it reads whatever is bound at texture n, as the translator's
                                                  * does. Without it such a function is refused, as before. */
 
+/* Since version 10: */
+#define NVMTL_AIR_NIR_KEPT_SELF     (1u << 20)  /* without NVMTL_AIR_NIR_DESCRIPTORS, a function that indexes buffers with a
+                                                 * value read from memory (what descriptor_wanted names) is translated
+                                                 * with the buffers the translator's wrapper keeps as descriptors when
+                                                 * the frontend is sure of its answer on the module as the request gives
+                                                 * it (buffer_addresses.rs kept_roots and its module's forms): each such
+                                                 * buffer an unsized device buffer, its pointers reaching only GEPs of
+                                                 * the argument itself, casts, loads and stores as the address, nothing
+                                                 * stored through them, every load of 32-bit components; kept when the
+                                                 * first index of such a GEP (the runtime array's) is computed from a load
+                                                 * through a buffer and its elements are bytes or one type of 32-bit
+                                                 * scalars (read as with NVMTL_AIR_NIR_DESCRIPTORS, descriptor_elem_bits
+                                                 * 32, no guarded store), not kept when every access is a field of the
+                                                 * first element (result.descriptor_mask, resource_flags
+                                                 * NVMTL_AIR_NIR_RES_KEPT_SELF). Anything else is refused with
+                                                 * descriptor_wanted, as without the flag. */
+
 /* request.descriptor_elem_bits[n]: elements of more than one scalar width, typed member by member (round 11) */
 #define NVMTL_AIR_NIR_ELEM_MIXED     1u
 
@@ -355,6 +372,8 @@ struct nvmtl_air_nir_result {
 };
 #define NVMTL_AIR_NIR_RES_HEAP      (1u << 0)   /* the bindless heap (set 2) and the table's texture slots */
 #define NVMTL_AIR_NIR_RES_DESCRIPTORS (1u << 1) /* storage-buffer descriptors (descriptor_mask) */
+#define NVMTL_AIR_NIR_RES_KEPT_SELF (1u << 2)   /* since version 10: descriptor_mask (0 included) is the frontend's own
+                                                 * answer (NVMTL_AIR_NIR_KEPT_SELF), every one 32-bit words, read only */
 #define NVMTL_AIR_NIR_RESULT_V1_SIZE 288u    /* the result up to its message */
 #define NVMTL_AIR_NIR_RESULT_V2_SIZE 1128u   /* the result up to global_align */
 #define NVMTL_AIR_NIR_RESULT_V3_SIZE 1136u   /* the result up to stage */
@@ -386,9 +405,11 @@ typedef void *(*nvmtl_air_nir_deserialize_v1_fn)(void *device, const void *data,
  * NVMTL_AIR_NIR_TYPED_DUMMIES and NVMTL_AIR_NIR_DESCRIPTORS, refuses argument buffers, and refuses a vertex or fragment
  * function that indexes a buffer with a value read from memory without saying so in descriptor_wanted; one older than
  * version 8 ignores NVMTL_AIR_NIR_TESS and refuses a post-tessellation vertex function; one older than version 9
- * ignores NVMTL_AIR_NIR_NULL_TEXTURES and refuses a null texture. */
+ * ignores NVMTL_AIR_NIR_NULL_TEXTURES and refuses a null texture; one older than version 10 ignores
+ * NVMTL_AIR_NIR_KEPT_SELF (it always refuses with descriptor_wanted) and reads a constant the request does not give as
+ * not known (it refuses what depends on it). */
 typedef int (*nvmtl_air_nir_version_v1_fn)(void);
-#define NVMTL_AIR_NIR_VERSION 9
+#define NVMTL_AIR_NIR_VERSION 10
 #ifdef __cplusplus
 }
 #endif

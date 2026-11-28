@@ -93,6 +93,12 @@ def reflect_main(args):
                     descs["KEPT WITHOUT ASKING (the road would read a kept buffer through its address)"] += 1
                     o.write("UNASKED\t%s\t%s\t%s\tkept %s\n" % (f[1], f[2], f[3], kept))
                 continue
+            if f[0] == "KSELF" and len(f) >= 7:
+                # round 12: kept buffers the frontend decided itself, against the translator's module
+                descs["decided by the frontend: " + ("same as the translator" if f[6] == "SAME" else f[6][:40])] += 1
+                if f[6] != "SAME":
+                    o.write("KSELF\t%s\t%s\t%s\tfrontend %s translator %s %s\n" % (f[1], f[2], f[3], f[4], f[5], f[6]))
+                continue
             if f[0] != "RFL" or len(f) < 8:
                 continue
             st, path, name, stage, msg, fej, trj = f[1], f[2], f[3], f[4], f[5], f[6], f[7]

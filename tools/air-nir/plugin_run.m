@@ -172,6 +172,7 @@ tex_image(struct run *r, unsigned i, VkImageViewType vt, VkFormat fmt, uint32_t 
    case VK_IMAGE_VIEW_TYPE_2D_ARRAY: td.textureType = MTLTextureType2DArray; td.arrayLength = layers; break;
    case VK_IMAGE_VIEW_TYPE_3D: td.textureType = MTLTextureType3D; td.depth = d; break;
    case VK_IMAGE_VIEW_TYPE_CUBE: td.textureType = MTLTextureTypeCube; break;
+   case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY: td.textureType = MTLTextureTypeCubeArray; td.arrayLength = layers / 6; break;   /* round 12 */
    default:
       fprintf(stderr, "plugin_run: view type %d has no Metal texture type here\n", (int)vt);
       exit(2);

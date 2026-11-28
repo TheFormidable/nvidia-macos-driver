@@ -2406,6 +2406,140 @@ tex_cubew_check(struct run *r)
    return check_u32(r, "sizes", S(r, 0), want, 3, 0);
 }
 
+/* tex_cube_rwk, tex_cube_arrw (round 12): a read_write R32Uint texturecube read and written back plus 1000, a written
+ * RGBA16Float texturecube_array of two cubes at (x, y, slice * 6 + face); their sizes and the array size. tex_cube_rd, a
+ * sampled texturecube read by texel, stays refused: the SPIR-V road reads it through a 2D-array view of the heap's cube
+ * view and gets 0 (measured: level 0 face 0 texel (0,0) read 0 for 0.478) */
+static void
+tex_cuberw_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 6, 2, false);
+   fill_bytes(r, 0);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R32_UINT, 4, 8, 8, 1, 6, 1, true);
+   for (uint32_t f = 0; f < 6; f++)
+      for (uint32_t y = 0; y < 8; y++)
+         for (uint32_t x = 0; x < 8; x++)
+            *(uint32_t *)tex_at(r, 1, 0, x, y, f) = x + 8 * y + 64 * f + 7;
+   tex_image(r, 2, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 12, 1, true);
+   memset(r->tex[2].stage.map, 0xff, 8 * 8 * 12 * 8);
+   slot(r, 0, 384 * 2 * 16);
+   slot(r, 1, 389 * 4);
+}
+
+static bool
+tex_cuberwk_check(struct run *r)
+{
+   const uint32_t *o2 = S(r, 1);
+   for (uint32_t f = 0; f < 6; f++)
+      for (uint32_t y = 0; y < 8; y++)
+         for (uint32_t x = 0; x < 8; x++) {
+            const uint32_t i = (f * 8 + y) * 8 + x;
+            if (o2[i] != x + 8 * y + 64 * f + 7)
+               return FAILF(r, "read_write face %u texel (%u,%u) read %u, expected %u", f, x, y, o2[i], x + 8 * y + 64 * f + 7);
+            const uint32_t u = *(const uint32_t *)tex_at(r, 1, 0, x, y, f);
+            if (u != x + 8 * y + 64 * f + 1007)
+               return FAILF(r, "read_write face %u texel (%u,%u) = %u after the write, expected %u", f, x, y, u, x + 8 * y + 64 * f + 1007);
+         }
+   const uint32_t want[1] = { 8 };
+   return check_u32(r, "size", o2 + 384, want, 1, 0);
+}
+
+static bool
+tex_cubearrw_check(struct run *r)
+{
+   for (uint32_t f = 0; f < 6; f++)
+      for (uint32_t y = 0; y < 8; y++)
+         for (uint32_t x = 0; x < 8; x++)
+            for (uint32_t sl = 0; sl < 2; sl++) {
+               const uint16_t *h = tex_at(r, 2, 0, x, y, sl * 6 + f);
+               const float w[4] = { (float)x, (float)y, (float)f, (float)sl };
+               for (unsigned c = 0; c < 4; c++)
+                  if (h2f(h[c]) != w[c])
+                     return FAILF(r, "cube array slice %u face %u texel (%u,%u) lane %u = %g, expected %g", sl, f, x, y, c,
+                                  h2f(h[c]), w[c]);
+            }
+   const uint32_t want[2] = { 8, 2 };
+   return check_u32(r, "sizes", S(r, 1), want, 2, 0);
+}
+
+/* tex_choice, tex_choice_null, tex_null_tbuf (round 12): handles chosen at run time and null texture_buffers. a and b
+ * are 8x8 RGBA8 textures at 0 and 1 (tex_null_tbuf: a 64-texel RGBA32Float texture_buffer at 0), sel random. */
+static void
+tex_choice_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 0);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, 4, 8, 8, 1, 1, 1, false);
+   fill_bytes(r, 1);
+   uint32_t *sel = slot(r, 0, 64 * 4);
+   for (unsigned i = 0; i < 64; i++)
+      sel[i] = rnd();
+   slot(r, 1, 64 * 2 * 16);
+}
+
+static bool
+tex_choice_check(struct run *r)
+{
+   const uint32_t *sel = S(r, 0);
+   const float *got = S(r, 1);
+   for (unsigned i = 0; i < 64; i++)
+      for (unsigned c = 0; c < 4; c++) {
+         const float w = rgba8_at(r, (sel[i] & 1) ? 0 : 1, 0, (int)(i % 8), (int)(i / 8), 0, c);
+         if (got[i * 4 + c] != w)
+            return FAILF(r, "thread %u (sel %u) lane %u = %g, expected %g (texture %u)", i, sel[i] & 1, c, got[i * 4 + c], w,
+                         (sel[i] & 1) ? 0 : 1);
+      }
+   return true;
+}
+
+static bool
+tex_choice_null_check(struct run *r)
+{
+   const uint32_t *sel = S(r, 0);
+   const float *got = S(r, 1);
+   for (unsigned i = 0; i < 64; i++) {
+      const bool isa = sel[i] & 2;
+      for (unsigned c = 0; c < 4; c++) {
+         const float w = rgba8_at(r, 0, 0, (int)(i % 8), (int)(i / 8), 0, c);
+         if (got[(2 * i) * 4 + c] != w)
+            return FAILF(r, "thread %u (a %d) lane %u = %g, expected %g", i, isa, c, got[(2 * i) * 4 + c], w);
+      }
+      /* the read: the translator's placeholder lands on texture 0 (a's index, read through the heap), so both arms
+       * read a; is_null_texture of the choice is false (only the placeholder itself is null), the width a's */
+      const float w2[4] = { 0, 8, 0, 1 };
+      for (unsigned c = 0; c < 4; c++)
+         if (got[(2 * i + 1) * 4 + c] != w2[c])
+            return FAILF(r, "thread %u (a %d) is_null/width lane %u = %g, expected %g", i, isa, c, got[(2 * i + 1) * 4 + c], w2[c]);
+   }
+   return true;
+}
+
+static void
+tex_null_tbuf_setup(struct run *r)
+{
+   float *f = tex_buffer(r, 0, VK_FORMAT_R32_SFLOAT, 4, 64, false);
+   for (unsigned k = 0; k < 64; k++)
+      f[k] = rndf(-4, 4);
+   slot(r, 1, 64 * 2 * 16);
+}
+
+static bool
+tex_null_tbuf_check(struct run *r)
+{
+   /* the translator's placeholder of the null texture_buffer is a uniform texel buffer at texture 1 (the first free
+    * one after tb's 0); nothing is bound there, so it reads the plugin's zero dummy (256 bytes of R32: 64 texels, read
+    * as 0) and its width is the dummy's; is_null_texture true of it, false of tb */
+   const float *got = S(r, 1);
+   for (unsigned i = 0; i < 64; i++) {
+      const float w0[4] = { 0, 0, 0, 0 }, w1[4] = { 1, 64, 0, 1 };
+      for (unsigned c = 0; c < 4; c++)
+         if (got[(2 * i) * 4 + c] != w0[c] || got[(2 * i + 1) * 4 + c] != w1[c])
+            return FAILF(r, "thread %u lane %u: read %g, is_null/width %g (expected %g, %g)", i, c, got[(2 * i) * 4 + c],
+                         got[(2 * i + 1) * 4 + c], w0[c], w1[c]);
+   }
+   return true;
+}
+
 /* pack565 (after 3.0.28): air.pack.unorm.rgb565 of float3 and of half3, as the translator packs it: NClamp(c, 0, 1)
  * (NaN to 0) times 31, 63, 31, rounded to even, at bits 0, 5, 11; the operands mix the edges (NaN, +-inf, -0.5, 0, 1,
  * 1.5) with values whose scaled form lies on or near a half */
@@ -3614,6 +3748,17 @@ static const struct test tests[] = {
      tex_depth_expect },
    { "tex_gather_depth", NULL, "tex_gather_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, MUST_ROAD, NULL, tex_gdepth_setup,
      tex_gdepth_check },
+   { "tex_choice", NULL, "tex_choice", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tex_choice_setup,
+     tex_choice_check },
+   { "tex_choice_null", "tex_choice", "tex_choice_null", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL,
+     tex_choice_setup, tex_choice_null_check },
+   { "tex_null_tbuf", "tex_choice", "tex_null_tbuf", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL,
+     tex_null_tbuf_setup, tex_null_tbuf_check },
+   { "tex_cube_rd", "tex_cube_rw", "tex_cube_rd", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, NULL, NULL },
+   { "tex_cube_rwk", "tex_cube_rw", "tex_cube_rwk", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL,
+     tex_cuberw_setup, tex_cuberwk_check },
+   { "tex_cube_arrw", "tex_cube_rw", "tex_cube_arrw", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL,
+     tex_cuberw_setup, tex_cubearrw_check },
    { "tex_cube_write", NULL, "tex_cube_write", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, MUST_ROAD, NULL, tex_cubew_setup,
      tex_cubew_check },
    { "pack565", "pack565_bias", "pack565", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, MUST_ROAD, NULL, pack565_setup, pack565_check },

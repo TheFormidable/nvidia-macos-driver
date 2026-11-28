@@ -41,6 +41,7 @@ static int g_air_nir_v6;                           // the NVK reads version 6: [
 static int g_air_nir_v7;                           // the NVK reads version 7: argument buffers, the heap's typed dummies
 static int g_air_nir_v8;                           // the NVK reads version 8: post-tessellation vertex functions
 static int g_air_nir_v9;                           // the NVK reads version 9: null textures
+static int g_air_nir_v10;                          // the NVK reads version 10: kept buffers it is sure of, decided itself
 static NSString *g_air_nir_ids;                    // this NVK's and this LLVM's identity, in every cache key
 
 // The log of this road: the plugin's log file, never the system log (a refusal message names what the frontend does not
@@ -204,6 +205,7 @@ static int nvmtl_air_nir_on(void)
             g_air_nir_v7 = nvmtl_vk_air_nir_version() >= 7;
             g_air_nir_v8 = nvmtl_vk_air_nir_version() >= 8;
             g_air_nir_v9 = nvmtl_vk_air_nir_version() >= 9;
+            g_air_nir_v10 = nvmtl_vk_air_nir_version() >= 10;
             g_air_nir_ids = [NSString stringWithFormat:@"nvk %s llvm %llu.%ld.%llu", uuid, (unsigned long long)st.st_size,
                              (long)st.st_mtimespec.tv_sec, (unsigned long long)st.st_ino];
             if (nvmtl_air_nir_off_listed_here(g_air_nir_ids.UTF8String))
@@ -292,7 +294,10 @@ static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
          | (g_air_nir_v8 && nvmtl_vk_min_lod() ? NVMTL_AIR_NIR_MIN_LOD : 0)   // and the translator's bit 4
          // version 9: null textures where the translator's bindless-all mode puts its placeholder (its development switch
          // NVMTL_NO_BINDLESS_ALL, which declares every texture argument a binding, would put it elsewhere)
-         | (g_air_nir_v9 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_NULL_TEXTURES : 0) | extra;
+         | (g_air_nir_v9 && nvmtl_vk_bindless_heap() ? NVMTL_AIR_NIR_NULL_TEXTURES : 0)
+         // version 10: the buffers the translator keeps as descriptors, decided by the frontend when it is sure of the
+         // translator's answer (the translator's module is then not made for it: nvmtl_air_nir_shader)
+         | (g_air_nir_v10 ? NVMTL_AIR_NIR_KEPT_SELF : 0) | extra;
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's
@@ -477,6 +482,13 @@ static int nvmtl_air_nir_shader(NVMTLFunction *f, NSDictionary *tgLen, uint32_t 
     if (kept8) *kept8 = 0;
     const uint32_t flags = nvmtl_air_nir_flags(extra, varyings != nil);
     int rc = nvmtl_air_nir_shader_with(f, tgLen, flags, local, varyings, stageKey, samplers, NULL, res, nir, why, path, memoKey, hit);
+    // version 10: the frontend kept buffers it was sure the translator keeps, every one 32-bit words (kept8 stays 0)
+    if (rc == 0 && (res->resource_flags & NVMTL_AIR_NIR_RES_KEPT_SELF) && !*hit) {
+        static _Atomic unsigned saidSelf;
+        if (atomic_fetch_add(&saidSelf, 1) < 64)
+            nvlog("air-nir: %s indexes buffer(s) %#x with values read from memory; the frontend keeps them as storage-buffer "
+                  "descriptors as the translator's module would, without that module", f->_fname.UTF8String ?: "?", res->descriptor_mask);
+    }
     if (rc == 0 || !g_air_nir_v7 || res->size < offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted ||
         !res->descriptor_wanted)
         return rc;

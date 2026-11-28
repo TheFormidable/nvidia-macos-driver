@@ -285,6 +285,16 @@ enum air_kind {
    AIR_SAMPLER,   /* a sampler: res is its struct air_sampler, no def */
    AIR_TEXARRAY,  /* a pointer into an array<texture, N> argument: res is its struct air_texarray, def the element */
    AIR_SSBO,      /* 32-bit byte offset into a [[buffer(n)]] read through its storage-buffer descriptor (desc) */
+   AIR_TEXCHOICE, /* round 12: a texture handle chosen at run time (a select or a phi of texture arguments and null
+                   * placeholders): res is its struct air_texchoice, def the chosen arm's index (32 bits) */
+};
+
+/* The arms of a run-time choice of texture handles, as the translator lowers one (query_select.rs, selected_load.rs):
+ * every call made on each arm, the results chosen by the arm's index */
+#define AIR_CHOICE_ARMS 4
+struct air_texchoice {
+   unsigned n;
+   struct air_texture *arm[AIR_CHOICE_ARMS];
 };
 
 struct air_val {
@@ -336,6 +346,7 @@ struct air_phi {
    uint8_t desc;                   /* AIR_SSBO: the descriptor buffer's index + 1 */
    uint8_t depth;                  /* an element of an aggregate phi: the indices down to it */
    uint16_t path[AIR_MAX_DEPTH];
+   struct air_texchoice *choice;   /* AIR_TEXCHOICE (round 12): the textures its incoming values name */
 };
 
 /* Argument buffers (version 7, NVMTL_AIR_NIR_ARGBUF): what the translator's meta::embedded finds in the arguments'
@@ -407,6 +418,10 @@ struct air_tr {
    uint32_t desc_guarded;
    struct set *dd_sources;      /* parameters that count as read from memory (air_data_dependent) */
    uint32_t pre_wanted;         /* the buffers air_dd_before_passes asks about */
+   uint32_t pre_sure;           /* round 12: of those, the ones the translator's wrapper is sure to keep, as 32-bit words
+                                 * its module only reads (air_dd_before_passes, NVMTL_AIR_NIR_KEPT_SELF) */
+   uint32_t pre_sure_not;       /* ... and the ones it is sure not to keep */
+   bool kept_self;              /* the kept buffers are this frontend's own answer (NVMTL_AIR_NIR_RES_KEPT_SELF) */
    uint32_t desc_ro_mask;       /* the descriptor buffers the translator declares NonWritable */
    bool pre_done;
    nir_address_format ssbo_format;
@@ -761,6 +776,8 @@ air_vdef(struct air_tr *t, const struct air_val *x)
    if (x->kind == AIR_SSBO)
       unsupported(t, "a pointer into buffer %u, which the SPIR-V road keeps a bounds-checked storage-buffer descriptor, "
                   "used as a value (a select, a phi, a compare, a store or a call of it)", x->desc - 1u);
+   if (x->kind == AIR_TEXCHOICE)
+      unsupported(t, "a run-time choice of texture handles used as a value (a compare, a store or a call of it)");
    if (!x->def)
       unsupported(t, "a %s used as a value (a null-texture test, a select or a phi of handles, ...)",
                   x->kind == AIR_TEXTURE ? "texture handle" : x->kind == AIR_SAMPLER ? "sampler handle" : "value without one");
@@ -2676,6 +2693,72 @@ air_pre_data(struct air_pre *p, LLVMValueRef v, unsigned *budget)
    }
 }
 
+/* Round 12: a value the translator's wrapper surely counts as data (buffer_addresses.rs data_dependent): computed by
+ * integer arithmetic and conversions from a load through a buffer argument's pointer (never a local variable's), at
+ * most depth values deep. Its module keeps that load an OpLoad of a StorageBuffer or PhysicalStorageBuffer pointer, which
+ * is data whatever else the index reads (data_dependent either finds it or runs out of its budget, and both say data). */
+static bool
+air_pre_sure_data(struct air_pre *p, LLVMValueRef v, unsigned depth)
+{
+   if (!v || !depth || !_mesa_set_search(p->insts, v))
+      return false;
+   switch (L.LLVMGetInstructionOpcode(v)) {
+   case OP_LOAD:
+      return air_pre_mask(p->ptr, L.LLVMGetOperand(v, 0)) && !air_pre_alloca(p, L.LLVMGetOperand(v, 0));
+   case OP_ZEXT: case OP_SEXT: case OP_TRUNC: case OP_ADD: case OP_SUB: case OP_MUL: case OP_SHL: case OP_LSHR:
+   case OP_ASHR: case OP_AND: case OP_OR: case OP_XOR: case OP_UDIV: case OP_SDIV: case OP_UREM: case OP_SREM:
+   case OP_EXTRACTELEMENT: case OP_FPTOUI: case OP_FPTOSI:
+      for (int i = 0; i < L.LLVMGetNumOperands(v); i++)
+         if (air_pre_sure_data(p, L.LLVMGetOperand(v, i), depth - 1))
+            return true;
+      return false;
+   default:
+      return false;
+   }
+}
+
+/* a load the kept buffer's module reads in 32-bit components: a 32-bit integer or float, or a vector of them */
+static bool
+air_type_words(LLVMTypeRef ty)
+{
+   if (L.LLVMGetTypeKind(ty) == TY_VECTOR)
+      ty = L.LLVMGetElementType(ty);
+   return L.LLVMGetTypeKind(ty) == TY_FLOAT || (L.LLVMGetTypeKind(ty) == TY_INTEGER && L.LLVMGetIntTypeWidth(ty) == 32);
+}
+
+/* a type whose scalars are all 32-bit integers or floats (vectors, arrays and structures of them) */
+static bool
+air_type_all_words(LLVMTypeRef ty, unsigned depth)
+{
+   if (depth > 8)
+      return false;
+   switch (L.LLVMGetTypeKind(ty)) {
+   case TY_FLOAT: return true;
+   case TY_INTEGER: return L.LLVMGetIntTypeWidth(ty) == 32;
+   case TY_VECTOR: case TY_ARRAY: return air_type_all_words(L.LLVMGetElementType(ty), depth + 1);
+   case TY_STRUCT:
+      for (unsigned i = 0; i < L.LLVMCountStructElementTypes(ty); i++)
+         if (!air_type_all_words(L.LLVMStructGetTypeAtIndex(ty, i), depth + 1))
+            return false;
+      return L.LLVMCountStructElementTypes(ty) > 0;
+   default: return false;
+   }
+}
+
+/* the buffer argument v is a cast of (or itself), or 0 */
+static uint32_t
+air_pre_direct(struct air_pre *p, LLVMValueRef v, uint32_t nbufs)
+{
+   for (unsigned d = 0; d < 32 && v && _mesa_set_search(p->insts, v); d++) {
+      const int op = L.LLVMGetInstructionOpcode(v);
+      if (op != OP_BITCAST && op != OP_ADDRSPACECAST)
+         return 0;
+      v = L.LLVMGetOperand(v, 0);
+   }
+   const uint32_t m = air_pre_mask(p->ptr, v) & nbufs;
+   return m && !(m & (m - 1)) && !_mesa_set_search(p->insts, v) ? m : 0;
+}
+
 static void
 air_dd_before_passes(struct air_tr *t)
 {
@@ -2720,6 +2803,7 @@ air_dd_before_passes(struct air_tr *t)
    LLVMValueRef *nodes;
    unsigned na = air_md_operands(args_node, &nodes, t->mem);
    const unsigned params = L.LLVMCountParams(f);
+   uint32_t nunsure = 0, nbufs = 0;   /* buffers whose block the translator may not type a runtime array; every buffer */
    for (unsigned i = 0; i < na; i++) {
       LLVMValueRef *ops;
       unsigned c = air_md_operands(nodes[i], &ops, t->mem);
@@ -2734,12 +2818,22 @@ air_dd_before_passes(struct air_tr *t)
          _mesa_set_add(p.sources, param);
       if (strcmp(kind, "air.buffer"))
          continue;
-      for (unsigned k = 2; k + 1 < c; k++) {
+      uint32_t bit = 0;
+      bool sized = false;
+      for (unsigned k = 2; k < c; k++) {
          const char *key = air_md_string(ops[k]);
          uint64_t loc;
-         if (key && !strcmp(key, "air.location_index") && air_md_int(ops[k + 1], &loc) && loc < NVMTL_AIR_NIR_MAX_BUFFERS)
-            air_pre_or(p.ptr, param, 1u << loc);
+         if (key && !strcmp(key, "air.buffer_size"))
+            sized = true;
+         if (k + 1 < c && key && !strcmp(key, "air.location_index") && air_md_int(ops[k + 1], &loc) && loc < NVMTL_AIR_NIR_MAX_BUFFERS)
+            bit = 1u << loc;
       }
+      air_pre_or(p.ptr, param, bit);
+      /* round 12: only an unsized device buffer is a block the translator surely gives a runtime array */
+      if (bit && (sized || L.LLVMGetTypeKind(L.LLVMTypeOf(param)) != TY_POINTER ||
+                  L.LLVMGetPointerAddressSpace(L.LLVMTypeOf(param)) != 1 || (nunsure & bit)))
+         nunsure |= bit;
+      nbufs |= bit;
    }
    /* where those pointers go: GEPs and casts, phis and selects, calls, and local variables they are stored in */
    for (bool changed = true; changed; ) {
@@ -2797,6 +2891,67 @@ air_dd_before_passes(struct air_tr *t)
          }
       }
    }
+   /* Round 12 (NVMTL_AIR_NIR_KEPT_SELF): the buffers the translator's wrapper is sure to keep (kept_roots: a root whose
+    * block holds a runtime array, an access chain of it indexed with data, and its pointers reaching only access
+    * chains, loads and stores), and sure to be read as 32-bit words: an unsized device buffer whose pointers reach only
+    * GEPs, casts, loads and stores as the address, never one of another buffer, nothing stored through them, every load
+    * of 32-bit components, and a GEP of it indexed with a value from a load through a buffer (air_pre_sure_data). A
+    * phi, a select, a call, a store of the pointer itself, a pointer compared or converted: not sure. */
+   uint32_t bad = nunsure, sure = 0, first_var = 0, elem_i8 = 0, elem_words = 0, elem_other = 0;
+   LLVMTypeRef elem[32] = { NULL };
+   set_foreach(p.insts, e) {
+      LLVMValueRef i = (LLVMValueRef)e->key;
+      const int op = L.LLVMGetInstructionOpcode(i);
+      for (int k = 0; k < L.LLVMGetNumOperands(i); k++) {
+         const uint32_t m = air_pre_mask(p.ptr, L.LLVMGetOperand(i, k)) & nbufs;
+         if (!m)
+            continue;
+         const bool addr = (k == 0 && (op == OP_GEP || op == OP_BITCAST || op == OP_ADDRSPACECAST || op == OP_LOAD)) ||
+                           (k == 1 && op == OP_STORE);
+         if (!addr || (m & (m - 1)) || op == OP_STORE || (op == OP_LOAD && !air_type_words(L.LLVMTypeOf(i))))
+            bad |= m;
+      }
+      if (op == OP_PHI || op == OP_SELECT || op == OP_CALL || op == OP_ALLOCA)
+         bad |= air_pre_mask(p.ptr, i) & nbufs;   /* a pointer made by one of them (or a callee's parameter, below) */
+      if (op != OP_GEP)
+         continue;
+      const uint32_t m = air_pre_mask(p.ptr, L.LLVMGetOperand(i, 0)) & nbufs;
+      if (!m || (m & (m - 1)))
+         continue;
+      /* a GEP of the argument itself (through casts): its first index walks the block's runtime array, its source
+       * element type is what the translator's module types an element as (bytes: a word array) */
+      const uint32_t direct = air_pre_direct(&p, L.LLVMGetOperand(i, 0), nbufs);
+      if (direct) {
+         LLVMValueRef first = L.LLVMGetNumOperands(i) > 1 ? L.LLVMGetOperand(i, 1) : NULL;
+         if (!first || !L.LLVMIsAConstantInt(first) || L.LLVMConstIntGetZExtValue(first))
+            first_var |= m;
+         LLVMTypeRef et = L.LLVMGetGEPSourceElementType(i);
+         const unsigned bi = (unsigned)__builtin_ctz(m);
+         if (L.LLVMGetTypeKind(et) == TY_INTEGER && L.LLVMGetIntTypeWidth(et) == 8)
+            elem_i8 |= m;
+         else if (air_type_all_words(et, 0) && (!elem[bi] || elem[bi] == et))
+            elem_words |= m, elem[bi] = et;
+         else
+            elem_other |= m;
+         /* the access chain the translator's wrapper sees indexed with data: the runtime array's index */
+         if (first && air_pre_sure_data(&p, first, 8))
+            sure |= m;
+      } else {
+         bad |= m;   /* a GEP of a GEP: which of its indices is the runtime array's is not followed here */
+      }
+   }
+   /* the elements the translator surely types as 32-bit words: a byte array (a word array of it) or one type of them */
+   const uint32_t words = (elem_i8 ^ elem_words) & ~elem_other & ~(elem_i8 & elem_words);
+   hash_table_foreach(p.params, he)
+      bad |= air_pre_mask(p.ptr, (LLVMValueRef)he->key) & nbufs;
+   t->pre_sure = sure & words & ~bad;
+   /* and the ones it surely does not keep: every access a field of the first element (no runtime array is walked:
+    * lightfield_frag's calibration block, indexed only inside a member array), nothing that is not sure */
+   t->pre_sure_not = nbufs & ~first_var & ~bad & ~sure;
+   if (getenv("NVMTL_AIR_NIR_DEBUG"))
+      fprintf(stderr, "air-nir: kept buffers: asked %#x, sure %#x, surely not %#x, not sure %#x (not an unsized device "
+              "buffer %#x, words %#x, first index walked %#x)\n", t->pre_wanted, t->pre_sure, t->pre_sure_not, bad, nunsure,
+              words, first_var);
 }
 
 /* The buffers the translator may keep as storage-buffer descriptors: a buffer argument that a GEP indexes with a value
@@ -2811,9 +2966,39 @@ air_dd_before_passes(struct air_tr *t)
  * (descriptor_wanted), and the plugin asks again with the translator's answer. A kernel of a pipeline without buffer
  * robustness (NVMTL_AIR_NIR_UNCHECKED) reads a kept buffer at the same address either way below 4 GiB, and is not asked
  * about. */
-static uint32_t
-air_descriptor_candidates(struct air_tr *t, const struct air_arg *args, unsigned n)
+/* air_pre_sure_data after LLVM's passes: a load through a pointer derived from a buffer argument (roots) */
+static bool
+air_post_sure_data(struct set *insts, struct hash_table *roots, LLVMValueRef v, unsigned depth)
 {
+   if (!v || !depth || !_mesa_set_search(insts, v))
+      return false;
+   switch (L.LLVMGetInstructionOpcode(v)) {
+   case OP_LOAD: {
+      LLVMValueRef base = L.LLVMGetOperand(v, 0);
+      for (unsigned d = 0; d < 32 && base && _mesa_set_search(insts, base); d++) {
+         const int op = L.LLVMGetInstructionOpcode(base);
+         if (op != OP_GEP && op != OP_BITCAST && op != OP_ADDRSPACECAST)
+            return false;
+         base = L.LLVMGetOperand(base, 0);
+      }
+      return base && _mesa_hash_table_search(roots, base);
+   }
+   case OP_ZEXT: case OP_SEXT: case OP_TRUNC: case OP_ADD: case OP_SUB: case OP_MUL: case OP_SHL: case OP_LSHR:
+   case OP_ASHR: case OP_AND: case OP_OR: case OP_XOR: case OP_UDIV: case OP_SDIV: case OP_UREM: case OP_SREM:
+   case OP_EXTRACTELEMENT: case OP_FPTOUI: case OP_FPTOSI:
+      for (int i = 0; i < L.LLVMGetNumOperands(v); i++)
+         if (air_post_sure_data(insts, roots, L.LLVMGetOperand(v, i), depth - 1))
+            return true;
+      return false;
+   default:
+      return false;
+   }
+}
+
+static uint32_t
+air_descriptor_candidates(struct air_tr *t, const struct air_arg *args, unsigned n, uint32_t *post_sure)
+{
+   *post_sure = 0;
    if (t->stage == NVMTL_AIR_NIR_STAGE_KERNEL && (t->req->flags & NVMTL_AIR_NIR_UNCHECKED))
       return 0;
    /* what the translator's module reads with an instruction it counts as data (buffer_addresses.rs data_dependent: a
@@ -2859,6 +3044,9 @@ air_descriptor_candidates(struct air_tr *t, const struct air_arg *args, unsigned
          struct set *seen = _mesa_pointer_set_create(t->mem);
          if (air_data_dependent(t, insts, seen, L.LLVMGetOperand(gep, k), &budget))
             mask |= 1u << ((unsigned)(uintptr_t)root->data - 1);
+         /* round 12: an access of it that LLVM's passes keep, indexed with data the translator surely sees */
+         if (air_post_sure_data(insts, roots, L.LLVMGetOperand(gep, k), 8))
+            *post_sure |= 1u << ((unsigned)(uintptr_t)root->data - 1);
       }
    }
    return mask;
@@ -2880,9 +3068,32 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
 
    if (t->tess)
       air_tess_scan(t, nodes, n, params);
+   for (unsigned i = 0; i < n; i++)
+      args[i] = air_read_arg(t, nodes[i], i, params);
+   /* Round 12 (NVMTL_AIR_NIR_KEPT_SELF): the buffers the translator would keep as descriptors, decided here when its
+    * rule is sure to give the same answer (air_dd_before_passes' pre_sure, and an access LLVM's passes keep): every
+    * buffer this would ask about is kept, as 32-bit words its module only reads (descriptor_elem_bits 32, no guarded
+    * store), and the function is translated as with NVMTL_AIR_NIR_DESCRIPTORS and those buffers. Otherwise it is
+    * refused with descriptor_wanted below, and the plugin asks the translator's module as before. */
+   uint32_t post_sure = 0;
+   const uint32_t want = air_descriptor_candidates(t, args, n, &post_sure);
+   const uint32_t keep = want & t->pre_sure & post_sure;
+   if (want && !t->desc_given && (t->req->flags & NVMTL_AIR_NIR_KEPT_SELF) && !(want & ~keep & ~t->pre_sure_not)) {
+      bool argbuf = false;
+      for (unsigned i = 0; i < n; i++)
+         argbuf |= args[i].kind && !strcmp(args[i].kind, "air.indirect_buffer") && args[i].location < 32 &&
+                   (want >> args[i].location & 1);
+      if (!argbuf) {
+         t->desc_given = t->desc_forms = t->kept_self = true;
+         t->desc_buffers = keep;
+         memset(t->desc_bits, 0, sizeof t->desc_bits);
+         u_foreach_bit(b, keep)
+            t->desc_bits[b] = 32;
+         t->desc_guarded = 0;
+      }
+   }
    for (unsigned i = 0; i < n; i++) {
       struct air_arg *a = &args[i];
-      *a = air_read_arg(t, nodes[i], i, params);
       if (a->location_unknown && air_fc_arg_present(t, a) != 0)
          unsupported(t, "argument %u's index is %s, which depends on a function constant %s", i, a->location_unknown,
                      air_has_fc_values(t) ? "the request does not give" : "(the request has no function-constant values)");
@@ -3010,7 +3221,6 @@ air_bind_arguments(struct air_tr *t, LLVMValueRef args_node)
          unsupported(t, "parameter %u of the function has no description in its metadata", p);
    }
    air_assign_static_samplers(t);
-   const uint32_t want = air_descriptor_candidates(t, args, n);
    if (want && !t->desc_given) {
       t->desc_wanted = want;
       unsupported(t, "buffer(s) %#x of the %s function are indexed with a value read from memory or a texture: the "
@@ -4028,15 +4238,16 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
     * refused */
    if (x->dim == GLSL_SAMPLER_DIM_MS && x->storage)
       unsupported(t, "the multisampled texture %s", a->type_name);
-   /* a write-only texturecube (round 11): the translator makes a cube it does not sample by direction a 2D-array image
-    * (discovery.rs: Dim2D arrayed) and writes it at (x, y, face) (fetch_coord.rs build_fetch_coord); so does this
-    * frontend, the face where an array's layer is. A read_write cube, a written cube array or depth texture stays
-    * refused */
-   if (x->storage && x->dim == GLSL_SAMPLER_DIM_CUBE && !x->array && x->access == ACCESS_NON_READABLE) {
+   /* a written texturecube (round 11: write-only; round 12: read_write too): the translator makes a cube it does not
+    * sample by direction a 2D-array image (discovery.rs: Dim2D arrayed; a storage image is never sampled) and reads and
+    * writes it at (x, y, face) (fetch_coord.rs build_fetch_coord); so does this frontend, the face where an array's
+    * layer is. A written texturecube_array (round 12) stays a cube-array storage image, read and written at
+    * (x, y, slice * 6 + face) (combine_cube_array_layer). A written depth texture stays refused */
+   if (x->storage && x->dim == GLSL_SAMPLER_DIM_CUBE && !x->array) {
       x->dim = GLSL_SAMPLER_DIM_2D;
       x->array = true;
    }
-   if (x->storage && (x->dim == GLSL_SAMPLER_DIM_CUBE || x->depth))
+   if (x->storage && x->depth)
       unsupported(t, "a written %s (the translator writes it through a 2D-array view)", a->type_name);
    const struct glsl_type *type = x->storage ? glsl_image_type(x->dim, x->array, x->base)
                                              : glsl_texture_type(x->dim, x->array, x->base);
@@ -5095,7 +5306,8 @@ air_null_shape(const char *name, enum glsl_sampler_dim *dim, bool *array)
          }
       }
    }
-   return *dim != GLSL_SAMPLER_DIM_BUF;
+   /* round 12: a null texture_buffer too (its placeholder a uniform texel buffer, as the translator's) */
+   return true;
 }
 
 /* A null texture (version 9, NVMTL_AIR_NIR_NULL_TEXTURES): the translator's placeholder (lower_get_null_texture,
@@ -5115,8 +5327,7 @@ air_null_texture(struct air_tr *t, const char *name)
                   "lands among their bindings is not followed here)");
    enum glsl_sampler_dim dim;
    bool array;
-   if (!air_null_shape(name, &dim, &array))
-      unsupported(t, "a null texture_buffer (%s)", name);
+   air_null_shape(name, &dim, &array);
    if (!t->nulls_placed) {
       /* every null texture call of the entry, in the order the translator lowers them: one placeholder per shape */
       t->nulls_placed = true;
@@ -5157,6 +5368,8 @@ air_null_texture(struct air_tr *t, const char *name)
          return t->nulls[k];
    unsupported(t, "a null texture (%s) that is not a call in the entry", name);
 }
+
+static struct air_val *air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y);
 
 static bool
 air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned nargs, struct air_val **out)
@@ -5204,7 +5417,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          *out = air_make(t, nir_imm_true(b), AIR_VALUE, 0);
          return true;
       }
-      if ((h->kind == AIR_TEXTURE && h->res && !((struct air_texture *)h->res)->absent) || air_is_handle(t, h)) {
+      if ((h->kind == AIR_TEXTURE && h->res && !((struct air_texture *)h->res)->absent) || air_is_handle(t, h) ||
+          h->kind == AIR_TEXCHOICE) {   /* round 12: of a choice of handles false, as the translator's (OpCopyObject false) */
          *out = air_make(t, nir_imm_false(b), AIR_VALUE, 0);
          return true;
       }
@@ -5215,6 +5429,30 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
           air_starts(name, "air.get_null_texture") || strstr(name, "_texture_") || strstr(name, "texture_buffer"))
          unsupported(t, "the texture call %s", name);
       return false;
+   }
+   /* round 12: a call on a run-time choice of texture handles: made on each arm, the results chosen by the arm's index,
+    * as the translator lowers it (selected_load.rs, query_select.rs); a write or an atomic through one stays refused */
+   {
+      struct hash_entry *he = ARG(0) ? _mesa_hash_table_search(t->values, ARG(0)) : NULL;
+      struct air_val *h0 = he ? he->data : NULL;
+      if (h0 && h0->kind == AIR_TEXCHOICE) {
+         if (write || fence || strstr(name, "atomic"))
+            unsupported(t, "%s through a run-time choice of texture handles", name);
+         struct air_texchoice *ch = h0->res;
+         struct air_val *res = NULL;
+         for (unsigned k = 0; k < ch->n; k++) {
+            struct air_val *arm = air_make(t, NULL, AIR_TEXTURE, 1);
+            arm->res = ch->arm[k];
+            air_set_val(t, ARG(0), arm);
+            struct air_val *o = NULL;
+            if (!air_texture_call(t, name, call, nargs, &o) || !o)
+               unsupported(t, "%s through a run-time choice of texture handles", name);
+            res = k ? air_select(t, nir_ieq_imm(b, h0->def, (int)k), o, res) : o;
+         }
+         air_set_val(t, ARG(0), h0);
+         *out = res;
+         return true;
+      }
    }
    struct air_texture *x = air_texture_of(t, ARG(0), name);
 
@@ -5253,7 +5491,9 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       } else if (x->storage) {
          if (!air_is_zero(lodv ? lodv : NULL) && lodv)
             unsupported(t, "a size query of a storage texture at a level other than 0");
-         unsigned nc = glsl_get_sampler_dim_coordinate_components(x->dim) + (x->array ? 1 : 0);
+         /* a cube array's size is (width, height, cubes), as OpImageQuerySize gives it */
+         unsigned nc = x->dim == GLSL_SAMPLER_DIM_CUBE ? 2 + (x->array ? 1 : 0) :
+                       glsl_get_sampler_dim_coordinate_components(x->dim) + (x->array ? 1 : 0);
          r = nir_image_deref_size(b, nc, 32, &d->def, nir_imm_int(b, 0), .image_dim = x->dim, .image_array = x->array);
       } else {
          /* a buffer and a multisampled texture have one level: their size query takes no level */
@@ -5273,7 +5513,16 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (!x->storage)
          unsupported(t, "a write to a texture that is not access::write or read_write");
       LLVMValueRef coord = ARG(1), layer = NULL, texel, lodv;
-      if (x->array) {   /* a written texturecube's face where an array's layer is (texture, coord, face, texel, lod) */
+      nir_def *cube_layer = NULL;
+      if (x->dim == GLSL_SAMPLER_DIM_CUBE && x->array) {
+         /* a texturecube_array (texture, coord, face, slice, texel, lod): the layer slice * 6 + face, as the
+          * translator combines it (combine_cube_array_layer) */
+         if (!ARG(2) || !ARG(3))
+            unsupported(t, "%s with %u operands", name, nargs);
+         cube_layer = nir_iadd(b, nir_imul_imm(b, air_int32(t, ARG(3)), 6), air_int32(t, ARG(2)));
+         texel = ARG(4);
+         lodv = ARG(5);
+      } else if (x->array) {   /* a written texturecube's face where an array's layer is (texture, coord, face, texel, lod) */
          layer = ARG(2);
          texel = ARG(3);
          lodv = ARG(4);
@@ -5285,8 +5534,9 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          unsupported(t, "%s with %u operands", name, nargs);
       if (lodv && !air_is_zero(lodv))
          unsupported(t, "a write to a level other than 0 of a storage texture");
-      nir_def *c = nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
-      if (x->array)
+      nir_def *c = cube_layer ? air_append(b, nir_trim_vector(b, air_int32(t, coord), 2), cube_layer)
+                              : nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
+      if (x->array && !cube_layer)
          c = air_append(b, c, air_int32(t, layer));
       nir_def *v = air_def(t, texel);
       if (v->num_components != 4)
@@ -5330,12 +5580,28 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       }
       if (x->dim == GLSL_SAMPLER_DIM_BUF)
          lodv = NULL;
-      if (x->dim == GLSL_SAMPLER_DIM_CUBE)
-         unsupported(t, "a read of a texturecube (the translator reads it through a 2D-array view)");
+      nir_def *cube_layer = NULL;
+      if (x->dim == GLSL_SAMPLER_DIM_CUBE && x->array && x->storage && !read_depth) {
+         /* a read_write texturecube_array (round 12): (texture, [read sampler,] coord, face, slice, lod, access), the
+          * layer slice * 6 + face (write_read.rs lower_read: cube_array) */
+         const unsigned base = air_is_int(ARG(1)) ? 1 : 2;
+         coord = ARG(base);
+         if (!ARG(base + 1) || !ARG(base + 2))
+            unsupported(t, "%s with %u operands", name, nargs);
+         cube_layer = nir_iadd(b, nir_imul_imm(b, air_int32(t, ARG(base + 2)), 6), air_int32(t, ARG(base + 1)));
+         lodv = ARG(base == 2 && nargs >= 8 ? base + 4 : base + 3);
+      } else if (x->dim == GLSL_SAMPLER_DIM_CUBE) {
+         /* a sampled cube read by texel: the translator reads it as a 2D-array image through the heap, whose slot holds
+          * the cube's cube view (or, sampled by direction too, as a sample at the texel's centre): its SPIR-V road
+          * reads 0 there (tex_cube_rd), which this does not copy */
+         unsupported(t, "a read of a sampled texturecube (the SPIR-V road reads it through a 2D-array view of the "
+                     "heap's cube view, and reads 0)");
+      }
       if (!coord)
          unsupported(t, "%s with %u operands", name, nargs);
-      nir_def *c = nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
-      if (x->array)
+      nir_def *c = cube_layer ? air_append(b, nir_trim_vector(b, air_int32(t, coord), 2), cube_layer)
+                              : nir_trim_vector(b, air_int32(t, coord), air_spatial(x));
+      if (x->array && !cube_layer)
          c = air_append(b, c, air_int32(t, layer));
       nir_def *color;
       nir_deref_instr *d = air_texture_deref(t, x);
@@ -5813,9 +6079,40 @@ air_block(struct air_tr *t, LLVMBasicBlockRef bb, struct list_head *work)
    return blk;
 }
 
+/* round 12: a choice of texture handles made of a and b (each a texture or a choice), the arm index cb ? a's : b's */
+static struct air_val *
+air_texchoice_of(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
+{
+   struct air_texchoice *ch = rzalloc(t->mem, struct air_texchoice);
+   nir_def *ix[2];
+   struct air_val *in[2] = { x, y };
+   for (unsigned k = 0; k < 2; k++) {
+      struct air_val *v = in[k];
+      if (v->kind == AIR_TEXTURE) {
+         unsigned j = 0;
+         while (j < ch->n && ch->arm[j] != v->res)
+            j++;
+         if (j == ch->n) {
+            if (ch->n >= AIR_CHOICE_ARMS)
+               unsupported(t, "a choice among more than %u texture handles", AIR_CHOICE_ARMS);
+            ch->arm[ch->n++] = v->res;
+         }
+         ix[k] = nir_imm_int(&t->b, (int)j);
+      } else {
+         unsupported(t, "a select of a choice of texture handles (a choice nested in a choice)");
+      }
+   }
+   struct air_val *r = air_make(t, nir_bcsel(&t->b, c, ix[0], ix[1]), AIR_TEXCHOICE, 1);
+   r->res = ch;
+   return r;
+}
+
 static struct air_val *
 air_select(struct air_tr *t, nir_def *c, struct air_val *x, struct air_val *y)
 {
+   if (x->kind == AIR_TEXTURE && y->kind == AIR_TEXTURE && x->res != y->res &&
+       !((struct air_texture *)x->res)->absent && !((struct air_texture *)y->res)->absent)
+      return air_texchoice_of(t, c, x, y);
    if (x->kind != y->kind)
       unsupported(t, "a select between pointers of two kinds");
    if (x->kind == AIR_SSBO && x->desc == y->desc) {
@@ -5976,6 +6273,13 @@ air_instruction(struct air_tr *t, LLVMValueRef inst)
    case OP_PTRTOINT: {
       struct air_type to = air_type_of(t, lty);
       struct air_val *x = air_get(t, L.LLVMGetOperand(inst, 0));
+      /* round 12: a handle stored into a structure as an integer and read back (SceneKit's lighting fragments), once
+       * the structure is gone (SROA) the call reads the handle itself, as the translator resolves it to the argument's
+       * heap entry, and the integer is left unused: nothing to make of it */
+      if ((x->kind == AIR_TEXTURE || x->kind == AIR_SAMPLER || x->kind == AIR_TEXCHOICE) && !L.LLVMGetFirstUse(inst)) {
+         air_set(t, inst, nir_undef(b, 1, to.bits), AIR_VALUE, 0);
+         return;
+      }
       air_set(t, inst, air_canon(b, air_resize(b, air_vdef(t, x), to.bits, false), to.width), AIR_VALUE, 0);
       return;
    }
@@ -6167,6 +6471,23 @@ air_ssbo_root(struct air_tr *t, LLVMValueRef v, struct set *seen, unsigned depth
    return r;
 }
 
+/* round 12: the texture an incoming value of a phi names: a texture argument, or a null texture's placeholder (the call
+ * may be in a block not read yet); NULL for anything else */
+static struct air_texture *
+air_tex_arm(struct air_tr *t, LLVMValueRef v)
+{
+   if (!v)
+      return NULL;
+   if (L.LLVMGetInstructionOpcode(v) == OP_CALL) {   /* 0 for anything that is not an instruction */
+      LLVMValueRef callee = L.LLVMGetCalledValue(v);
+      const char *name = callee && L.LLVMIsAFunction(callee) ? air_name(callee, NULL) : NULL;
+      return name && air_starts(name, "air.get_null_texture") ? air_null_texture(t, name) : NULL;
+   }
+   struct hash_entry *e = _mesa_hash_table_search(t->values, v);
+   struct air_val *x = e ? e->data : NULL;
+   return x && x->kind == AIR_TEXTURE && x->res && !((struct air_texture *)x->res)->absent ? x->res : NULL;
+}
+
 static struct air_val *
 air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
 {
@@ -6183,6 +6504,43 @@ air_phi_value(struct air_tr *t, struct air_phi *phi, LLVMTypeRef lty)
       return r;
    }
    struct air_type ty = air_type_of(t, lty);
+   if (ty.is_pointer && !phi->depth) {
+      /* round 12: a phi of texture arguments and null placeholders, as the translator lowers one: a phi of the arm's
+       * index, every call made on each arm and its results chosen (selected_load.rs, query_select.rs) */
+      struct air_texchoice *ch = NULL;
+      const unsigned n = L.LLVMCountIncoming(phi->phi);
+      bool all = n > 0;
+      for (unsigned i = 0; i < n && all; i++) {
+         struct air_texture *x = air_tex_arm(t, L.LLVMGetIncomingValue(phi->phi, i));
+         all = x != NULL;
+         if (!x)
+            break;
+         if (!ch)
+            ch = rzalloc(t->mem, struct air_texchoice);
+         unsigned j = 0;
+         while (j < ch->n && ch->arm[j] != x)
+            j++;
+         if (j == ch->n) {
+            if (ch->n >= AIR_CHOICE_ARMS)
+               unsupported(t, "a choice among more than %u texture handles", AIR_CHOICE_ARMS);
+            ch->arm[ch->n++] = x;
+         }
+      }
+      if (all && ch) {
+         phi->var = nir_local_variable_create(t->impl, glsl_uint_type(), "texture_choice");
+         phi->kind = AIR_TEXCHOICE;
+         phi->choice = ch;
+         util_dynarray_append(&t->phis, *phi);
+         if (ch->n == 1) {   /* the same texture either way */
+            struct air_val *r1 = air_make(t, NULL, AIR_TEXTURE, 1);
+            r1->res = ch->arm[0];
+            return r1;
+         }
+         struct air_val *r = air_make(t, nir_load_var(&t->b, phi->var), AIR_TEXCHOICE, 1);
+         r->res = ch;
+         return r;
+      }
+   }
    const int root = ty.is_pointer && !phi->depth && t->desc_mask ? air_ssbo_root(t, phi->phi, _mesa_pointer_set_create(t->mem), 0) : 0;
    if (root > 0) {
       /* a pointer into one descriptor buffer whichever way it comes (a binary search's bounds): its offset */
@@ -6248,6 +6606,16 @@ air_emit_function(struct air_tr *t)
             if (v->kind != AIR_AGGREGATE || phi->path[d] >= v->num_elems)
                unsupported(t, "a phi of aggregates of two shapes");
             v = v->elems[phi->path[d]];
+         }
+         if (phi->kind == AIR_TEXCHOICE) {
+            struct air_texture *x = air_tex_arm(t, L.LLVMGetIncomingValue(phi->phi, i));
+            unsigned j = 0;
+            while (x && j < phi->choice->n && phi->choice->arm[j] != x)
+               j++;
+            if (!x || j == phi->choice->n)
+               unsupported(t, "a phi of texture handles whose arms changed");
+            nir_store_var(&t->b, phi->var, nir_imm_int(&t->b, (int)j), 1);
+            continue;
          }
          if (phi->kind == AIR_SSBO) {
             if (v->kind != AIR_SSBO || v->desc != phi->desc)
@@ -9310,7 +9678,8 @@ nvmtl_air_to_nir_v1(void *device, const struct nvmtl_air_nir_request *req, struc
    if (res->size >= offsetof(struct nvmtl_air_nir_result, resource_flags) + sizeof res->resource_flags && t->out) {
       res->color_inputs = t->color_inputs;
       res->resource_flags = (t->heap_textures ? NVMTL_AIR_NIR_RES_HEAP : 0) |
-                            (t->desc_mask ? NVMTL_AIR_NIR_RES_DESCRIPTORS : 0);
+                            (t->desc_mask ? NVMTL_AIR_NIR_RES_DESCRIPTORS : 0) |
+                            (t->kept_self ? NVMTL_AIR_NIR_RES_KEPT_SELF : 0);
    }
    if (res->size >= offsetof(struct nvmtl_air_nir_result, descriptor_wanted) + sizeof res->descriptor_wanted) {
       res->descriptor_mask = t->out ? t->desc_mask : 0;

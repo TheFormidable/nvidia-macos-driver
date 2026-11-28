@@ -400,6 +400,9 @@ main(int argc, char **argv)
                                                     NVMTL_AIR_NIR_ARGBUF | NVMTL_AIR_NIR_TYPED_DUMMIES |
                                                     (l > 0 ? NVMTL_AIR_NIR_TESS : 0) | NVMTL_AIR_NIR_MIN_LOD |
                                                     NVMTL_AIR_NIR_NULL_TEXTURES |
+                                                    /* round 12: kept buffers the frontend is sure of (AIRSWEEP_NO_KEPT_SELF=1:
+                                                     * always the translator's module, as before) */
+                                                    (getenv("AIRSWEEP_NO_KEPT_SELF") ? 0 : NVMTL_AIR_NIR_KEPT_SELF) |
                                                     (fcs ? NVMTL_AIR_NIR_FC_VALUES : 0) |
                                                     /* a kernel as the plugin's compute pipelines are made by default,
                                                      * without buffer robustness (AIRSWEEP_ROBUST_COMPUTE=1: with it) */
@@ -416,7 +419,28 @@ main(int argc, char **argv)
                if (res.nir)
                   free_nir(res.nir);
                const bool render = l > 0;
-               if ((st && res.descriptor_wanted) || (!st && render && getenv("AIRSWEEP_KEPT_ALL"))) {
+               /* round 12: kept buffers the frontend decided itself, against the translator's module as the plugin lowers
+                * it: "KSELF<TAB>file<TAB>function<TAB>stage<TAB>frontend's<TAB>translator's (mask, then each kept one's
+                * elem bits, guarded)<TAB>SAME|DIFFERENT|ERR:why" */
+               if (!st && (res.resource_flags & NVMTL_AIR_NIR_RES_KEPT_SELF)) {
+                  uint32_t kept = 0, guarded = 0;
+                  uint8_t bits[32] = { 0 };
+                  char ke[512] = { 0 };
+                  const int k = kept_buffers(data, lists[l][1], fc_idx, fc_sz, (const uint8_t *const *)fc_pay, fcs ? nfc : 0,
+                                             &kept, bits, &guarded, ke, sizeof ke);
+                  bool same = !k && kept == res.descriptor_mask && !guarded;
+                  for (unsigned b = 0; same && b < 32; b++)
+                     same = !(kept >> b & 1) || bits[b] == 32;
+                  clean(name);
+                  clean(ke);
+                  printf("KSELF\t%s\t%s\t%s\t%#x\t%#x", path, name, lists[l][1], res.descriptor_mask, kept);
+                  for (unsigned b = 0; !k && b < 32; b++)
+                     if (kept >> b & 1)
+                        printf(" %u:%u", b, bits[b]);
+                  printf(" g%#x\t%s%s\n", guarded, k ? "ERR:" : same ? "SAME" : "DIFFERENT", k ? ke : "");
+               }
+               if ((st && res.descriptor_wanted) ||
+                   (!st && render && getenv("AIRSWEEP_KEPT_ALL") && !(res.resource_flags & NVMTL_AIR_NIR_RES_KEPT_SELF))) {
                   const uint32_t wanted = st ? res.descriptor_wanted : 0;
                   uint32_t kept = 0, guarded = 0;
                   uint8_t bits[32];
