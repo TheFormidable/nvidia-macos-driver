@@ -2350,6 +2350,37 @@ tex_gdepth_check(struct run *r)
    return true;
 }
 
+/* tex_cube_write (round 11): every texel of six 8x8 faces written, half4 into RGBA16Float and uint4 into R32Uint, and the
+ * written cubes' sizes */
+static void
+tex_cubew_setup(struct run *r)
+{
+   tex_image(r, 0, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R16G16B16A16_SFLOAT, 8, 8, 8, 1, 6, 1, true);
+   tex_image(r, 1, VK_IMAGE_VIEW_TYPE_CUBE, VK_FORMAT_R32_UINT, 4, 8, 8, 1, 6, 1, true);
+   memset(r->tex[0].stage.map, 0xff, 8 * 8 * 6 * 8);
+   memset(r->tex[1].stage.map, 0xff, 8 * 8 * 6 * 4);
+   slot(r, 0, 16);
+}
+
+static bool
+tex_cubew_check(struct run *r)
+{
+   for (uint32_t f = 0; f < 6; f++)
+      for (uint32_t y = 0; y < 8; y++)
+         for (uint32_t x = 0; x < 8; x++) {
+            const uint16_t *h = tex_at(r, 0, 0, x, y, f);
+            const float w[4] = { (float)x, (float)y, (float)f, 0.5f };
+            for (unsigned c = 0; c < 4; c++)
+               if (h2f(h[c]) != w[c])
+                  return FAILF(r, "half cube face %u texel (%u,%u) lane %u = %g, expected %g", f, x, y, c, h2f(h[c]), w[c]);
+            const uint32_t u = *(const uint32_t *)tex_at(r, 1, 0, x, y, f);
+            if (u != x + 8 * y + 64 * f)
+               return FAILF(r, "uint cube face %u texel (%u,%u) = %u, expected %u", f, x, y, u, x + 8 * y + 64 * f);
+         }
+   const uint32_t want[3] = { 8, 8, 8 };
+   return check_u32(r, "sizes", S(r, 0), want, 3, 0);
+}
+
 /* tex_fence */
 static void
 tex_fence_setup(struct run *r)
@@ -3460,6 +3491,8 @@ static const struct test tests[] = {
      tex_depth_expect },
    { "tex_gather_depth", NULL, "tex_gather_depth", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, MUST_ROAD, NULL, tex_gdepth_setup,
      tex_gdepth_check },
+   { "tex_cube_write", NULL, "tex_cube_write", { 8, 8, 1 }, { 1, 1, 6 }, { 0 }, MUST_ROAD, NULL, tex_cubew_setup,
+     tex_cubew_check },
    { "tex_fence", NULL, "tex_fence", { 8, 8, 1 }, { 2, 2, 1 }, { 0 }, 0, NULL, tex_fence_setup, tex_fence_check },
    { "tex_pixel", NULL, "tex_pixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_pixel_setup, tex_pixel_check, tex_pixel_expect },
    { "tex_argpixel", NULL, "tex_argpixel", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, tex_argpixel_setup, tex_pixel_check },

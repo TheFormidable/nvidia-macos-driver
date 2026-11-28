@@ -4007,6 +4007,14 @@ air_bind_texture(struct air_tr *t, const struct air_arg *a, unsigned i)
     * refused */
    if (x->dim == GLSL_SAMPLER_DIM_MS && x->storage)
       unsupported(t, "the multisampled texture %s", a->type_name);
+   /* a write-only texturecube (round 11): the translator makes a cube it does not sample by direction a 2D-array image
+    * (discovery.rs: Dim2D arrayed) and writes it at (x, y, face) (fetch_coord.rs build_fetch_coord); so does this
+    * frontend, the face where an array's layer is. A read_write cube, a written cube array or depth texture stays
+    * refused */
+   if (x->storage && x->dim == GLSL_SAMPLER_DIM_CUBE && !x->array && x->access == ACCESS_NON_READABLE) {
+      x->dim = GLSL_SAMPLER_DIM_2D;
+      x->array = true;
+   }
    if (x->storage && (x->dim == GLSL_SAMPLER_DIM_CUBE || x->depth))
       unsupported(t, "a written %s (the translator writes it through a 2D-array view)", a->type_name);
    const struct glsl_type *type = x->storage ? glsl_image_type(x->dim, x->array, x->base)
@@ -5244,7 +5252,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (!x->storage)
          unsupported(t, "a write to a texture that is not access::write or read_write");
       LLVMValueRef coord = ARG(1), layer = NULL, texel, lodv;
-      if (x->array) {
+      if (x->array) {   /* a written texturecube's face where an array's layer is (texture, coord, face, texel, lod) */
          layer = ARG(2);
          texel = ARG(3);
          lodv = ARG(4);
