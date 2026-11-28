@@ -1838,18 +1838,32 @@ romis_setup(struct rrun *r)
 {
    rob_setup(r);
    /* the palette from 4 bytes into its buffer, as setFragmentBuffer:offset:4 binds it: below the 16-byte storage-buffer
-    * alignment it cannot be a descriptor, and both roads bind the dummy there (zeros) */
+    * alignment it cannot be a descriptor, and both roads bind the plugin's dummy buffer there */
    r->fbuf_off[0] = 4;
 }
 
+/* the dummy is the plugin's 256-byte buffer: an entry inside it reads what the dummy holds (zeros, unless an earlier draw
+ * wrote a dummy binding: the same on both roads, the attachments compared by final-runs.sh), one past it 0 */
 static bool
 romis_check(struct rrun *r)
 {
+   const uint32_t *idx = r->fbuf[3].contents;
+   const float *seen[16] = { NULL };
    const float zero[4] = { 0, 0, 0, 0 };
    for (unsigned py = 0; py < RH; py++)
-      for (unsigned px = 0; px < RW; px++)
-         if (!rwant(r, 0, px, py, zero, 4, 0))
-            return false;
+      for (unsigned px = 0; px < RW; px++) {
+         const uint32_t at = idx[py * RW + px] * 16u;   /* mod 2^32, as the descriptor access computes it */
+         if (at + 16u > 256u || at > 256u) {
+            if (!rwant(r, 0, px, py, zero, 4, 0))
+               return false;
+            continue;
+         }
+         const unsigned e = at / 16u;
+         if (!seen[e])
+            seen[e] = rcol(r, 0, px, py);
+         else if (!rwant(r, 0, px, py, seen[e], 4, 0))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (the dummy's entry %u read twice differently)", e), false;
+      }
    return true;
 }
 
@@ -2038,7 +2052,7 @@ static const struct rtest rtests[] = {
      "exact; buffers the translator keeps descriptors: a ulong palette past its end and straddling it (0), a float and a "
      "ulong buffer written, past their ends (dropped, the straddling ulong whole)", false, false, NULL, NULL, NULL, true },
    { "r_oob_misaligned", "r_oob", "ro_vs", "ro_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, romis_setup,
-     romis_check, "exact; r_oob's palette bound at offset 4: no descriptor there, the dummy (zeros) on both roads", false,
+     romis_check, "exact; r_oob's palette bound at offset 4: no descriptor there, the dummy on both roads (its 256 bytes, then 0)", false,
      false, NULL, NULL, NULL, true },
    { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
      rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
