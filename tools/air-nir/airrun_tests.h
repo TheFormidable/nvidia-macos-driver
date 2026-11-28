@@ -2445,7 +2445,8 @@ sbias_check(struct run *r)
    const float *got = S(r, 1);
    for (unsigned i = 0; i < 16; i++) {
       const unsigned x = i % 4, y = i / 4 % 4;
-      const float l0 = *(const float *)tex_at(r, 0, 0, x, y, 0), l1 = *(const float *)tex_at(r, 0, 1, x / 2, y / 2, 0);
+      /* the texels as the setup wrote them (not read back from the staging copy, which PLUGIN_RUN_CORRUPT also changes) */
+      const float l0 = (float)(y * 4 + x + 1) * 0.125f, l1 = (float)(16 + (y / 2) * 2 + x / 2 + 1) * 0.125f;
       if (got[i * 8] != l0)
          return FAILF(r, "bias sample, thread %u = %g, expected level 0's %g", i, got[i * 8], l0);
       if (got[i * 8 + 4] != l1)

@@ -1378,6 +1378,14 @@ is. The translator has no array-size query of a depth texture (`air.get_array_si
 one; the frontend took it and now refuses it. A `read_write` or sampled cube read (the translator's sample at the
 texel centre, at level 0 whatever the level operand), a written cube array and a written depth texture stay refused.
 
+**rgb565 packing and a bias outside a fragment function (after 3.0.28).** `air.pack.unorm.rgb565` of a float3 or half3
+(a resolve fragment of the cache packs with it) as `lower_pack_rgb565`: the vector widened to float, each component
+NClamp(c, 0, 1) (NaN to 0) times 31, 63, 31, RoundEven, to uint, at bits 0, 5 and 11, ORed, the 16-bit result; the
+unpack the translator has not, and it stays refused. A sample with a bias in a vertex or kernel function (Apple's GL
+vertex functions do it) was refused: the translator samples it at level 0 with the bias dropped
+(`push_image_sample_min_lod`, `push_image_sample_dref`), a minimum-LOD clamp then raising the level; so does the
+frontend.
+
 **Per-sample shading on the road's render path (fixed after 3.0.28).** `spirv_to_nir` marks a fragment module with a
 `SampleId` or a `Sample`-decorated input in its interface as shaded per sample, and NVK then runs it once per sample
 (`minSampleShading` 1). The frontend's NIR did not, so `[[sample_id]]` read 0 in one invocation per pixel and a
@@ -1401,11 +1409,12 @@ matching those inferences exactly is a port of that analysis, not done here.
 | r_kept_guarded | a kept word array (raw form) stored to as floats, uints and float2s: past 4 GiB dropped, past the end dropped, a straddling float2 split | exact |
 | tex_null, tex_null_tb | (after 3.0.28) the translator's null-texture placeholders, at an argument's own index and after a `texture_buffer` | exact |
 | simd_fill | (after 3.0.28) shuffle and fill with a cluster width, the SIMD-group width as the modulo, a half4 form, the quad-group builtins | exact |
-| r_tile | (after 3.0.28, `NVMTL_TILE_SHADING=1`) a tile function over 16x16 tiles after a draw into RGBA32Float and R32Float: red times setTileBytes' 2, the second attachment plus one; its compute pipelines on the road | exact |
+| r_tile | (after 3.0.28, `NVMTL_TILE_SHADING=1`) a tile function over 16x16 tiles after a draw into RGBA32Float, R32Float and BGRA8Unorm: red times setTileBytes' 2, the second attachment plus one, the third's red inverted; its compute pipelines on the road | exact |
 | mad_sat, mad_sat_v | (after 3.0.28) `madsat` on i32, signed and unsigned, edge operands; the v4i32 form refused | exact |
 | tex_gather_depth | (after 3.0.28) depth2d and depth2d_array gathers with and without offsets, clamped | exact |
 | tex_depth_ms, tex_depth_asize | (after 3.0.28, plugin only) depth2d_ms and depth2d_ms_array drawn per sample, read by sample and queried; a depth array's size query refused | exact |
 | tex_cube_write | (after 3.0.28) six faces of a half and a uint cube written, read back face by face, their sizes | exact |
+| pack565, sample_bias_k | (after 3.0.28) rgb565 packing of float3 and half3 (NaN, infinities, out of range, half-way values); a kernel's bias sample at level 0, and at level 1 with min_lod_clamp(1) | exact |
 
 `r_oob_misaligned`, `r_dummy_rw` and `tex_tbarray` fail on both roads with 3.0.27's plugin, NVK and translator
 (`r11/oldbuild.sh`); `r_kept_mixed` and `r_kept_guarded` take the SPIR-V road there (refused). The translator's
@@ -1452,27 +1461,34 @@ matching those inferences exactly is a port of that analysis, not done here.
   depth 4, `thread_index_in_quadgroup` 4, which now stop at their constants, `mad_sat` 2). WindowServer's set unchanged
   (179 of 211; its 13 implicit imageblocks are tile functions, whose rewrite now takes the road), its constant variants
   12 equal and 14 not reflected as before.
-- After 3.0.28 (`r11/final2-runs.sh`, the same set with the new tests; the four fault counters 0 before and after every
-  run; WindowServer logged no GPU error): with `NVMTL_AIR_NIR=1` 131 pass twice and once with the first run's caches
-  (121 on the road, the same six on the SPIR-V road as they must, four refused by both: `ib_refuse`, `tex_pixborder`,
-  `mad_sat_v`, `tex_depth_asize`), `grid2d_base`, `oob_kernel` and `r_tile` (it needs `NVMTL_TILE_SHADING=1`) skipped;
-  with `NVMTL_AIR_NIR=0` 130 pass twice, `r_handlechoice` skipped as well. `PLUGIN_RUN_CORRUPT=1`: every test that
-  dispatches or draws fails on both roads (the eight that pass are the refusals). Compute with `NVMTL_COMPUTE_ROBUST=1`
-  77 pass on each road; fetch off and by copies, the pixel-coordinate set without the hardware filter and the
-  argument-buffer tests 150 of 150 pass on both roads; the dumped attachments are equal on both roads (19 of 19, and
-  `r_tile`'s two with `NVMTL_TILE_SHADING=1`, where it passes on both); the `ws_marker` trio passes. With 3.0.27's plugin
-  and NVK (`TESTS=... r11/oldbuild.sh`) the road run fails `r_tile`, `mad_sat`, `tex_gather_depth`, `tex_depth_ms`,
-  `tex_cube_write` (the SPIR-V road taken) and `tex_depth_asize` (the road taken), and the SPIR-V run fails `r_tile`
-  (its attachments unchanged). `airrun` (NVK directly, without the plugin): 11 pass, 50 refused, 0 fail; its request
-  carries neither the plugin's unchecked-compute flag nor descriptor buffers, so since round 9 the frontend refuses
-  there every kernel that indexes a buffer with a loaded value (`plugin_run` is the harness that runs them).
+- After 3.0.28 (`r11/final3-runs.sh`, the same set with the new tests, on the last build; the four fault counters 0
+  before and after every run; WindowServer logged no GPU error): with `NVMTL_AIR_NIR=1` 133 pass twice and once with
+  the first run's caches (123 on the road, the same six on the SPIR-V road as they must, four refused by both:
+  `ib_refuse`, `tex_pixborder`, `mad_sat_v`, `tex_depth_asize`), `grid2d_base`, `oob_kernel` and `r_tile` (it needs
+  `NVMTL_TILE_SHADING=1`) skipped; with `NVMTL_AIR_NIR=0` 132 pass twice, `r_handlechoice` skipped as well.
+  `PLUGIN_RUN_CORRUPT=1`: every test that dispatches or draws fails on both roads, the eight refusals pass
+  (`sample_bias_k` passed there at first: its check read the expected texels from the staging copy, which the
+  corruption changes too; it now computes them, and fails corrupted on both roads). Compute with
+  `NVMTL_COMPUTE_ROBUST=1` 79 pass on each road; fetch off and by copies, the pixel-coordinate set without the hardware
+  filter and the argument-buffer tests 150 of 150 pass on both roads; the dumped attachments are equal on both roads (19
+  of 19, and `r_tile`'s three with `NVMTL_TILE_SHADING=1`, where it passes on both); the `ws_marker` trio passes. With
+  3.0.27's plugin and NVK (`TESTS=... r11/oldbuild.sh`) the road run fails `r_tile`, `mad_sat`, `tex_gather_depth`,
+  `tex_depth_ms`, `tex_cube_write`, `pack565`, `sample_bias_k` (the SPIR-V road taken) and `tex_depth_asize` (the road
+  taken), and the SPIR-V run fails `r_tile` (its attachments unchanged). `airrun` (NVK directly, without the plugin): 11
+  pass, 52 refused, 0 fail; its request carries neither the plugin's unchecked-compute flag nor descriptor buffers, so
+  since round 9 the frontend refuses there every kernel that indexes a buffer with a loaded value (`plugin_run` is the
+  harness that runs them). The last cache sweep (`r11/sweeps4.sh`) was cut short when the Mac was shut down; the two
+  functions the rgb565 and bias changes reach were checked offline instead (the GL vertex `__main` equal, the resolve
+  fragment stopping at its constants).
   Host: `test_air_nir_plugin.py` (two new checks: the tile rewrite asks the road; the tile dispatch's attachments get
   twins; each fails without its change), `test_fence_wiring_plugin.py`, `test_no_category_shadowing.py` and the rest of
   the list above as before (`test_nvk_nak_switch_key.py` failing as at 941c6185). The translator is unchanged since
   3.0.28.
 - Left: explicit imageblocks (the translator's cell staging), multisampled tile functions (the translator's library
   path), sampled and `read_write` cube reads and written cube arrays, null `texture_buffer`s and run-time choices of
-  handles, raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a multiple of 4 (or
+  handles, a texture handle stored into a struct as an integer and read back in an inlined function (SceneKit's lighting
+  fragments, 7 in the cache: the translator resolves it to an argument's heap entry), kernels' `stage_in` (the
+  translator's rewrite from the pipeline's layout), raster order group ordering (no interlock in NVK), a kept buffer at an offset that is not a multiple of 4 (or
   of 8 for 64-bit elements).
 
 ## Phases

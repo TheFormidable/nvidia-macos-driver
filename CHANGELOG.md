@@ -16,9 +16,10 @@
 - On the road, as the translator makes them: `simd_shuffle_and_fill_down/up` with a cluster width, the quad-group
   builtins and `quadgroups_per_threadgroup`, the SIMD-group width call; `mad_sat` on 32-bit scalars; depth gathers
   (2D, 2D array); `depth2d_ms` and `depth2d_ms_array` reads and queries; write-only `texturecube`s (a 2D-array image
-  written at the face). The frontend now refuses what the translator refuses there (a vector `mad_sat`, a depth
+  written at the face); rgb565 packing; a sample with a bias in a vertex or kernel function (level 0, as the
+  translator). The frontend now refuses what the translator refuses there (a vector `mad_sat`, a depth
   texture's array-size query). Tests: `simd_fill`, `mad_sat`, `mad_sat_v`, `tex_gather_depth`, `tex_depth_ms`,
-  `tex_depth_asize`, `tex_cube_write`.
+  `tex_depth_asize`, `tex_cube_write`, `pack565`, `sample_bias_k`.
 - Still refused, with the reason: explicit imageblocks (the translator's cell staging), sampled and `read_write` cube
   reads, written cube arrays, a null `texture_buffer`, run-time choices of handles.
 
