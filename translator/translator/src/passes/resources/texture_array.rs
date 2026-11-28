@@ -1482,7 +1482,10 @@ pub(crate) fn split_storage_texture_arrays(ctx: &mut Ctx, entry_idx: usize) {
             replacements.insert((block_idx, inst_idx), Vec::new());
             continue;
         }
-        if !written || dims.0 == spirv::Dim::DimBuffer || !super::bindless_all_on() || !super::address_table_usable(ctx) {
+        // an element chosen at run time: through the heap at the slot the per-draw table holds for element
+        // min(index, N - 1), a written image's storage view, or a texture_buffer's texel view (uniform when it is read,
+        // storage when written: the plugin gives a bound texture buffer a heap slot with both)
+        if (!written && dims.0 != spirv::Dim::DimBuffer) || !super::bindless_all_on() || !super::address_table_usable(ctx) {
             kept.insert(var);
             continue;
         }
@@ -1558,7 +1561,11 @@ pub(crate) fn split_storage_texture_arrays(ctx: &mut Ctx, entry_idx: usize) {
         }
         let slot = ctx.module.fresh_id();
         out.push(Instruction::new(Op::BitwiseAnd, Some(uint_ty), Some(slot), vec![Operand::IdRef(word), Operand::IdRef(mask)]));
-        let heap = crate::passes::stage_input::bindless_storage_heap_var(ctx, elem_ty, dims, comp);
+        let heap = if written {
+            crate::passes::stage_input::bindless_storage_heap_var(ctx, elem_ty, dims, comp)
+        } else {
+            crate::passes::stage_input::bindless_heap_var(ctx, elem_ty, dims, comp)
+        };
         out.push(Instruction::new(Op::AccessChain, Some(result_ty), Some(result), vec![Operand::IdRef(heap), Operand::IdRef(slot)]));
         replacements.insert((block_idx, inst_idx), out);
     }

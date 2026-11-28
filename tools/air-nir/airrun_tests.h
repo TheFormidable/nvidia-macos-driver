@@ -2685,10 +2685,11 @@ pxw_check(struct run *r)
    return pxm_check_cases(r, cases);
 }
 
-/* tex_tbarray (metal/tex_tbarray.metal, PLUGIN_ONLY, round 10): texture_buffer arrays indexed at run time; textures 0-2
- * read (r32f, 64 texels), 4-5 written; slot 0 the index per thread. The frontend must refuse it (MUST_REFUSE): the
- * translator keeps each such array one array binding, which the plugin's layout holds with one descriptor, and the SPIR-V
- * road reads the elements wrongly (zeros: measured in round 10, before the test was marked so) */
+/* tex_tbarray (metal/tex_tbarray.metal, PLUGIN_ONLY, rounds 10 and 11): texture_buffer arrays indexed at run time;
+ * textures 0-2 read (r32f, 64 texels), 4-5 written; slot 0 the index per thread. Round 10's translator kept each such
+ * array one array binding, which the plugin's layout holds with one descriptor (zeros on the SPIR-V road, refused on the
+ * road); since round 11 both read and write the element through the heap's texel buffers at the slot the per-draw table
+ * holds for texture n + min(index, N - 1), and the road must take it (MUST_ROAD) */
 static void
 tba_setup(struct run *r)
 {
@@ -3202,7 +3203,7 @@ static const struct test tests[] = {
    { "tex_warrays", NULL, "tex_warrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, twa_setup, twa_check },
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
-   { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, tba_setup, tba_check },
+   { "tex_tbarray", NULL, "tex_tbarray", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, tba_setup, tba_check },
    { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },

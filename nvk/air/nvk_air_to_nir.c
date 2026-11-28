@@ -3966,14 +3966,21 @@ air_texarray_load(struct air_tr *t, struct air_val *ptr)
       v->res = x->elems[k];
       return v;
    }
-   if (x->proto.dim == GLSL_SAMPLER_DIM_BUF)
-      unsupported(t, "an element of an array of texture_buffers chosen at run time (the translator keeps such an array one "
-                  "array binding, which the plugin's bindings do not hold)");
    if (!(t->req->flags & NVMTL_AIR_NIR_HEAP))
       unsupported(t, "an element of an array of textures chosen at run time, without the bindless heap (NVMTL_AIR_NIR_HEAP)");
-   if (x->proto.storage && !(t->req->flags & NVMTL_AIR_NIR_ARGBUF))
-      unsupported(t, "an element of a written array of textures chosen at run time, without the heap's storage images "
-                  "(NVMTL_AIR_NIR_ARGBUF)");
+   if ((x->proto.storage || x->proto.dim == GLSL_SAMPLER_DIM_BUF) && !(t->req->flags & NVMTL_AIR_NIR_ARGBUF))
+      unsupported(t, "an element of %s chosen at run time, without the heap's storage images and texel buffers "
+                  "(NVMTL_AIR_NIR_ARGBUF)", x->proto.dim == GLSL_SAMPLER_DIM_BUF ? "an array of texture_buffers" :
+                  "a written array of textures");
+   if (x->proto.dim == GLSL_SAMPLER_DIM_BUF && !x->heap) {
+      /* round 11: a texture_buffer element through the heap's texel buffers at the slot the per-draw table holds for
+       * it (the plugin gives a bound texture buffer one), uniform when read and storage when written, as the
+       * translator's split_storage_texture_arrays now reads it */
+      x->heap = air_heap_var(t, x->proto.storage ? NVMTL_AIR_NIR_HEAP_STEXEL : NVMTL_AIR_NIR_HEAP_UTEXEL, GLSL_SAMPLER_DIM_BUF,
+                             false, x->proto.base, false);
+      if (x->proto.storage)
+         x->heap->data.access = x->proto.access;
+   }
    if (x->proto.storage && !x->heap) {
       /* a written element: the storage heap at the same slot, as the translator's split_storage_texture_arrays reads it */
       x->heap = air_heap_var(t, NVMTL_AIR_NIR_HEAP_STORAGE, x->proto.dim, x->proto.array, x->proto.base, false);

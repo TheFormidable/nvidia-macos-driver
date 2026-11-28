@@ -4332,6 +4332,30 @@ uint32_t nvmtl_bl_slot(void *view)
     { static unsigned said; if (said++ < 2) nvlog("vk: bindless-all - textures reach shaders as heap slots in the per-draw table (first slot %u)", s); }
     return s;
 }
+// A bound texture buffer's heap slot (nvmtl_vk_bindless_put_texel), one per buffer view as nvmtl_bl_slot keeps one per
+// image view, in the same map; dropped when the view is destroyed (nvmtl_vk_texel_view_destroy_now). 0: no slot.
+uint32_t nvmtl_bl_texel_slot(void *view, int storage)
+{
+    if (!view || !g_heapSet || !g_heap_storage_binding) return 0;
+    pthread_mutex_lock(&g_bl_lock);
+    if (!g_bl_key) { g_bl_key = (void **)calloc(NVMTL_BL_CAP, sizeof *g_bl_key); g_bl_val = (uint32_t *)calloc(NVMTL_BL_CAP, sizeof *g_bl_val);
+        if (!g_bl_key || !g_bl_val) { free(g_bl_key); free(g_bl_val); g_bl_key = NULL; g_bl_val = NULL; pthread_mutex_unlock(&g_bl_lock); return 0; } }
+    int at = nvmtl_bl_find_locked(view);
+    if (at >= 0) { uint32_t s = g_bl_val[at]; pthread_mutex_unlock(&g_bl_lock); return s; }
+    const int full = g_bl_n >= NVMTL_BL_CAP / 2;
+    pthread_mutex_unlock(&g_bl_lock);
+    if (full) { static int said; if (!said++) nvlog("vk: bindless-all map FULL - this texture buffer reads the texel dummy through the heap"); return 0; }
+    uint32_t s = nvmtl_vk_bindless_put_texel(view, storage);
+    if (!s) return 0;
+    pthread_mutex_lock(&g_bl_lock);
+    at = nvmtl_bl_find_locked(view);
+    if (at >= 0) { uint32_t won = g_bl_val[at]; pthread_mutex_unlock(&g_bl_lock); nvmtl_vk_bindless_drop(s); return won; }
+    uint32_t h = nvmtl_bl_hash(view); while (g_bl_key[h]) h = (h + 1) & (NVMTL_BL_CAP - 1);
+    g_bl_key[h] = view; g_bl_val[h] = s; g_bl_n++;
+    pthread_mutex_unlock(&g_bl_lock);
+    { static unsigned said; if (said++ < 2) nvlog("vk: bindless-all - texture buffers reach shaders as heap slots in the per-draw table too (first slot %u)", s); }
+    return s;
+}
 static void nvmtl_bl_forget(const void *view)
 {
     if (!view) return;
@@ -4817,7 +4841,7 @@ static int nvmtl_address_snapshot(nvk_cmdbuf *c, uint32_t which, VkDescriptorBuf
     for (unsigned i = 0; i < NVMTL_NBUF; ++i) addresses[NVMTL_NBUF + i] = self ? self + i * sizeof(uint64_t) : 0;
     for (unsigned i = 0; i < NVMTL_NTEX; ++i) {
         const nvmtl_slot *s = t ? &t->s[which][NVMTL_NBUF + i] : NULL;
-        addresses[2 * NVMTL_NBUF + i] = (s && s->kind == NVMTL_SLOT_TEX && s->h) ? (uint64_t)s->size : 0;
+        addresses[2 * NVMTL_NBUF + i] = (s && (s->kind == NVMTL_SLOT_TEX || s->kind == NVMTL_SLOT_TEXBUF) && s->h) ? (uint64_t)s->size : 0;
     }
     memcpy((uint8_t *)page->buffer.map + slot * NVMTL_TABLE_BYTES, addresses, sizeof addresses);
     *out = (VkDescriptorBufferInfo){ page->buffer.buf, slot * NVMTL_TABLE_BYTES, NVMTL_TABLE_BYTES };
@@ -11636,16 +11660,23 @@ void nvmtl_vk_texel_view_destroy(void *alias, void *view)
     }
     nvmtl_vk_texel_view_destroy_now(alias, view);
 }
+static void nvmtl_bl_forget(const void *view);
 static void nvmtl_vk_texel_view_destroy_now(void *alias, void *view)
 {
+    if (view) nvmtl_bl_forget(view);   /* its heap slot from a per-draw binding (nvmtl_bl_texel_slot), if it had one */
     if (view && pvkDestroyBufferView) pvkDestroyBufferView(g_dev, (VkBufferView)view, NULL);
     if (alias) pvkDestroyBuffer(g_dev, (VkBuffer)alias, NULL);
 }
 int nvmtl_vk_bind_texel_view(nvk_cmdbuf *c, uint32_t set, uint32_t index, void *view, int storage)
 {
     if (index >= NVMTL_NTEX) { nvlog("bind texel view: index %u is outside [0,%d)", index, NVMTL_NTEX); return -1; }
+    const nvmtl_slot *was = (c->table && set < 2) ? &((nvmtl_bindtable *)c->table)->s[set][NVMTL_NBUF + index] : NULL;
+    const int same = was && was->kind == NVMTL_SLOT_TEXBUF && was->h == view;
     int rc = nvmtl_bind_slot(c, set, NVMTL_NBUF + index, NVMTL_SLOT_TEXBUF, view, 0);
     if (index < NVMTL_NSTEX) nvmtl_bind_slot(c, set, NVMTL_STEX_BASE + index, storage && view ? NVMTL_SLOT_TEXBUF : NVMTL_SLOT_NONE, storage ? view : NULL, 0);
+    // round 11: its heap slot (the view at binding 3, and 4 when it can be written) in the per-draw table, where an
+    // element of an array of texture_buffers chosen at run time is read and written (both roads)
+    if (!rc && !same && c->table && set < 2) ((nvmtl_bindtable *)c->table)->s[set][NVMTL_NBUF + index].size = view ? nvmtl_bl_texel_slot(view, storage) : 0;
     return rc;
 }
 static void nvmtl_spirv_texel_mask(const void *p, size_t n, uint64_t out[4])

@@ -487,6 +487,76 @@ attributes #1 = { convergent nounwind memory(argmem: write) }
 }
 
 #[test]
+fn native_dynamic_texture_buffer_arrays_use_the_heap_texel_buffers() {
+    // round 11: an element of an array of texture_buffers chosen at run time was left in the array binding (32 + n with
+    // N elements, 480 + n when written), which the plugin's layout holds with one descriptor: every element but the
+    // first read zeros. Now it is read through the heap's uniform texel buffers (set 2, binding 3) and written through
+    // its storage texel buffers (binding 4), at the slot the per-draw table holds for texture n + min(index, N - 1).
+    let ll = r#"
+%"struct.metal::texture_buffer" = type { ptr addrspace(1) }
+
+define void @tbArrays(ptr readonly byval([3 x ptr addrspace(1)]) %rt, ptr readonly byval([2 x ptr addrspace(1)]) %wt, ptr addrspace(1) noundef readonly %sel, i32 noundef %i) local_unnamed_addr #0 {
+  %wi = zext i32 %i to i64
+  %sp = getelementptr inbounds i32, ptr addrspace(1) %sel, i64 %wi
+  %k = load i32, ptr addrspace(1) %sp, align 4
+  %r3 = urem i32 %k, 3
+  %rw = zext i32 %r3 to i64
+  %rf = getelementptr inbounds [3 x %"struct.metal::texture_buffer"], ptr %rt, i64 0, i64 %rw, i32 0
+  %r = load ptr addrspace(1), ptr %rf, align 8
+  %smp = tail call ptr addrspace(2) @air.get_read_sampler() #2
+  %v = tail call { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1) %r, ptr addrspace(2) %smp, i32 %i, i32 1) #2
+  %c = extractvalue { <4 x float>, i8 } %v, 0
+  %w1 = and i32 %k, 1
+  %ww = zext i32 %w1 to i64
+  %wf = getelementptr inbounds [2 x %"struct.metal::texture_buffer"], ptr %wt, i64 0, i64 %ww, i32 0
+  %w = load ptr addrspace(1), ptr %wf, align 8
+  tail call void @air.write_texture_buffer_1d.v4f32(ptr addrspace(1) %w, i32 %i, <4 x float> %c, i32 2) #1
+  ret void
+}
+
+declare ptr addrspace(2) @air.get_read_sampler() local_unnamed_addr #2
+declare { <4 x float>, i8 } @air.read_texture_buffer_1d.v4f32(ptr addrspace(1), ptr addrspace(2), i32, i32) local_unnamed_addr #2
+declare void @air.write_texture_buffer_1d.v4f32(ptr addrspace(1), i32, <4 x float>, i32) local_unnamed_addr #1
+
+attributes #0 = { convergent nounwind }
+attributes #1 = { convergent nounwind memory(argmem: write) }
+attributes #2 = { nounwind willreturn memory(argmem: read) }
+
+!air.kernel = !{!0}
+!0 = !{ptr @tbArrays, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.texture", !"air.location_index", i32 0, i32 3, !"air.read", !"air.arg_type_name", !"array<texture_buffer<float, read>, 3>", !"air.arg_name", !"tb"}
+!4 = !{i32 1, !"air.texture", !"air.location_index", i32 4, i32 2, !"air.write", !"air.arg_type_name", !"array<texture_buffer<float, write>, 2>", !"air.arg_name", !"wtb"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"sel"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint", !"air.arg_name", !"i"}
+"#;
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_native_dynamic_texture_buffer_arrays_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&tmp);
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("DescriptorSet 2"), "{asm}");
+    assert!(asm.contains("Binding 3\n"), "the read array's elements through the heap's uniform texel buffers: {asm}");
+    assert!(asm.contains("Binding 4\n"), "the written array's elements through the heap's storage texel buffers: {asm}");
+    assert!(!asm.contains("Binding 32\n"), "no array binding at texture 0 is left: {asm}");
+    assert!(!asm.contains("Binding 484\n"), "no array binding at written texture 4 is left: {asm}");
+    assert!(asm.contains("OpImageFetch") || asm.contains("OpImageRead"), "{asm}");
+    assert!(asm.contains("OpImageWrite"), "{asm}");
+    if std::process::Command::new("spirv-val")
+        .arg("--version")
+        .output()
+        .is_ok()
+    {
+        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    }
+
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
 fn native_byval_fixed_write_texture_array_uses_fixed_descriptor_elements() {
     let ll = r#"
 define void @writeFixedArray(ptr readonly byval([2 x ptr addrspace(1)]) %textures) local_unnamed_addr #0 {

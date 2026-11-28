@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-// An array of texture_buffers read and written at indices known only at run time (round 10): the translator keeps one
+// An array of texture_buffers read and written at indices known only at run time (rounds 10, 11): the translator kept one
 // array binding for each (32 + n with three elements, 480 + n with two), which the plugin's layout holds with one
-// descriptor each
+// descriptor each; since round 11 both roads reach the element through the heap's texel buffers
 #include <metal_stdlib>
 using namespace metal;
 kernel void tex_tbarray(array<texture_buffer<float>, 3> tb [[texture(0)]], array<texture_buffer<float, access::write>, 2> wtb [[texture(4)]],
