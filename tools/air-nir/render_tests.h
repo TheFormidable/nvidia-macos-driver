@@ -22,7 +22,7 @@ struct rrun {
    id<MTLBuffer> vbuf[RMAXBUF], fbuf[RMAXBUF];   /* vertex and fragment stage buffers, by index */
    id<MTLTexture> ftex[RMAXTEX];
    id<MTLBuffer> tstage[RMAXTEX];                 /* each fragment texture's texels, uploaded before the draw */
-   unsigned tw[RMAXTEX], th[RMAXTEX], tbpp[RMAXTEX];
+   unsigned tw[RMAXTEX], th[RMAXTEX], tbpp[RMAXTEX], tlevels[RMAXTEX];   /* tlevels: mip levels staged (0: one) */
    id<MTLSamplerState> fsamp[RMAXSAMP];
    /* argument buffers: the buffers, textures and samplers a test reaches only through one are made resident
     * (useResource:usage:stages:) and not bound */
@@ -1765,6 +1765,51 @@ rrog_check(struct rrun *r)
    return true;
 }
 
+/* ---- r_minlod (round 10): minimum-LOD clamps ---------------------------------------------------------------------- */
+
+static float rml_level(unsigned m) { return 0.125f * (float)(m + 1); }   /* every texel of level m of the 64x64 texture */
+
+static void
+rml_setup(struct rrun *r)
+{
+   setup_quad(r);
+   static const float k[3] = { 4.0f, 1.0f, 0.0f };   /* a clamp, a bias, a clamp of 0 */
+   r->fbuf[0] = rbuf(k, sizeof k);
+   MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float width:64 height:64 mipmapped:YES];
+   td.usage = MTLTextureUsageShaderRead;
+   td.storageMode = MTLStorageModePrivate;
+   r->ftex[0] = [dev newTextureWithDescriptor:td];
+   size_t n = 0;
+   for (unsigned m = 0; m < 7; m++)
+      n += (size_t)(64u >> m) * (64u >> m);
+   r->tstage[0] = rbuf(NULL, n * 4);
+   float *f = r->tstage[0].contents;
+   for (unsigned m = 0; m < 7; m++)
+      for (size_t q = 0; q < (size_t)(64u >> m) * (64u >> m); q++)
+         *f++ = rml_level(m);
+   r->tw[0] = r->th[0] = 64;
+   r->tbpp[0] = 4;
+   r->tlevels[0] = 7;
+   MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+   sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
+   sd.mipFilter = MTLSamplerMipFilterNearest;
+   sd.sAddressMode = sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
+   sd.normalizedCoordinates = YES;
+   r->fsamp[0] = [dev newSamplerStateWithDescriptor:sd];
+   [sd release];
+}
+
+static bool
+rml_check(struct rrun *r)
+{
+   const float want[4] = { rml_level(2), rml_level(4), rml_level(3), rml_level(0) };
+   for (unsigned py = 0; py < RH; py++)
+      for (unsigned px = 0; px < RW; px++)
+         if (!rwant(r, 0, px, py, want, 4, 1e-6f))
+            return false;
+   return true;
+}
+
 /* ---- r_dual (round 10): dual-source blending ---------------------------------------------------------------------- */
 
 static void
@@ -1901,6 +1946,9 @@ static const struct rtest rtests[] = {
    { "r_rog", "r_rog", "rrog_vs", "rrog_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 2, 0, NULL, NULL, rrog_setup, rrog_check,
      "1e-6; raster order groups on [[color(0)]], a written texture and a device buffer (WindowServer's inplace_copy): "
      "bound as without them, no interlock, on both roads", false, false, NULL, NULL, NULL, true, NULL },
+   { "r_minlod", "r_minlod", "rml_vs", "rml_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, rml_setup,
+     rml_check, "1e-6; min_lod_clamp with bias (constant and from a buffer), with gradients, and of 0, on a 7-level texture of one "
+     "value per level", false, false, NULL, NULL, NULL, true, NULL },
    { "r_dual", "r_dual", "rdual_vs", "rdual_fs", { F32 }, NOC, MTLPrimitiveTypeTriangle, 0, 6, 1, 0, NULL, NULL, setup_quad,
      rdual_check, "1e-6; [[color(0), index(1)]] blends attachment 0 with Source1Color and Source1Alpha", false, false,
      NULL, NULL, NULL, true, NULL, rdual_pdesc },

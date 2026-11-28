@@ -20,6 +20,8 @@
                                    * sampler's state): plugin_run.m runs it, airrun.c does not */
 #define ROBUST_ONLY   (1u << 4)   /* reads past a buffer's end: run only with compute pipelines bounds-checked
                                    * (NVMTL_COMPUTE_ROBUST=1), skipped otherwise (the read would fault) */
+#define MUST_ROAD     (1u << 5)   /* with the road on, its pipeline must be the road's (round 10: what the road newly
+                                   * takes; the SPIR-V road's pipeline is then a failure) */
 
 /* function-constant values a test's request carries (NVMTL_AIR_NIR_FC_VALUES) */
 struct fcval {
@@ -2683,6 +2685,88 @@ pxw_check(struct run *r)
    return pxm_check_cases(r, cases);
 }
 
+/* tex_bicubic (metal/tex_bicubic.metal, PLUGIN_ONLY, round 10): bicubic samples as the translator emulates them
+ * (images/sample.rs lower_pixel_bicubic_sample, catmull_rom_weights), the references step by step as it computes;
+ * tex_pixmodes's textures and pixel coordinates, the normalized ones in slot 2 (each pixel one over its axis' size) */
+static void
+bic_setup(struct run *r)
+{
+   pxm_setup(r);
+   const float *c = S(r, 0);
+   float *n = slot(r, 2, 64 * 16);
+   for (unsigned i = 0; i < 64; i++) {
+      n[i * 4 + 0] = c[i * 4 + 0] / 5.0f;   /* texture 1's width (texture 0's 7 too: r[0] reads x / 5 * 7) */
+      n[i * 4 + 1] = c[i * 4 + 1] / 6.0f;
+      n[i * 4 + 2] = n[i * 4 + 3] = 0;
+   }
+}
+
+static void
+bic_weights(float u, float w[4])
+{
+   const float u2 = u * u, u3 = u2 * u;
+   w[0] = (-0.5f * u + u2) + -0.5f * u3;
+   w[1] = (1.0f - 2.5f * u2) + 1.5f * u3;
+   w[2] = (0.5f * u + 2.0f * u2) - 1.5f * u3;
+   w[3] = -0.5f * u2 + 0.5f * u3;
+}
+
+static void
+bic_sample(struct run *r, unsigned k, unsigned m, unsigned dims, const float *c, bool normalized, const int *off,
+           unsigned mode, float o[4])
+{
+   int base[2];
+   float w[2][4];
+   const unsigned modes[3] = { mode, mode, mode };
+   for (unsigned i = 0; i < dims; i++) {
+      const uint32_t sz = pxm_dim(k, m, i);
+      const float ci = normalized ? c[i] * (float)sz : c[i];
+      const float f = pxm_finite(ci, sz, mode), biased = f - 0.5f, fl = floorf(biased);
+      base[i] = (int)fl + (off ? off[i] : 0);
+      bic_weights(biased - fl, w[i]);
+   }
+   float acc[4] = { 0, 0, 0, 0 };
+   for (unsigned tap = 0; tap < (dims == 1 ? 4u : 16u); tap++) {
+      const unsigned idx[2] = { tap % 4, (tap / 4) % 4 };
+      int ci[3] = { 0, 0, 0 };
+      for (unsigned i = 0; i < dims; i++)
+         ci[i] = base[i] + (int)idx[i] - 1;
+      float col[4];
+      pxm_fetch(r, k, m, dims, ci, modes, -1, col);
+      const float weight = dims == 1 ? w[0][idx[0]] : w[0][idx[0]] * w[1][idx[1]];
+      if (weight == 0.0f)
+         continue;
+      for (unsigned q = 0; q < 4; q++)
+         acc[q] += col[q] * weight;
+   }
+   memcpy(o, acc, sizeof acc);
+}
+
+static bool
+bic_check(struct run *r)
+{
+   static const struct { unsigned tex, level, mode; bool normalized; int off[2]; } cases[10] = {
+      { 0, 0, 1, true }, { 1, 0, 1, true }, { 1, 0, 2, true }, { 1, 0, 0, true }, { 1, 0, 3, true }, { 1, 1, 1, true },
+      { 1, 0, 1, true, { 1, -1 } }, { 1, 0, 1, false }, { 1, 0, 0, false, { -1, 1 } }, { 0, 0, 1, false },
+   };
+   const float *cs = S(r, 0), *ns = S(r, 2), *got = S(r, 1);
+   for (unsigned i = 0; i < 64; i++)
+      for (unsigned j = 0; j < 10; j++) {
+         const unsigned dims = cases[j].tex == 0 ? 1 : 2;
+         float c[2] = { cs[i * 4], cs[i * 4 + 1] };
+         if (cases[j].normalized) {
+            c[0] = ns[i * 4];
+            c[1] = ns[i * 4 + 1];
+         }
+         float want[4];
+         bic_sample(r, cases[j].tex, cases[j].level, dims, c, cases[j].normalized, cases[j].off[0] || cases[j].off[1] ?
+                    cases[j].off : NULL, cases[j].mode, want);
+         if (!check_f4(r, "bicubic sample", got + (i * 16 + j) * 4, want, 4, 5e-5f))
+            return snprintf(r->why + strlen(r->why), sizeof r->why - strlen(r->why), " (thread %u, sample %u, coord %g %g)", i, j,
+                            c[0], c[1]), false;
+      }
+   return true;
+}
 
 /* tex_argpixel: argument samplers bound with pixel coordinates (round 5: their state reaches the frontend) */
 static void
@@ -3082,6 +3166,7 @@ static const struct test tests[] = {
    { "tex_warrays", NULL, "tex_warrays", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, twa_setup, twa_check },
    { "tex_pixmodes", NULL, "tex_pixmodes", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxm_check },
    { "tex_pixwrap", NULL, "tex_pixwrap", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY, NULL, pxm_setup, pxw_check },
+   { "tex_bicubic", NULL, "tex_bicubic", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_ROAD, NULL, bic_setup, bic_check },
    { "tex_pixborder", NULL, "tex_pixborder", { 64, 1, 1 }, { 1, 1, 1 }, { 0 }, PLUGIN_ONLY | MUST_REFUSE, NULL, pxm_setup, pxm_check },
    { "tex_offset", NULL, "tex_offset", { 64, 1, 1 }, { 4, 1, 1 }, { 0 }, 0, NULL, tex_offset_setup, tex_offset_check },
    { "fc_texture", NULL, "fc_texture", { 8, 8, 1 }, { 1, 1, 1 }, { 0 }, 0, &fc_tex, fc_texture_setup, fc_texture_check,

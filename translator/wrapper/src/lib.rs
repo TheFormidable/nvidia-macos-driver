@@ -96,6 +96,8 @@ fn apply_tg(mut o: metal2vulkan::passes::TransformOptions) -> metal2vulkan::pass
     o.no_rasterization_rate_maps = CAPS.load(Ordering::Relaxed) & 4 != 0;
     // Bit 3: the plugin reserved heap slots 1..5 for typed dummies, so a null resource id may be redirected to them.
     o.typed_dummy_slots = CAPS.load(Ordering::Relaxed) & 8 != 0;
+    // Bit 4: the device applies a sample's minimum-LOD clamp (shaderResourceMinLod).
+    o.min_lod_clamp = CAPS.load(Ordering::Relaxed) & 16 != 0;
     for (index, length) in threadgroup_lengths() {
         match o.with_threadgroup_memory_length(index, length) {
             Ok(next) => o = next,

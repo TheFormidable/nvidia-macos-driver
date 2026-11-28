@@ -278,6 +278,7 @@ static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
     // and the typed dummies the translator is told of (nvmtl_translate_set_caps bit 3, NVMTLLibraryLoad.m)
     extern int nvmtl_typed_dummies_wanted(void);
     extern int nvmtl_vk_bindless_heap_bindings(void);
+    extern int nvmtl_vk_min_lod(void);
     return NVMTL_AIR_NIR_TEXT_IR | NVMTL_AIR_NIR_FC_VALUES | NVMTL_AIR_NIR_TG_DEFAULT
          | (nvmtl_table_ubo() ? 0 : NVMTL_AIR_NIR_TABLE_SSBO) | (g_compute_unchecked && !render ? NVMTL_AIR_NIR_UNCHECKED : 0)
          | (render ? NVMTL_AIR_NIR_VARYINGS : 0) | (render && nvmtl_air_nir_fetch_ok() ? NVMTL_AIR_NIR_COLOR_INPUTS : 0)
@@ -285,7 +286,8 @@ static uint32_t nvmtl_air_nir_flags(uint32_t extra, BOOL render)
          | (g_air_nir_v7 && nvmtl_vk_bindless_heap_bindings() == 5 ? NVMTL_AIR_NIR_ARGBUF : 0)
          | (g_air_nir_v7 && nvmtl_typed_dummies_wanted() ? NVMTL_AIR_NIR_TYPED_DUMMIES : 0)
          | (getenv("NVMTL_NO_PIXEL_HW_FILTER") ? NVMTL_AIR_NIR_NO_PIXEL_HW : 0)   // as the translator reads it
-         | (render && g_air_nir_v8 ? NVMTL_AIR_NIR_TESS : 0) | extra;   // version 8: a post-tessellation vertex function
+         | (render && g_air_nir_v8 ? NVMTL_AIR_NIR_TESS : 0)   // version 8: a post-tessellation vertex function
+         | (g_air_nir_v8 && nvmtl_vk_min_lod() ? NVMTL_AIR_NIR_MIN_LOD : 0) | extra;   // and the translator's bit 4
 }
 
 // The size the kernel is translated for: the translator's default (the module's SpecId defaults, as the SPIR-V road's

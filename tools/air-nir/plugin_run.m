@@ -550,6 +550,12 @@ run_test(const struct test *t)
       [ps release]; [fn release]; [lib release];
       return ok ? PASS : FAIL;
    }
+   if (ps && (t->flags & MUST_ROAD) && road != 1 && !(getenv("NVMTL_AIR_NIR") && !strcmp(getenv("NVMTL_AIR_NIR"), "0"))) {
+      printf("%-16s FAIL     took the SPIR-V road, which it must not with the road on (not dispatched)\n", name);
+      fprintf(tsv, "%s\t%s\tFAIL\t%.3f\t%.3f\t%.3f\t\t\t0\ttook the SPIR-V road\n", name, road_name, lib_ms, fn_ms, ps_ms);
+      [ps release]; [fn release]; [lib release];
+      return FAIL;
+   }
    if (!ps) {
       printf("%-16s FAIL     no pipeline: %s\n", name, e.localizedDescription.UTF8String ?: (fn ? "?" : "no function"));
       fprintf(tsv, "%s\tnone\tFAIL\t%.3f\t%.3f\t%.3f\t\t\t0\tno pipeline\n", name, lib_ms, fn_ms, ps_ms);
@@ -1049,11 +1055,17 @@ run_render_test(const struct rtest *t)
       up |= r.tstage[i] != nil;
    if (up) {
       id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
-      for (unsigned i = 0; i < RMAXTEX; i++)
-         if (r.tstage[i])
-            [be copyFromBuffer:r.tstage[i] sourceOffset:0 sourceBytesPerRow:(NSUInteger)r.tw[i] * r.tbpp[i]
-               sourceBytesPerImage:(NSUInteger)r.tw[i] * r.th[i] * r.tbpp[i] sourceSize:MTLSizeMake(r.tw[i], r.th[i], 1)
-                         toTexture:r.ftex[i] destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+      for (unsigned i = 0; i < RMAXTEX; i++) {
+         /* every level a setup staged (tlevels, one after the other in tstage) */
+         size_t off = 0;
+         for (unsigned m = 0; r.tstage[i] && m < (r.tlevels[i] ? r.tlevels[i] : 1u); m++) {
+            const unsigned w = r.tw[i] >> m ? r.tw[i] >> m : 1, h = r.th[i] >> m ? r.th[i] >> m : 1;
+            [be copyFromBuffer:r.tstage[i] sourceOffset:off sourceBytesPerRow:(NSUInteger)w * r.tbpp[i]
+               sourceBytesPerImage:(NSUInteger)w * h * r.tbpp[i] sourceSize:MTLSizeMake(w, h, 1)
+                         toTexture:r.ftex[i] destinationSlice:0 destinationLevel:m destinationOrigin:MTLOriginMake(0, 0, 0)];
+            off += (size_t)w * h * r.tbpp[i];
+         }
+      }
       [be endEncoding];
    }
    rencode(cb, t, &r, ps, ds, col, depth, 1);

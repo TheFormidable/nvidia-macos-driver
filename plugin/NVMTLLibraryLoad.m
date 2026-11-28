@@ -159,6 +159,9 @@ static int nvmtl_xlate_ready(void) {
         // SPIR-V never shares a cache entry with the other mode.
         { extern int nvmtl_typed_dummies_wanted(void);
           if (h && strcmp(gXlateTag, "untagged") && nvmtl_typed_dummies_wanted()) strlcat(gXlateTag, "-td1", sizeof gXlateTag); }
+        // So does a device that applies a minimum-LOD clamp (the translator's capability bit 4, set below)
+        { extern int nvmtl_vk_min_lod(void);
+          if (h && strcmp(gXlateTag, "untagged") && nvmtl_vk_min_lod()) strlcat(gXlateTag, "-ml1", sizeof gXlateTag); }
         // So does the translator's way back from the whole-object views of pull request 524 of the original project,
         // NVMTL_WHOLE_VIEWS=0: without its mark, a module cached with the views on would still be served after they
         // were turned off in the settings file.
@@ -208,8 +211,9 @@ static int nvmtl_xlate_ready(void) {
         void (*setcaps)(uint32_t) = (void (*)(uint32_t))dlsym(h, "nvmtl_translate_set_caps");
         // Bits 0/1: formatless storage images. Bit 2: this plugin has no rasterization rate maps.
         // Bit 3: heap slots 1..5 are reserved for typed dummies (nvmtl_vk.c), a null resource id may be redirected to them.
-        { extern int nvmtl_typed_dummies_wanted(void);
-          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u)); }
+        // Bit 4: the device applies a sample's minimum-LOD clamp (shaderResourceMinLod).
+        { extern int nvmtl_typed_dummies_wanted(void); extern int nvmtl_vk_min_lod(void);
+          if (setcaps) setcaps(3u | 4u | (nvmtl_typed_dummies_wanted() ? 8u : 0u) | (nvmtl_vk_min_lod() ? 16u : 0u)); }
         if (!setcaps) nvlog("translate: no nvmtl_translate_set_caps in this translator — written textures stay R32f-declared (one channel)");
         if (!xlate) { nvlog("translate: no nvmtl_translate symbol"); return; }
         nvlog("translate: in-process AIR->SPIR-V library loaded");

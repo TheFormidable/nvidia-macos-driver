@@ -484,6 +484,7 @@ static int g_indep;
 static int g_a2one;
 static int g_depth_bounds;   /* the depthBounds feature: Metal's setDepthTestMinBound:maxBound: */
 static int g_dual;
+static int g_min_lod;   // shaderResourceMinLod: a sample's minimum-LOD clamp is applied (both roads)
 static int g_cap_f32_filter, g_cap_f32_msaa, g_cap_pull;   // MTLDevice capability answers decided from the bits queried at device creation (nvmtl_caps_query.h)
 static int g_wide;
 static PFN_vkCmdSetLineWidth pvkCmdSetLineWidth;
@@ -1575,6 +1576,8 @@ static int nvmtl_vk_initialize(void)
     }
     nvlog("vk: depthBounds %s", g_depth_bounds ? "AVAILABLE" : "ABSENT - setDepthTestMinBound:maxBound: is refused");
     enabled.dualSrcBlend = supported.dualSrcBlend; g_dual = supported.dualSrcBlend == VK_TRUE;
+    enabled.shaderResourceMinLod = supported.shaderResourceMinLod; g_min_lod = supported.shaderResourceMinLod == VK_TRUE;
+    nvlog("vk: shaderResourceMinLod %s", g_min_lod ? "AVAILABLE (a sample's min_lod_clamp is applied)" : "ABSENT - a min_lod_clamp of a sample without gradients is not applied");
     enabled.sampleRateShading = supported.sampleRateShading;
     {   // what the MTLDevice capability queries answer: the format features, sample counts and feature bits of this device
         PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");
@@ -3471,6 +3474,8 @@ _Static_assert(NVMTL_STEX_BINDING_NUMBER == 480 && NVMTL_NSTEX == 128, "nvmtl_sp
 
 #define NVMTL_MAX_SETS 4096
 int nvmtl_vk_dual_src(void) { return g_dual; }
+// whether the device applies a minimum-LOD clamp (the translator's capability bit 4, NVMTL_AIR_NIR_MIN_LOD)
+int nvmtl_vk_min_lod(void) { return nvmtl_vk_init() == 0 && g_min_lod; }
 int nvmtl_spirv_has_index1(const void *p, size_t n)
 {
     const uint32_t *w = (const uint32_t *)p; size_t nw = n / 4;

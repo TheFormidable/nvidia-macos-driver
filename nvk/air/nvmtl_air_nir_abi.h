@@ -143,6 +143,12 @@
                                                  * Location after every other (result.tess_*: what the plugin's
                                                  * tessellation control stage writes). Without it such a function is
                                                  * refused, as before. */
+#define NVMTL_AIR_NIR_MIN_LOD       (1u << 18)  /* the device applies a minimum-LOD clamp (shaderResourceMinLod, the
+                                                 * translator's capability bit 4): a sample's min_lod_clamp is applied
+                                                 * as the translator applies it, the MinLod of an implicit level and an
+                                                 * explicit level raised to it; without it, a clamp on a sample without
+                                                 * gradients is not applied (the translator's without its bit 4). A
+                                                 * gradient sample's clamp is always applied (MinLod). */
 
 /* result.stage */
 #define NVMTL_AIR_NIR_STAGE_KERNEL   0u

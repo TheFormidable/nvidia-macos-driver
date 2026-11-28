@@ -4318,7 +4318,7 @@ air_tex_type(const struct air_texture *x)
 }
 
 struct air_tex_srcs {
-   nir_def *coord, *lod, *bias, *comparator, *ddx, *ddy, *offset, *ms_index;
+   nir_def *coord, *lod, *bias, *comparator, *ddx, *ddy, *offset, *ms_index, *min_lod;
    nir_deref_instr *texture, *sampler;
    bool sampler_heap;            /* the sampler is the heap's (non-uniform, as the translator's heap accesses) */
 };
@@ -4348,6 +4348,8 @@ air_build_tex(struct air_tr *t, nir_texop op, const struct air_texture *x, const
       srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_offset, in->offset);
    if (in->ms_index)
       srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_ms_index, in->ms_index);
+   if (in->min_lod)
+      srcs[n++] = nir_tex_src_for_ssa(nir_tex_src_min_lod, in->min_lod);
    nir_tex_instr *tex = nir_tex_instr_create(b->shader, n);
    tex->op = op;
    tex->sampler_dim = x->dim;
@@ -4606,6 +4608,59 @@ air_pixel_fetch(struct air_tr *t, const struct air_texture *x, nir_deref_instr *
    return color;
 }
 
+/* sample.rs lower_pixel_bicubic_sample (round 10): the sixteen texels (four in 1D) around coord - 0.5, each weighted by
+ * Catmull-Rom's weights of the fraction on each axis (catmull_rom_weights, the same operations in the same order) and
+ * addressed by the sampler's modes, zero outside where it clamps to zero, at the level given (an explicit one truncated,
+ * else 0); a normalized coordinate first scaled by the size at that level. A weight of 0 adds nothing (not 0 times the
+ * texel, which a NaN or an infinity in it would make NaN). */
+static struct air_val *
+air_bicubic_sample(struct air_tr *t, LLVMValueRef call, const struct air_texture *x, const struct air_sampler *s,
+                   nir_deref_instr *tex, nir_def *coord, nir_def *layer_u, unsigned spatial, nir_def *lod_u, nir_def *offset,
+                   nir_def *dyn_offset, bool normalized)
+{
+   nir_builder *b = &t->b;
+   struct air_tex_srcs q = { .texture = tex, .lod = lod_u };
+   nir_def *size = air_build_tex(t, nir_texop_txs, x, &q, -1);
+   nir_def *base[2], *w[2][4];
+   for (unsigned i = 0; i < spatial; i++) {
+      nir_def *sz = spatial == 1 && !layer_u ? size : nir_channel(b, size, i);
+      nir_def *c = spatial == 1 && coord->num_components == 1 ? coord : nir_channel(b, coord, i);
+      if (normalized)
+         c = nir_fmul(b, c, nir_u2f32(b, sz));
+      nir_def *f = air_pixel_finite(b, c, sz, air_pixel_mode(s, i));
+      nir_def *biased = nir_fsub(b, f, nir_imm_float(b, 0.5f));
+      nir_def *fl = nir_ffloor(b, biased);
+      base[i] = nir_f2i32(b, fl);
+      if (offset || dyn_offset)
+         base[i] = nir_iadd(b, base[i], nir_channel(b, offset ? offset : dyn_offset, i));
+      nir_def *u = nir_fsub(b, biased, fl), *u2 = nir_fmul(b, u, u), *u3 = nir_fmul(b, u2, u);
+      w[i][0] = nir_fadd(b, nir_fadd(b, nir_fmul_imm(b, u, -0.5), u2), nir_fmul_imm(b, u3, -0.5));
+      w[i][1] = nir_fadd(b, nir_fsub(b, nir_imm_float(b, 1.0f), nir_fmul_imm(b, u2, 2.5)), nir_fmul_imm(b, u3, 1.5));
+      w[i][2] = nir_fsub(b, nir_fadd(b, nir_fmul_imm(b, u, 0.5), nir_fmul_imm(b, u2, 2.0)), nir_fmul_imm(b, u3, 1.5));
+      w[i][3] = nir_fadd(b, nir_fmul_imm(b, u2, -0.5), nir_fmul_imm(b, u3, 0.5));
+   }
+   nir_def *acc = NULL;
+   const unsigned taps = spatial == 1 ? 4 : 16;
+   for (unsigned tap = 0; tap < taps; tap++) {
+      const unsigned idx[2] = { tap % 4, (tap / 4) % 4 };
+      nir_def *ci[2];
+      for (unsigned i = 0; i < spatial; i++)
+         ci[i] = nir_iadd_imm(b, base[i], (int)idx[i] - 1);
+      nir_def *in = NULL;
+      nir_def *fc = air_pixel_address(b, s, ci, spatial, size, layer_u, &in);
+      nir_def *color = air_pixel_fetch(t, x, tex, fc, lod_u, in);
+      if (!acc)
+         acc = nir_imm_zero(b, color->num_components, 32);
+      nir_def *weight = w[0][idx[0]];
+      if (spatial == 2)
+         weight = nir_fmul(b, weight, w[1][idx[1]]);
+      nir_def *weighted = nir_fmul(b, color, weight);
+      acc = nir_fadd(b, acc, nir_bcsel(b, nir_feq(b, weight, nir_imm_float(b, 0.0f)),
+                                       nir_imm_zero(b, color->num_components, 32), weighted));
+   }
+   return air_texel_result(t, call, acc);
+}
+
 /* A sample through a pixel-coordinate sampler whose state is known here (constexpr, or given by the request), as the
  * translator lowers it (images/sample.rs, sample_depth.rs, gather.rs, fetch_coord.rs): a linear 2D sample with
  * clamp_to_edge on both axes, no mip filter, level 0 (none outside a fragment function) and no offset through the
@@ -4684,10 +4739,12 @@ air_pixel_sample(struct air_tr *t, LLVMValueRef call, const char *name, const st
       *coordp = nir_fdiv(b, coord, nir_i2f32(b, nir_trim_vector(b, air_build_tex(t, nir_texop_txs, x, &q, -1), 2)));
       return false;
    }
-   if (bicubic && !linear)
-      unsupported(t, "a bicubic pixel-coordinate sample (the translator's sixteen-texel emulation is not ported)");
    /* the level an explicit one gives, truncated (sample_lod_to_fetch_lod); 0 for a bias or none */
    nir_def *lod_u = lod && !implicit ? nir_f2u32(b, lod) : nir_imm_int(b, 0);
+   if (bicubic && !linear) {
+      *out = air_bicubic_sample(t, call, x, s, tex, coord, layer_u, spatial, lod_u, offset, dyn_offset, false);
+      return true;
+   }
    struct air_tex_srcs q = { .texture = tex, .lod = lod_u };
    nir_def *size = air_build_tex(t, nir_texop_txs, x, &q, -1);
    if (!linear) {
@@ -4976,7 +5033,7 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          comparator = nir_f2f32(b, comparator);
    }
    bool grad = strstr(name, "_grad") != NULL;
-   nir_def *ddx = NULL, *ddy = NULL, *lod = NULL, *bias = NULL, *offset = NULL, *dyn_offset = NULL;
+   nir_def *ddx = NULL, *ddy = NULL, *lod = NULL, *bias = NULL, *offset = NULL, *dyn_offset = NULL, *min_lod = NULL;
    bool seen_offset = false, implicit = false;
    if (grad) {
       ddx = air_def(t, ARG(at));
@@ -4984,8 +5041,11 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       LLVMValueRef clamp = ARG(at + 2);
       if (!ddx || !ddy)
          unsupported(t, "%s without its gradients", name);
-      if (clamp && air_is_float_scalar(clamp) && !air_is_zero(clamp))
-         unsupported(t, "a gradient sample with a minimum LOD clamp");
+      /* a gradient sample's minimum-LOD clamp: the translator's MinLod operand (sample.rs sample_gradient_pair) */
+      if (clamp && air_is_float_scalar(clamp) && !air_is_zero(clamp)) {
+         min_lod = air_def(t, clamp);
+         min_lod = min_lod->bit_size == 32 ? min_lod : nir_f2f32(b, min_lod);
+      }
       at += 3;
    }
    for (unsigned i = at; i < nargs; i++) {
@@ -5022,9 +5082,11 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
             lod = air_def(t, v);
             lod = !level ? nir_imm_float(b, 0) : lod->bit_size == 32 ? lod : nir_f2f32(b, lod);
          }
-         i++;   /* the float after the level (a minimum LOD clamp) */
-         if (i < nargs && air_is_float_scalar(ARG(i)) && !air_is_zero(ARG(i)))
-            unsupported(t, "a sample with a minimum LOD clamp");
+         i++;   /* the float after the level: a minimum LOD clamp (sample_depth.rs sample_level_min_lod_clamp), taken
+                 * with the device's clamp as the translator takes it with its bit 4, not applied without it */
+         if (i < nargs && L.LLVMGetTypeKind(L.LLVMTypeOf(ARG(i))) == TY_FLOAT && !air_is_zero(ARG(i)) &&
+             (t->req->flags & NVMTL_AIR_NIR_MIN_LOD))
+            min_lod = air_def(t, ARG(i));
       }
    }
    nir_deref_instr *tex_deref = air_texture_deref(t, x);
@@ -5039,6 +5101,8 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
       if (s->is_static || s->given) {
          const uint64_t w = s->words[0];
          const bool border_black = ((w >> 56) & 3) == 0;
+         if (min_lod)
+            unsupported(t, "a minimum LOD clamp on an integer texture's nearest fetch (the translator's has no place for it)");
          if (x->dim != GLSL_SAMPLER_DIM_1D && x->dim != GLSL_SAMPLER_DIM_2D && x->dim != GLSL_SAMPLER_DIM_3D)
             unsupported(t, "a sample of an integer %s through a sampler known here (the translator fetches only 1D, 2D "
                         "and 3D ones)", x->type_name ? x->type_name : "texture");
@@ -5091,6 +5155,9 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
          return true;
       }
    }
+   if (min_lod && (gather || comparator || air_sampler_pixel(s)))
+      unsupported(t, "a minimum LOD clamp on a %s (the translator's lowering of it has no place for one)",
+                  gather ? "gather" : comparator ? "comparison" : "pixel-coordinate sample");
    if (air_sampler_pixel(s)) {
       /* a pixel-coordinate sampler whose state is known here: as the translator lowers it (air_pixel_sample) */
       int gcomp = -1;
@@ -5104,6 +5171,20 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
                            gather, gcomp, grad, comparator, out))
          return true;
       coord = pc;   /* the hardware filter at coord / size, through the plugin's normalized sampler */
+   }
+   if (x->base == GLSL_TYPE_FLOAT && !x->depth && !gather && !comparator && (s->is_static || s->given) &&
+       ((s->words[0] >> 9) & 3) == 2 && ((s->words[0] >> 11) & 3) == 2) {
+      /* a bicubic sampler of normalized coordinates whose state is known here (sample.rs: uses_bicubic_filter): the
+       * translator's emulation with the coordinate scaled by the size, only for 1D and 2D float textures */
+      if (x->dim != GLSL_SAMPLER_DIM_1D && x->dim != GLSL_SAMPLER_DIM_2D)
+         unsupported(t, "air.sample_texture bicubic filtering is supported only for 1D/2D float textures");
+      if (min_lod)
+         unsupported(t, "a minimum LOD clamp on a bicubic sample (the translator's emulation has no place for one)");
+      nir_def *layer_u = !x->array ? NULL : layer_i ? layer_i : nir_f2u32(b, nir_channel(b, coord, spatial));
+      nir_def *lod_u = lod && !implicit && !grad ? nir_f2u32(b, lod) : nir_imm_int(b, 0);
+      *out = air_bicubic_sample(t, call, x, s, tex_deref, nir_trim_vector(b, coord, spatial), layer_u, spatial, lod_u,
+                                offset, dyn_offset, true);
+      return true;
    }
    nir_def *size0 = NULL;
    if (dyn_offset) {
@@ -5129,10 +5210,23 @@ air_texture_call(struct air_tr *t, const char *name, LLVMValueRef call, unsigned
    }
    if (s->is_static && comparator && ((s->words[0] >> 16) & 0xf) == 0)
       unsupported(t, "a compare sample through a constexpr sampler without a compare function");
+   /* the level as the translator gives it (sample_depth.rs push_image_sample_min_lod): an integer texture at level 0
+    * in a fragment function too (force_lod0), its bias dropped */
+   if (implicit && x->base != GLSL_TYPE_FLOAT && !grad) {
+      implicit = false;
+      bias = NULL;
+      lod = nir_imm_float(b, 0);
+   }
+   /* a minimum LOD clamp without gradients (apply_sample_min_lod_clamp): an explicit level raised to it (GLSL FMax), an
+    * implicit one's MinLod; a gradient sample's always its MinLod */
+   if (min_lod && !grad && !implicit) {
+      lod = nir_fmax(b, lod ? lod : nir_imm_float(b, 0), min_lod);
+      min_lod = NULL;
+   }
    struct air_tex_srcs in = { .texture = tex_deref, .sampler = air_sampler_deref(t, s, comparator != NULL),
                               .coord = coord, .lod = grad || implicit ? NULL : lod ? lod : nir_imm_float(b, 0),
                               .bias = bias, .comparator = comparator, .ddx = ddx, .ddy = ddy, .offset = offset,
-                              .sampler_heap = s->heap_slot != NULL };
+                              .min_lod = min_lod, .sampler_heap = s->heap_slot != NULL };
    if (ddx && (ddx->num_components != spatial || ddy->num_components != spatial))
       unsupported(t, "gradients of %u components", ddx->num_components);
    if (ddx && ddx->bit_size != 32) {

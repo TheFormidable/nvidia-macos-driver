@@ -3644,6 +3644,32 @@ fn owned_sample_operation_error(
         ) if *mask == (spirv::ImageOperands::BIAS | spirv::ImageOperands::CONST_OFFSET) => {
             lod_valid(*bias) && offset_valid(*offset)
         }
+        // a minimum-LOD clamp of an implicit level (images/sample_depth.rs apply_sample_min_lod_clamp): MinLod last, after
+        // the bias and the offset it may come with
+        (
+            Op::ImageSampleImplicitLod,
+            Some([Operand::ImageOperands(spirv::ImageOperands::MIN_LOD), Operand::IdRef(min_lod)]),
+        ) => lod_valid(*min_lod),
+        (
+            Op::ImageSampleImplicitLod,
+            Some([Operand::ImageOperands(mask), Operand::IdRef(first), Operand::IdRef(min_lod)]),
+        ) if *mask == (spirv::ImageOperands::BIAS | spirv::ImageOperands::MIN_LOD) => {
+            lod_valid(*first) && lod_valid(*min_lod)
+        }
+        (
+            Op::ImageSampleImplicitLod,
+            Some([Operand::ImageOperands(mask), Operand::IdRef(offset), Operand::IdRef(min_lod)]),
+        ) if *mask == (spirv::ImageOperands::CONST_OFFSET | spirv::ImageOperands::MIN_LOD) => {
+            offset_valid(*offset) && lod_valid(*min_lod)
+        }
+        (
+            Op::ImageSampleImplicitLod,
+            Some([Operand::ImageOperands(mask), Operand::IdRef(bias), Operand::IdRef(offset), Operand::IdRef(min_lod)]),
+        ) if *mask
+            == (spirv::ImageOperands::BIAS | spirv::ImageOperands::CONST_OFFSET | spirv::ImageOperands::MIN_LOD) =>
+        {
+            lod_valid(*bias) && offset_valid(*offset) && lod_valid(*min_lod)
+        }
         (
             Op::ImageSampleExplicitLod,
             Some([Operand::ImageOperands(spirv::ImageOperands::LOD), Operand::IdRef(lod)]),
